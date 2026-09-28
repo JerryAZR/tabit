@@ -250,8 +250,13 @@ Current workspace layout:
   `core_tools` (the default toolset), `world_registry` +
   `mount_world` (the extension world's two halves), the gate hook
   (`PermissionGate`), `assemble`/`host_data` (the session builders
-  behind the host), `host_node` (the process's one net), and
-  `install_root`. tabit-session stays mechanism with no policy —
+  behind the host), `host_node` (the process's one net),
+  `install_root`, and `serve_json_stdio` — the frozen wire's stdio
+  serving as one never-returning call (the binary's `--json` arm,
+  and an embedder's child-role entry: dispatch it in your main and
+  the subagent self-spawn works for your binary too). EMBEDDING.md
+  is the embedder contract; the crate's two examples are its tiers,
+  compile-pinned. tabit-session stays mechanism with no policy —
   this crate is the policy's linkable home
 - `crates/tabit-core` — the backend binary (`tabit-core`): headless,
   no UI and no frontend references — frontends spawn it, never the

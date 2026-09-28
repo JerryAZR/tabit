@@ -11,7 +11,7 @@ use std::io::Write as _;
 
 use tabit_protocol::SessionCommand;
 use tabit_session::SessionEvent;
-use tabit_session::{ModelRegistry, Session, SessionHost, SessionHostWiring, SessionStore};
+use tabit_session::{ModelRegistry, SessionHost, SessionHostWiring, SessionStore};
 
 use crate::cli::Args;
 use tabit_app::extensions;
@@ -135,29 +135,6 @@ fn print_event(event: &SessionEvent) {
     }
 }
 
-/// The human startup banner (stderr — stdout is the answer channel in
-/// print mode and the protocol channel in JSON mode).
-pub(crate) fn print_banner(session: &Session) {
-    let stats = session.stats();
-    if stats.total_usage.total_tokens > 0 {
-        eprintln!(
-            "resuming {} ({} prior turns of context)",
-            session
-                .id()
-                .get(..8)
-                .map(str::to_string)
-                .unwrap_or_default(),
-            session.context().len()
-        );
-    } else {
-        let where_ = session
-            .path()
-            .map(|p| p.display().to_string())
-            .unwrap_or_else(|| "in memory".to_string());
-        eprintln!("session {where_} started");
-    }
-}
-
 /// What one print-mode session left behind, for the footer and exit code.
 struct PrintOutcome {
     failed: Option<String>,
@@ -205,7 +182,7 @@ pub(crate) fn print_mode(
         return Ok(0);
     };
 
-    print_banner(&session);
+    tabit_app::startup_banner(&session);
 
     // One stdin reader owns both duties (line-buffered stdin in print
     // mode: press Esc then Enter to abort; any other line answers the

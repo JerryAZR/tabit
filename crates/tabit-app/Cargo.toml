@@ -17,7 +17,7 @@ tabit-gate = { path = "../tabit-gate", version = "0.41.0" }
 tabit-protocol = { path = "../tabit-protocol", version = "0.41.0" }
 tabit-session = { path = "../tabit-session", version = "0.41.0" }
 tabit-tools = { path = "../tabit-tools", version = "0.41.0" }
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["rt", "macros"] }
 tokio-util = { version = "0.7", default-features = false }
 
 [dev-dependencies]

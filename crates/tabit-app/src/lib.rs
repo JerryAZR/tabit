@@ -33,6 +33,7 @@ pub mod assemble;
 pub mod extensions;
 pub mod gate;
 pub mod options;
+pub mod serve;
 
 pub use assemble::{
     ContinueMiss, Launchable, assemble, core_tools, extension_root, host_data, host_node,
@@ -40,3 +41,4 @@ pub use assemble::{
 };
 pub use gate::PermissionGate;
 pub use options::{AppOptions, parse_model};
+pub use serve::{serve_json_stdio, setup_guide, startup_banner};

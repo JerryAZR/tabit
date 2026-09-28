@@ -38,73 +38,11 @@ mod print;
 
 use std::sync::Arc;
 use tabit_config::{AuthConfig, TabitConfig};
-use tabit_session::{SessionHost, SessionHostWiring, SessionStore};
+use tabit_session::SessionStore;
 
 use crate::cli::{Mode, mode_of, parse_args};
-use crate::print::{list_sessions, print_banner, print_mode};
-use tabit_app::{
-    ContinueMiss, assemble, host_data, host_node, install_root, mount_world, world_registry,
-};
-
-/// The first-run setup guide: a fresh install has no config, which is
-/// normal — the failure message must teach, not scare.
-fn setup_guide(detail: &str) -> String {
-    let example = r#"create ~/.tabit/providers.toml (or point $TABIT_CONFIG at a file):
-
-    default_model = "lmstudio/your-model-id"   # optional; the first model is the fallback
-
-    [providers.lmstudio]
-    base_url = "http://127.0.0.1:1234/v1"
-    api = "openai-completions"
-    keyless = true
-
-    [[providers.lmstudio.models]]
-    id = "your-model-id"
-
-API keys (only if the endpoint needs one) go in ~/.tabit/auth.toml:
-
-    [lmstudio]
-    api_key = "..." "#;
-    format!("first-run setup needed: {detail}\n\n{example}\n")
-}
-
-/// JSON-mode setup failure — the config/auth file is the problem — so
-/// the failure carries the first-run guide (a fresh install has no
-/// providers.toml — the most common first run; the message must teach,
-/// not scare).
-fn json_setup_failure(detail: &str) -> Result<i32, String> {
-    json_reject(setup_guide(detail))
-}
-
-/// JSON-mode startup failure that is *not* a config problem (session
-/// unreadable, model unbuildable, cwd gone): fail with the plain
-/// reason — the setup guide would be advice for a problem the user
-/// does not have.
-fn json_startup_failure(detail: &str) -> Result<i32, String> {
-    json_reject(format!("could not start the session: {detail}"))
-}
-
-/// The report model's startup failure (owner ruling 2026-09-25): the
-/// child has reported (the spawner knows the version and that this
-/// process is alive), then the reason crosses as an unstamped `error`
-/// event — the same grammar every other backend-level failure uses —
-/// and the process exits nonzero. The reason also echoes on stderr
-/// (the human surface).
-fn json_reject(reason: String) -> Result<i32, String> {
-    let report = tabit_protocol::ServerControlFrame::Report {
-        protocol_version: tabit_protocol::PROTOCOL_VERSION,
-    };
-    println!("{}", tabit_protocol::to_wire_line(&report));
-    let event = tabit_protocol::EventFrame {
-        stream: None,
-        origin: None,
-        ttl: None,
-        event: tabit_session::SessionEvent::error_session(reason.clone()),
-    };
-    println!("{}", tabit_protocol::to_wire_line(&event));
-    eprintln!("{reason}");
-    Ok(1)
-}
+use crate::print::{list_sessions, print_mode};
+use tabit_app::{install_root, mount_world, serve_json_stdio, setup_guide, world_registry};
 
 fn run() -> Result<i32, String> {
     let args = parse_args()?;
@@ -180,104 +118,7 @@ fn run() -> Result<i32, String> {
             println!("uninstalled {name}");
             Ok(0)
         }
-        Mode::Json => {
-            // A fresh install has no providers.toml — perfectly
-            // normal, and the most common first run. Fail gracefully:
-            // reject the handshake with a setup guide instead of
-            // dying stderr-only (the owner's first-run ruling).
-            let (config, auth) = match (config, auth) {
-                (Ok(config), Ok(auth)) => (config, auth),
-                (Err(detail), _) | (_, Err(detail)) => return json_setup_failure(&detail),
-            };
-            // The extension world's data half (settings, scan,
-            // fragment merge, skills, registry) — shared with print
-            // mode; a settings failure is a plain startup failure.
-            let (registry, launchable) =
-                match world_registry(&args.options(), config, Arc::new(auth)) {
-                    Ok(world) => world,
-                    Err(detail) => return json_startup_failure(&detail),
-                };
-            let registry = Arc::new(registry);
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .map_err(|e| e.to_string())?;
-            // The extension host boots and every handshake resolves
-            // BEFORE the session assembly: tools exist at session
-            // build (the byte-stability law), and the cost is the
-            // slowest single extension — the handshakes run
-            // concurrently inside their supervision tasks, so a
-            // broken package costs one boot, loudly, and never
-            // delays a healthy sibling.
-            // The lanes mount on the process's node — the same net
-            // the session host and the subprocess bridge ride: every
-            // extension's grammar lines enter through the node's
-            // intake from its lane, and its watch list subscribes the
-            // lane's channel. No bridges, no drains — the grammar's
-            // other end (the session host) reads the same tables.
-            // The boot is structure, then data. Structure first: the
-            // frontend stream (every frame any participant emits from
-            // its first line crosses it), then the session host's
-            // command surface — the by-type lifecycle handlers, live
-            // before any child can speak. Participants are peers, not
-            // subordinates (owner ruling 2026-09): any node may send
-            // anything a frontend can from its handshake onward (a
-            // co-frontend's `new_session`, a child's steer), so the
-            // net must be prepared before the first child boots —
-            // lifecycle arrivals before the data exists park, and
-            // serve behind the boot's announcements. Data next: the
-            // extensions gather; the session builds last.
-            let frontend = tabit_session::mount_frontend(&host_node());
-            // The mount spawns (the death watchers, the wind-down), so
-            // it runs on the runtime — the whole boot sits inside it.
-            let store = SessionStore::project_default();
-            let structure = runtime.block_on(async {
-                SessionHost::mount(
-                    SessionHostWiring {
-                        node: host_node(),
-                        store: store.clone(),
-                        boot_parent: args.parent.clone(),
-                        boot_parent_call: args.parent_call.clone(),
-                    },
-                    frontend,
-                )
-            });
-            let mounted = mount_world(launchable, &runtime);
-            // Assemble failures (session unreadable, model unbuildable)
-            // reject the handshake with the plain reason — not the
-            // config setup guide, which would be advice for a problem
-            // the user does not have. A `--continue` that finds no
-            // sessions is absorbed into a fresh start (the pinned
-            // startup contract; `session_opened`'s `resumed: false`
-            // says so).
-            let (session, startup_notes) = match assemble(
-                &args.options(),
-                &registry,
-                &store,
-                ContinueMiss::StartFresh,
-                Some(mounted.clone()),
-            ) {
-                Ok(assembled) => assembled,
-                Err(detail) => return json_startup_failure(&detail),
-            };
-            print_banner(&session);
-            let data = host_data(&args.options(), &registry, &store, &mounted);
-            Ok(runtime.block_on(async {
-                let handle = structure.attach(session, startup_notes, data);
-                let code = tabit_session::edge::serve(
-                    handle,
-                    std::io::BufReader::new(std::io::stdin()),
-                    std::io::stdout(),
-                )
-                .await;
-                // The edge's contract is the process boundary: exit
-                // here, never through the runtime drop (the reader
-                // thread parks in an uninterruptible read on the
-                // stream-end path, and a runtime drop would wait on it
-                // forever).
-                std::process::exit(code);
-            }))
-        }
+        Mode::Json => serve_json_stdio(&args.options(), config, auth),
         Mode::Print => {
             let config = config.map_err(|e| setup_guide(&e))?;
             let auth = auth.map_err(|e| e.to_string())?;
