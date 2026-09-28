@@ -133,9 +133,11 @@ fn print_mode_answers_one_prompt_end_to_end() {
     let dir = config.parent().expect("config dir").to_path_buf();
     let (code, stdout, stderr) = run_in(&dir, &config, &["-p", "say the thing"]);
     assert_eq!(code, Some(0), "stdout: {stdout}\nstderr: {stderr}");
-    assert!(
-        stdout.contains("the print answer"),
-        "the answer rides stdout: {stdout}"
+    assert_eq!(
+        stdout,
+        "the print answer
+",
+        "stdout is exactly the response, one copy at the terminal: {stdout:?}"
     );
     assert!(
         stderr.contains("tokens 3 in / 2 out"),
@@ -318,8 +320,8 @@ fn a_promptless_rewind_drops_the_last_user_message_then_branches() {
     let (code, stdout, stderr) = run_in(&dir, &config, &["--continue", "--rewind", "1"]);
     assert_eq!(code, Some(0), "stdout: {stdout}\nstderr: {stderr}");
     assert!(
-        stdout.contains("[rewound: dropped 1 user message(s)"),
-        "the rewind reports what it dropped: {stdout}"
+        stderr.contains("[rewound: dropped 1 user message(s)"),
+        "the rewind reports what it dropped (stderr — stdout is the answer channel): {stderr}"
     );
     assert!(
         !stdout.contains("branch answer"),

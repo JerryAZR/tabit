@@ -1,10 +1,11 @@
-//! Print mode — the smallest frontend: one prompt in, events
-//! rendered as they arrive, interaction cards answered from stdin
-//! (Esc aborts the running turn). It rides the same session host as
-//! JSON mode — the one path law — and stays core-only (the extension
-//! host is JSON-mode machinery; a print-mode consumer of extensions
-//! is a later ruling). stdout is the answer channel; cards and
-//! diagnostics render on stderr.
+//! Print mode — the smallest frontend: one prompt in, the agent's
+//! response printed once at the run's terminal, interaction cards
+//! answered from stdin (Esc aborts the running turn). It rides the
+//! same session host and extension world as JSON mode — the one path
+//! law (the modes differ only at this I/O arm: no wire frames in,
+//! rendered text out). stdout carries exactly the response text, one
+//! copy at the terminal — the deltas are buffered, never streamed;
+//! every other rendering (markers, cards, diagnostics) is stderr.
 
 use std::io::Write as _;
 
@@ -35,8 +36,11 @@ pub(crate) fn list_sessions(store: &SessionStore) -> Result<(), String> {
 }
 
 fn print_event(event: &SessionEvent) {
-    let stdout = std::io::stdout();
-    let mut out = stdout.lock();
+    // The diagnostics renderer: everything here is stderr — stdout
+    // is the answer channel, and the answer prints once, at the
+    // terminal, from the run loop's buffer.
+    let stderr = std::io::stderr();
+    let mut out = stderr.lock();
     match event {
         SessionEvent::UserMessage { .. } => {}
         // The submit-time ack for messages that wait; print mode cannot
@@ -60,13 +64,13 @@ fn print_event(event: &SessionEvent) {
 [aborted]"
             );
         }
-        SessionEvent::TextDelta { text, .. } => {
-            let _ = out.write_all(text.as_bytes());
-            let _ = out.flush();
-        }
+        // TextDelta never reaches this renderer: the run loop
+        // buffers the response text and prints it once at the
+        // terminal. Reasoning is diagnostics too (never the answer).
+        SessionEvent::TextDelta { .. } => {}
         SessionEvent::ReasoningDelta { reasoning, .. } => {
-            // Reasoning goes to stderr so stdout stays the answer channel.
-            let _ = std::io::stderr().write_all(reasoning.as_bytes());
+            let _ = out.write_all(reasoning.as_bytes());
+            let _ = out.flush();
         }
         SessionEvent::ToolCall {
             name, arguments, ..
@@ -92,9 +96,7 @@ fn print_event(event: &SessionEvent) {
         SessionEvent::RunFinished { durable: false, .. } => {
             let _ = writeln!(out, "[output pending on disk — persist degraded]");
         }
-        SessionEvent::RunFinished { .. } => {
-            let _ = writeln!(out);
-        }
+        SessionEvent::RunFinished { .. } => {}
         // Not a printable stream event: run() turns it into the process
         // error (stderr, exit 1) once the stream has ended.
         SessionEvent::RunFailed { .. } => {}
@@ -192,7 +194,7 @@ pub(crate) fn print_mode(
     )?;
     if let Some(turns) = args.rewind {
         let rewind = session.rewind(turns).map_err(|e| e.to_string())?;
-        println!(
+        eprintln!(
             "[rewound: dropped {} user message(s) — the next prompt branches from before them]",
             rewind.dropped
         );
@@ -266,10 +268,17 @@ pub(crate) fn print_mode(
                 session_path: handle.info().session_path.clone(),
                 stats: None,
             };
+            // The response text, one copy: the deltas accumulate here
+            // and stdout sees it exactly once, at the run's terminal
+            // (the owner's print-mode law — stdout is the answer).
+            let mut answer = String::new();
             handle.message(&boot, prompt);
             handle.close_commands();
             while let Some(frame) = handle.next_event().await {
                 match &frame.event {
+                    SessionEvent::TextDelta { text, .. } => {
+                        answer.push_str(text);
+                    }
                     SessionEvent::CompletionCall { usage, .. } => {
                         outcome.input_tokens += usage.input_tokens;
                         outcome.output_tokens += usage.output_tokens;
@@ -352,6 +361,16 @@ pub(crate) fn print_mode(
                     SessionEvent::RunFinished { .. } | SessionEvent::RunAborted { .. } => {
                         // A terminal closes every card (FRONTEND.md §8).
                         lock_armed(&armed).clear();
+                        // The answer channel's one write: the buffered
+                        // response (an abort prints its partial text —
+                        // that is what was said; a failure's report is
+                        // the process error, not stdout).
+                        if !answer.is_empty() {
+                            let stdout = std::io::stdout();
+                            let mut out = stdout.lock();
+                            let _ = writeln!(out, "{answer}");
+                            let _ = out.flush();
+                        }
                     }
                     _ => {}
                 }

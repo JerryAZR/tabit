@@ -71,7 +71,8 @@ usage: tabit-core -p <PROMPT>            print mode: one prompt, one run
                                          (a deny list — removed from the
                                          child's core AND extension
                                          tools), --ephemeral (no
-                                         file) — the subagent bridge's flags;
+                                         file) — the subagent bridge's
+                                         flags, all also valid with -p;
                                          --preamble <text> replaces the
                                          default preamble (identity/body);
                                          context appends as usual; also
@@ -220,6 +221,9 @@ fn validate_mode(args: &Args) -> Result<Mode, String> {
             "--tools",
             "--without",
             "--extensions",
+            "--parent",
+            "--parent-call",
+            "--ephemeral",
         ],
         Mode::Install => &["install <source>"],
         Mode::Extensions => &["extensions list", "extensions uninstall <name>"],
@@ -572,7 +576,7 @@ mod tests {
     }
 
     #[test]
-    fn child_role_flags_parse_only_in_json_mode() {
+    fn child_role_flags_cross_both_session_modes() {
         let parsed = args(&[
             "--json",
             "--parent",
@@ -600,9 +604,24 @@ mod tests {
             args(&["--json", "--ephemeral", "--continue"]).expect_err("ephemeral × continue");
         assert!(conflict.contains("--ephemeral"), "{conflict}");
 
-        // Child flags outside JSON mode are foreign flags.
-        let foreign = args(&["--parent", "p1", "-p", "hi"]).expect_err("parent × print");
-        assert!(foreign.contains("do not combine"), "{foreign}");
+        // The child-role flags cross to print mode too (owner ruling
+        // 2026-09-27: a one-shot print child is a natural shape —
+        // `-p task --parent X --ephemeral` — and print's host wiring
+        // already threads the lineage; the flag table was the only
+        // wall).
+        let print_child = args(&[
+            "--parent",
+            "p1",
+            "--parent-call",
+            "c7",
+            "--ephemeral",
+            "-p",
+            "hi",
+        ])
+        .expect("a print child parses");
+        assert_eq!(print_child.parent.as_deref(), Some("p1"));
+        assert_eq!(print_child.parent_call.as_deref(), Some("c7"));
+        assert!(print_child.ephemeral);
     }
 
     #[test]

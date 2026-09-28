@@ -248,7 +248,12 @@ Current workspace layout:
   session modes boot the same extension world (owner ruling
   2026-09-27: `world_registry`/`mount_world` in assemble.rs — an
   installed package exists in every mode; no mode-specific
-  surprises), differing only at the I/O arm. The
+  surprises), differing only at the I/O arm: print reads no wire
+  frames (Esc/card answers on plain stdin) and stdout carries
+  exactly the response text — one buffered copy printed at the run
+  terminal, every other rendering on stderr — while the child-role
+  flags (`--parent`, `--parent-call`, `--ephemeral`) cross to print
+  too (a one-shot print child is a natural spawn shape). The
   `tabit` name is reserved for the frontend that ships primary
   (2026-09: the egui GUI deleted, the TUI candidates lead; no
   in-repo binary carries the name yet)
