@@ -379,6 +379,87 @@ pub(crate) fn extension_root(args: &Args) -> Option<PathBuf> {
         .or_else(|| tabit_config::home_dir().map(|home| home.join(".tabit").join("extensions")))
 }
 
+/// The process's extension world, data half: settings (the disable
+/// list), the one scan, the partition, the providers-fragment merge
+/// under the user config, the skills tables, and the registry over
+/// the merged providers. Shared by both session modes (owner ruling
+/// 2026-09-27: the extension host is process machinery — print mode
+/// rides the same world, so an installed package surprises nobody by
+/// existing in one mode and not the other). The boot half is
+/// [`mount_world`], kept separate so the JSON edge can mount its
+/// wire structure between them.
+pub(crate) fn world_registry(
+    args: &Args,
+    config: tabit_config::TabitConfig,
+    auth: std::sync::Arc<tabit_config::AuthConfig>,
+) -> Result<(ModelRegistry, Launchable), String> {
+    // Settings (the extension disable list's layers): absence is
+    // normal — a bare machine disables nothing, packages mount by
+    // default — while a broken file is a loud startup failure.
+    let settings = tabit_config::SettingsConfig::load_default().map_err(|e| e.to_string())?;
+    let disabled = settings.disabled_extensions();
+    // One scan feeds every consumer — launch, the providers fragment
+    // merge, the skills tables — so they cannot disagree (the same
+    // one-scan law as the catalog).
+    let found = extension_root(args)
+        .as_deref()
+        .map(tabit_ext::manifest::scan)
+        .unwrap_or_default();
+    let launchable = partition(found, &disabled);
+    // Providers fragments merge under the user config (the user's
+    // own ids win silently; only a fragment colliding with an
+    // earlier fragment warns).
+    let mut merged = config;
+    let user_ids: std::collections::HashSet<String> = merged.providers.keys().cloned().collect();
+    let mut warnings = Vec::new();
+    for (name, dir) in &launchable.packages {
+        merge_fragment_into(&mut merged, name, dir, &user_ids, &mut warnings);
+    }
+    for warning in &warnings {
+        eprintln!("warning: {warning}");
+    }
+    // The skills tables: the extension walker produces what the
+    // packages ship, with their original paths, and the process's
+    // one catalog folds them under the ladder — seeded before any
+    // assembly reads it (the prompt build is the first reader). No
+    // filesystem writes: the entries' locations ARE the packages'
+    // paths.
+    seed_extension_skills(extension_skills_catalog(&launchable.packages));
+    Ok((
+        ModelRegistry::new(std::sync::Arc::new(merged), auth),
+        launchable,
+    ))
+}
+
+/// The extension world, boot half: launch + handshakes + the tool
+/// mount over the core baseline. `runtime` is the SERVING runtime —
+/// the boot spawns watchers that must outlive it.
+pub(crate) fn mount_world(
+    launchable: Launchable,
+    runtime: &tokio::runtime::Runtime,
+) -> std::sync::Arc<extensions::Mounted> {
+    let launch_context = tabit_ext::LaunchContext {
+        node: host_node(),
+        // The host IS the binary: owned-session spawners get the
+        // running executable, never a resolution search.
+        core_path: std::env::current_exe()
+            .map(|path| path.display().to_string())
+            .unwrap_or_default(),
+        cwd: std::env::current_dir()
+            .map(|path| path.display().to_string())
+            .unwrap_or_default(),
+    };
+    let supervisor = runtime.block_on(async {
+        let supervisor = boot_extensions(launchable.found, launch_context);
+        supervisor.await_resolved().await;
+        supervisor
+    });
+    // The conflict baseline is the core toolset — exactly what a
+    // session would mount without extensions.
+    let core = core_tools();
+    std::sync::Arc::new(extensions::Mounted::mount(supervisor, &core))
+}
+
 /// The extension host boot: launch the scanned packages, handshake
 /// each, supervise for the backend's life — reports land on stderr
 /// (stdout is protocol). Every tabit process boots its own extension

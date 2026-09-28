@@ -244,7 +244,11 @@ Current workspace layout:
   no UI and no frontend references — frontends spawn it, never the
   other way. Print mode (`-p <PROMPT>`, `--rewind <n>`) and JSON
   mode (`--json` — the stdio protocol edge) over the session host
-  (create / `--continue` / `--session <path>` / `--list`). The
+  (create / `--continue` / `--session <path>` / `--list`); both
+  session modes boot the same extension world (owner ruling
+  2026-09-27: `world_registry`/`mount_world` in assemble.rs — an
+  installed package exists in every mode; no mode-specific
+  surprises), differing only at the I/O arm. The
   `tabit` name is reserved for the frontend that ships primary
   (2026-09: the egui GUI deleted, the TUI candidates lead; no
   in-repo binary carries the name yet)

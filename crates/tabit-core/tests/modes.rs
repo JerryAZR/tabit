@@ -16,9 +16,10 @@
 //! staged store, and JSON mode's two startup-failure shapes (the
 //! broken config's setup guide; the unreadable session's plain
 //! reason). The provider is an httpmock SSE server — the suite stays
-//! offline, and each child gets its config by per-process env (no
-//! global mutation: print and list modes never boot extensions, so
-//! the machine's installs cannot leak in).
+//! offline, and each child gets its config by per-process env and
+//! its extension root pinned to an empty dir (print mode boots the
+//! same extension world JSON mode does, so the machine's real
+//! installs must not leak in).
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -65,10 +66,21 @@ fn sse_answer(text: &str) -> String {
 }
 
 /// One real-binary run: the executable in `dir`, `TABIT_CONFIG` at
-/// `config`, the given args. Returns (exit code, stdout, stderr).
+/// `config`, the given args. For the modes that boot the extension
+/// world (print and JSON — the 2026-09-27 unification), the root is
+/// pinned to an empty dir so the machine's real installs cannot
+/// leak in; `--list` boots nothing and takes no root.
 fn run_in(dir: &Path, config: &Path, args: &[&str]) -> (Option<i32>, String, String) {
+    let mut argv: Vec<String> = Vec::new();
+    if !args.contains(&"--list") {
+        let empty_root = dir.join("no-extensions");
+        std::fs::create_dir_all(&empty_root).expect("empty extension root");
+        argv.push("--extensions".to_string());
+        argv.push(empty_root.to_str().expect("utf-8 path").to_string());
+    }
+    argv.extend(args.iter().map(|arg| (*arg).to_string()));
     let output = Command::new(env!("CARGO_BIN_EXE_tabit-core"))
-        .args(args)
+        .args(&argv)
         .current_dir(dir)
         .env("TABIT_CONFIG", config)
         .output()
@@ -200,6 +212,66 @@ fn tool_flags_filter_if_it_exists_and_reach_the_request() {
         catch_all.calls(),
         0,
         "no request carried the filtered-out tool: {stdout}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The extension world is mode-uniform (owner ruling 2026-09-27): a
+/// static package's providers fragment merges in PRINT mode exactly
+/// as in JSON mode — the sharp surprise case (a user with a
+/// provider-relay extension would otherwise see their provider exist
+/// in one mode and not the other). The package is process-free: no
+/// `entry`, so it mounts and contributes without launching anything.
+#[test]
+fn a_static_packages_provider_fragment_serves_print_mode() {
+    let server = MockServer::start();
+    server.mock(|when, then| {
+        when.method(POST).path("/v1/chat/completions");
+        then.status(200)
+            .header("content-type", "text/event-stream")
+            .body(sse_answer("the fragment answer"));
+    });
+    let dir = test_dir("print-fragment");
+    let package = dir.join("ext-root").join("fragship");
+    std::fs::create_dir_all(&package).expect("package dir");
+    std::fs::write(
+        package.join("tabit.json"),
+        r#"{"name":"fragship","version":"0.1.0","description":"a static providers fragment"}"#,
+    )
+    .expect("manifest");
+    std::fs::write(
+        package.join("providers.toml"),
+        format!(
+            "[providers.frag]\nbase_url = \"http://127.0.0.1:{}/v1\"\napi = \"openai-completions\"\nkeyless = true\n\n[[providers.frag.models]]\nid = \"m\"\n",
+            server.port()
+        ),
+    )
+    .expect("fragment");
+    // The user config is empty: the fragment IS the only provider,
+    // so answering at all proves the merge happened in print mode.
+    let config = dir.join("providers.toml");
+    std::fs::write(&config, "").expect("empty user config");
+
+    let (code, stdout, stderr) = run_in(
+        &dir,
+        &config,
+        &[
+            "--extensions",
+            dir.join("ext-root").to_str().expect("utf-8 path"),
+            "--model",
+            "frag/m",
+            "-p",
+            "say the thing",
+        ],
+    );
+    assert_eq!(
+        code,
+        Some(0),
+        "the fragment's provider served the run: {stdout}\n{stderr}"
+    );
+    assert!(
+        stdout.contains("the fragment answer"),
+        "the answer rode the fragment's provider: {stdout}"
     );
     let _ = std::fs::remove_dir_all(&dir);
 }

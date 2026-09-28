@@ -78,7 +78,8 @@ usage: tabit-core -p <PROMPT>            print mode: one prompt, one run
                                          valid with -p; --extensions
                                          <dir> selects the extension
                                          root (default
-                                         ~/.tabit/extensions)
+                                         ~/.tabit/extensions; also
+                                         valid with -p)
        tabit-core install <npm:pkg|git:repo|path:dir>
                                         install an extension package (npm as
                                         plain registry HTTP, no npm CLI; scoped
@@ -218,6 +219,7 @@ fn validate_mode(args: &Args) -> Result<Mode, String> {
             "--preamble",
             "--tools",
             "--without",
+            "--extensions",
         ],
         Mode::Install => &["install <source>"],
         Mode::Extensions => &["extensions list", "extensions uninstall <name>"],
@@ -560,13 +562,13 @@ mod tests {
     }
 
     #[test]
-    fn the_extensions_flag_is_json_mode_only() {
+    fn the_extensions_flag_crosses_both_session_modes() {
+        // The 2026-09-27 ruling: both modes boot the same extension
+        // world, so both take the root flag.
         let parsed = args(&["--json", "--extensions", "C:/tmp/ext"]).expect("valid");
         assert_eq!(parsed.extensions, Some(PathBuf::from("C:/tmp/ext")));
-
-        let conflict =
-            args(&["-p", "hi", "--extensions", "C:/tmp/ext"]).expect_err("print mode rejects it");
-        assert!(conflict.contains("do not combine"), "{conflict}");
+        let parsed = args(&["-p", "hi", "--extensions", "C:/tmp/ext"]).expect("valid");
+        assert_eq!(parsed.extensions, Some(PathBuf::from("C:/tmp/ext")));
     }
 
     #[test]

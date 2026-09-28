@@ -45,12 +45,9 @@ mod print;
 
 use std::sync::Arc;
 use tabit_config::{AuthConfig, TabitConfig};
-use tabit_session::{ModelRegistry, SessionHost, SessionHostWiring, SessionStore};
+use tabit_session::{SessionHost, SessionHostWiring, SessionStore};
 
-use crate::assemble::{
-    ContinueMiss, assemble, boot_extensions, core_tools, extension_root, extension_skills_catalog,
-    host_data, host_node, install_root, merge_fragment_into, partition, seed_extension_skills,
-};
+use crate::assemble::{ContinueMiss, assemble, host_data, host_node, install_root};
 use crate::cli::{Mode, mode_of, parse_args};
 use crate::print::{list_sessions, print_banner, print_mode};
 
@@ -194,47 +191,18 @@ fn run() -> Result<i32, String> {
             // reject the handshake with a setup guide instead of
             // dying stderr-only (the owner's first-run ruling).
             let (config, auth) = match (config, auth) {
-                (Ok(config), Ok(auth)) => (Arc::new(config), Arc::new(auth)),
+                (Ok(config), Ok(auth)) => (config, auth),
                 (Err(detail), _) | (_, Err(detail)) => return json_setup_failure(&detail),
             };
-            // Settings (the extension disable list's layers): absence
-            // is normal — a bare machine disables nothing, packages
-            // mount by default — while a broken file is a loud
-            // startup failure.
-            let settings = match tabit_config::SettingsConfig::load_default() {
-                Ok(settings) => settings,
-                Err(detail) => return json_startup_failure(&detail.to_string()),
-            };
-            let disabled = settings.disabled_extensions();
-            // One scan feeds every consumer — launch, the providers
-            // fragment merge, the skills tables — so they cannot
-            // disagree (the same one-scan law as the catalog).
-            let found = extension_root(&args)
-                .as_deref()
-                .map(tabit_ext::manifest::scan)
-                .unwrap_or_default();
-            let launchable = partition(found, &disabled);
-            // Providers fragments merge under the user config (the
-            // user's own ids win silently; only a fragment colliding
-            // with an earlier fragment warns).
-            let mut merged = (*config).clone();
-            let user_ids: std::collections::HashSet<String> =
-                merged.providers.keys().cloned().collect();
-            let mut warnings = Vec::new();
-            for (name, dir) in &launchable.packages {
-                merge_fragment_into(&mut merged, name, dir, &user_ids, &mut warnings);
-            }
-            for warning in &warnings {
-                eprintln!("warning: {warning}");
-            }
-            // The skills tables: the extension walker produces what
-            // the packages ship, with their original paths, and the
-            // process's one catalog folds them under the ladder —
-            // seeded before any assembly reads it (the prompt build
-            // is the first reader). No filesystem writes: the
-            // entries' locations ARE the packages' paths.
-            seed_extension_skills(extension_skills_catalog(&launchable.packages));
-            let registry = ModelRegistry::new(Arc::new(merged), auth);
+            // The extension world's data half (settings, scan,
+            // fragment merge, skills, registry) — shared with print
+            // mode; a settings failure is a plain startup failure.
+            let (registry, launchable) =
+                match assemble::world_registry(&args, config, Arc::new(auth)) {
+                    Ok(world) => world,
+                    Err(detail) => return json_startup_failure(&detail),
+                };
+            let registry = Arc::new(registry);
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
@@ -279,29 +247,7 @@ fn run() -> Result<i32, String> {
                     frontend,
                 )
             });
-            let launch_context = tabit_ext::LaunchContext {
-                node: host_node(),
-                // The host IS the binary: owned-session spawners get
-                // the running executable, never a resolution search.
-                core_path: std::env::current_exe()
-                    .map(|path| path.display().to_string())
-                    .unwrap_or_default(),
-                cwd: std::env::current_dir()
-                    .map(|path| path.display().to_string())
-                    .unwrap_or_default(),
-            };
-            let mounted = {
-                let supervisor = runtime.block_on(async {
-                    let supervisor = boot_extensions(launchable.found, launch_context);
-                    supervisor.await_resolved().await;
-                    supervisor
-                });
-                // The conflict baseline is the core toolset —
-                // exactly what a session would mount without
-                // extensions.
-                let core = core_tools();
-                Arc::new(extensions::Mounted::mount(supervisor, &core))
-            };
+            let mounted = assemble::mount_world(launchable, &runtime);
             // Assemble failures (session unreadable, model unbuildable)
             // reject the handshake with the plain reason — not the
             // config setup guide, which would be advice for a problem
@@ -338,9 +284,19 @@ fn run() -> Result<i32, String> {
             }))
         }
         Mode::Print => {
-            let config = Arc::new(config.map_err(|e| setup_guide(&e))?);
-            let auth = Arc::new(auth.map_err(|e| e.to_string())?);
-            print_mode(&args, &ModelRegistry::new(config, auth))
+            let config = config.map_err(|e| setup_guide(&e))?;
+            let auth = auth.map_err(|e| e.to_string())?;
+            // The same extension world JSON mode rides (owner ruling
+            // 2026-09-27): an installed package exists in every mode.
+            // The runtime is the boot's and the run's one serving
+            // runtime — the supervisor's watchers outlive the boot.
+            let (registry, launchable) = assemble::world_registry(&args, config, Arc::new(auth))?;
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|e| e.to_string())?;
+            let mounted = assemble::mount_world(launchable, &runtime);
+            print_mode(&args, &registry, Some(&mounted), &runtime)
         }
     }
 }

@@ -167,23 +167,28 @@ struct PrintOutcome {
 
 /// Print mode: assemble (rewinding first when asked), banner, one
 /// message through the session actor, events printed as they arrive,
-/// then the closing footer.
-pub(crate) fn print_mode(args: &Args, registry: &ModelRegistry) -> Result<i32, String> {
+/// then the closing footer. The extension world is the caller's —
+/// booted on `runtime` before this runs (the serving runtime: the
+/// supervisor's watchers must outlive the boot), `None` only when
+/// the process booted no extension root.
+pub(crate) fn print_mode(
+    args: &Args,
+    registry: &ModelRegistry,
+    extensions: Option<&std::sync::Arc<extensions::Mounted>>,
+    runtime: &tokio::runtime::Runtime,
+) -> Result<i32, String> {
     if args.rewind.is_some() && args.session.is_none() && !args.continue_newest {
         return Err(
             "--rewind rewinds a session: pass --continue or --session <path> (see --help)"
                 .to_string(),
         );
     }
-    // Print mode stays core-only: the extension host is backend
-    // machinery the JSON-mode process owns (one host per backend);
-    // a print-mode consumer is a later ruling with a real user.
     let (mut session, startup_notes) = assemble(
         args,
         registry,
         &SessionStore::project_default(),
         ContinueMiss::Fail,
-        None,
+        extensions.cloned(),
     )?;
     if let Some(turns) = args.rewind {
         let rewind = session.rewind(turns).map_err(|e| e.to_string())?;
@@ -208,20 +213,23 @@ pub(crate) fn print_mode(args: &Args, registry: &ModelRegistry) -> Result<i32, S
     // The message goes through the session host — the same path JSON
     // mode drives — and the stream is read to its end: the host returns
     // the session before closing, so closing stats cover this run.
-    let outcome = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|e| e.to_string())?
-        .block_on(async {
-            let empty_mount = std::sync::Arc::new(extensions::Mounted::none());
-            let store = SessionStore::project_default();
-            let wiring = SessionHostWiring {
-                node: host_node(),
-                store: store.clone(),
-                boot_parent: args.parent.clone(),
-                boot_parent_call: args.parent_call.clone(),
-            };
-            let data = host_data(args, registry, &store, &empty_mount);
+    let outcome = runtime.block_on(async {
+        let empty_mount;
+        let mounted = match extensions {
+            Some(mounted) => mounted,
+            None => {
+                empty_mount = std::sync::Arc::new(extensions::Mounted::none());
+                &empty_mount
+            }
+        };
+        let store = SessionStore::project_default();
+        let wiring = SessionHostWiring {
+            node: host_node(),
+            store: store.clone(),
+            boot_parent: args.parent.clone(),
+            boot_parent_call: args.parent_call.clone(),
+        };
+        let data = host_data(args, registry, &store, mounted);
             let mut handle = SessionHost::spawn(session, startup_notes, wiring, data);
             let boot = handle.info().session_id.clone();
             {
