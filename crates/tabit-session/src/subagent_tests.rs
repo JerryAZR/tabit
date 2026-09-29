@@ -1,8 +1,23 @@
 //! The example tool's policy units. The substrate itself — spawn,
 //! forwarding, routing, steering, the abort leash — is proven
-//! end-to-end over the real binary by `crates/tabit/tests/
+//! end-to-end over the real binary by `crates/tabit-core/tests/
 //! subprocess_children.rs` (the in-process suite died with the
 //! in-process substrate, owner ruling 2026-09).
+
+/// Locate a workspace binary (same-package `CARGO_BIN_EXE_*` does not
+/// reach cross-package bins; test exes run from
+/// `<target>/<profile>/deps`, one level below the binaries). The
+/// sibling of `workspace_bin` in `crates/tabit-core/tests/
+/// subprocess_children.rs` — keep the two in step.
+fn workspace_bin(name: &str) -> std::path::PathBuf {
+    std::env::current_exe()
+        .expect("current exe")
+        .parent()
+        .and_then(|deps| deps.parent())
+        .map(|dir| dir.join(format!("{name}{}", std::env::consts::EXE_SUFFIX)))
+        .filter(|path| path.is_file())
+        .unwrap_or_else(|| panic!("{name} not built — run the workspace suite (scripts/test.sh)"))
+}
 
 #[tokio::test]
 async fn a_pre_cancelled_token_refuses_before_spawning() {
@@ -178,18 +193,7 @@ async fn a_missing_executable_fails_the_spawn_with_the_exe_named() {
 /// mirror — but the frontend never saw the child open).
 #[tokio::test]
 async fn a_childs_first_frames_reach_the_node_fan() {
-    let core = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("..")
-        .join("target")
-        .join("debug")
-        .join("tabit-core.exe");
-    if !core.is_file() {
-        panic!(
-            "tabit-core.exe not built — run the workspace suite (scripts/test.sh): {}",
-            core.display()
-        );
-    }
+    let core = workspace_bin("tabit-core");
     // A minimal offline config, isolated to this test: the child
     // parses the provider and never calls it (no message is sent —
     // the child boots, announces, and is killed). The env claim is
@@ -287,18 +291,7 @@ async fn a_childs_first_frames_reach_the_node_fan() {
 /// the real settlement path end to end).
 #[tokio::test]
 async fn a_failing_child_drives_to_the_failed_outcome_with_its_terminal() {
-    let core = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("..")
-        .join("target")
-        .join("debug")
-        .join("tabit-core.exe");
-    if !core.is_file() {
-        panic!(
-            "tabit-core.exe not built — run the workspace suite (scripts/test.sh): {}",
-            core.display()
-        );
-    }
+    let core = workspace_bin("tabit-core");
     let dir = std::env::temp_dir().join(format!("tabit-bridge-fail-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(dir.join("cwd")).expect("cwd dir");

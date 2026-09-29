@@ -103,15 +103,27 @@ fn main() {
                 "type": "report", "protocol_version": 5,
                 "tools": [], "hooks": [], "watch": [],
             }));
-            for _ in 0..2 {
-                emit(json!({
-                    "type": "service_request",
-                    "request_id": "dupe-1",
-                    "call_id": "dupe-1",
-                    "verb": "model_prompt",
-                    "prompt": "same id twice",
-                }));
-            }
+            // Both frames in ONE write syscall: the violation exists
+            // only while the first ask is live — two writes let the
+            // host answer (and settle) it before the second line
+            // arrives, and a settled id re-registers cleanly (the law
+            // guards live ids). One write is one pipe read on the
+            // host, so both lines process in a single poll run, the
+            // first ask still pending when the second registers.
+            // `emit_raw` cannot do this: std stdout is a LineWriter,
+            // so `writeln!` splits at the embedded newline and the
+            // pair lands as two syscalls — the race again.
+            let dupe = json!({
+                "type": "service_request",
+                "request_id": "dupe-1",
+                "call_id": "dupe-1",
+                "verb": "model_prompt",
+                "prompt": "same id twice",
+            });
+            let stdout = std::io::stdout();
+            let _ = stdout
+                .lock()
+                .write_all(format!("{dupe}\n{dupe}\n").as_bytes());
             drain();
         }
         "tools-fail" => serve_tools(json!([tool_decl("boom")])),

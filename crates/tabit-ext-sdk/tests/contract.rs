@@ -144,16 +144,33 @@ async fn await_alive(
     events: &mut tokio::sync::mpsc::UnboundedReceiver<supervisor::ExtensionEvent>,
     name: &str,
 ) {
+    await_all_alive(events, &[name]).await;
+}
+
+/// Await a set of extensions reaching Alive, in any arrival order.
+/// The events channel is one stream for every extension, so awaiting
+/// one name at a time discards the others' edges — a faster sibling's
+/// Alive is already consumed when its own await runs (the clash
+/// pair's flake). Dead still panics with its reason.
+async fn await_all_alive(
+    events: &mut tokio::sync::mpsc::UnboundedReceiver<supervisor::ExtensionEvent>,
+    names: &[&str],
+) {
     tokio::time::timeout(BOUND, async {
-        loop {
+        let mut pending: std::collections::HashSet<&str> = names.iter().copied().collect();
+        while !pending.is_empty() {
             let event = events
                 .recv()
                 .await
                 .expect("the channel stays open while the supervisor lives");
-            if event.name == name {
+            if pending.contains(event.name.as_str()) {
                 match event.status {
-                    Status::Alive => return,
-                    Status::Dead { reason } => panic!("{name} died at the handshake: {reason}"),
+                    Status::Alive => {
+                        pending.remove(event.name.as_str());
+                    }
+                    Status::Dead { reason } => {
+                        panic!("{} died at the handshake: {reason}", event.name)
+                    }
                     Status::Starting => {}
                 }
             }
@@ -349,8 +366,7 @@ async fn a_failing_body_is_an_error_not_a_hang() {
     install(&root, "clash-a", env!("CARGO_BIN_EXE_clash-a-ext"));
     install(&root, "clash-b", env!("CARGO_BIN_EXE_clash-b-ext"));
     let (host, mut events) = supervisor::launch_root(&root, BOOT_TIMEOUT, host_ctx());
-    await_alive(&mut events, "clash-a").await;
-    await_alive(&mut events, "clash-b").await;
+    await_all_alive(&mut events, &["clash-a", "clash-b"]).await;
 
     // Both declared the shared name — the reports carry both; the
     // one-name-one-tool resolution is the assembler's ruling.
