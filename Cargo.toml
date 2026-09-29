@@ -5,10 +5,10 @@
 resolver = "3"
 members = ["crates/*"]
 default-members = [
-    "crates/rig-core",
-    "crates/rig-agent",
-    "crates/rig-derive",
-    "crates/rig",
+    "crates/tabit-providers",
+    "crates/tabit-engine",
+    "crates/tabit-derive",
+    "crates/tabit-rig",
     "crates/tabit-config",
     "crates/tabit-ext",
     "crates/tabit-ext-install",
@@ -24,8 +24,11 @@ default-members = [
 exclude = []
 
 [workspace.package]
-version = "0.41.0"
+version = "0.1.0"
 edition = "2024"
+license = "MIT"
+repository = "https://github.com/JerryAZR/tabit"
+homepage = "https://github.com/JerryAZR/tabit"
 
 [workspace.lints.clippy]
 dbg_macro = "forbid"

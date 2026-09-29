@@ -25,11 +25,13 @@
 //! the pool collects the idle ones at the parent's turn boundary.
 
 use crate::session::RunSummary;
-use rig_agent::completion::Message;
-use rig_agent::tool::{DynamicTool, InternalCallId, ToolContext, ToolExecutionError, ToolOutput};
-use rig_derive::rig_tool;
 use std::path::PathBuf;
 use std::sync::Arc;
+use tabit_derive::rig_tool;
+use tabit_engine::completion::Message;
+use tabit_engine::tool::{
+    DynamicTool, InternalCallId, ToolContext, ToolExecutionError, ToolOutput,
+};
 use tabit_protocol::ModelSelection;
 use tokio_util::sync::CancellationToken;
 
@@ -304,7 +306,7 @@ fn summary_result(
                     crate::subagent_pool::MAX_IDLE_TURNS
                 ));
             }
-            rig_core::tool::content_parts(
+            tabit_providers::tool::content_parts(
                 report,
                 Some(serde_json::json!({
                     "id": id,
@@ -339,14 +341,14 @@ fn summary_result(
 
 /// The subagent tool as a session-registerable [`DynamicTool`].
 pub fn subagent_tool() -> DynamicTool {
-    rig_agent::tool::dynamic_contextual(Subagent)
+    tabit_engine::tool::dynamic_contextual(Subagent)
 }
 
 /// The followup tool as a session-registerable [`DynamicTool`] —
 /// registered beside the subagent tool, omitted from child toolsets
 /// with it (recursion depth is enforced by omission).
 pub fn followup_tool() -> DynamicTool {
-    rig_agent::tool::dynamic_contextual(Followup)
+    tabit_engine::tool::dynamic_contextual(Followup)
 }
 
 #[cfg(test)]

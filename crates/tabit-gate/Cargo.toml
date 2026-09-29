@@ -2,7 +2,9 @@
 name = "tabit-gate"
 version.workspace = true
 edition.workspace = true
-license = "MIT"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
 description = "The default permission gate: pi-sanity's policy ported to Rust (static, heuristic, allow-when-unsure)."
 
 [lints]

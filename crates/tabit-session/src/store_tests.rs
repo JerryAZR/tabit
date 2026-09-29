@@ -18,7 +18,7 @@ fn user_node() -> crate::entry::FileRecord {
         None,
         "t".to_string(),
         EntryKind::UserMessage {
-            message: rig_core::completion::Message::user("x"),
+            message: tabit_providers::completion::Message::user("x"),
         },
     ))
 }

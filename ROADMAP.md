@@ -28,7 +28,7 @@ modes.
 
 The foundation is shipped and hardened. In build order, all closed:
 
-- **Transport/runtime** (rig-core/rig-agent): anthropic + openai
+- **Transport/runtime** (tabit-providers/tabit-engine): anthropic + openai
   (Responses API) over the shared openai-compatible engine, pi-policy
   retry, stall warnings, typed errors; the engine loop per ENGINE.md,
   the hook surface, tool-panic containment, token-and-detach
@@ -192,7 +192,7 @@ through a few patch rounds. That is the re-evaluation trigger.
 ## Deferred until a consumer exists
 
 - Eval harness (build when there are sessions + tools to eval).
-- MCP client support / the rmcp stance (rig-agent's `rmcp` stays
+- MCP client support / the rmcp stance (tabit-engine's `rmcp` stays
   feature-gated, off by default; verify pi's current story before
   committing).
 - OAuth device-flow auth for providers.

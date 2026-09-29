@@ -2,7 +2,9 @@
 name = "tabit-config"
 version.workspace = true
 edition.workspace = true
-license = "MIT"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
 description = "Tabit provider/model configuration: schema, loading, validation."
 
 [lints]
@@ -21,5 +23,5 @@ toml = { workspace = true }
 url = { workspace = true }
 
 [dev-dependencies]
-rig-core = { path = "../rig-core", version = "0.41.0", default-features = false }
+tabit-providers = { path = "../tabit-providers", version = "0.1.0", default-features = false }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

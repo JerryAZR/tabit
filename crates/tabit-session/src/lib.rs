@@ -10,13 +10,13 @@
         clippy::unwrap_used
     )
 )]
-//! Tabit sessions: persistent, resumable conversations over the rig-agent
+//! Tabit sessions: persistent, resumable conversations over the tabit-engine
 //! outer loop.
 //!
 //! A session is one JSONL file (header + append-only entries) under a
 //! caller-chosen directory — project-local by default, because a path
 //! relative to the project survives renames and moves. The session layer
-//! is the *policy owner* around the rig-agent engine: it selects the model
+//! is the *policy owner* around the tabit-engine engine: it selects the model
 //! for each outer loop (from `tabit-config`), adopts the parsed log as
 //! its resident state at open, commits each tool-use roundtrip atomically
 //! as the item stream closes it (plus steers, model switches, and

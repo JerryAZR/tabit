@@ -21,7 +21,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures::future::BoxFuture;
-use rig_agent::tool::services::HostServices;
+use tabit_engine::tool::services::HostServices;
 use tabit_ext::supervisor::{self, BOOT_TIMEOUT, Status};
 
 // Generous: the bound exists to catch hangs, not to race a loaded
@@ -192,16 +192,16 @@ impl HostServices for FakeServices {
     fn model_prompt(
         &self,
         caller: &str,
-        _request: rig_agent::tool::services::ModelPromptRequest,
-    ) -> BoxFuture<'static, Result<rig_agent::tool::services::ModelPromptOk, String>> {
+        _request: tabit_engine::tool::services::ModelPromptRequest,
+    ) -> BoxFuture<'static, Result<tabit_engine::tool::services::ModelPromptOk, String>> {
         self.prompted
             .lock()
             .expect("prompted lock")
             .push(caller.to_string());
         Box::pin(async move {
-            Ok(rig_agent::tool::services::ModelPromptOk {
+            Ok(tabit_engine::tool::services::ModelPromptOk {
                 text: "the contract's canned title".to_string(),
-                usage: rig_agent::tool::services::ServiceUsage {
+                usage: tabit_engine::tool::services::ServiceUsage {
                     input_tokens: 5,
                     output_tokens: 4,
                     total_tokens: 9,

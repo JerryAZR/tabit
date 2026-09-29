@@ -5,17 +5,17 @@ use crate::SessionError;
 use crate::entry::EntryKind;
 use crate::session::{RunOutcome, RunSummary, SessionBuilder};
 use crate::store::SessionStore;
-use rig_agent::agent::ModelHandle;
-use rig_agent::test_utils::{MockCompletionModel, MockStreamEvent};
-use rig_agent::tool::DynamicTool;
-use rig_core::OneOrMany;
-use rig_core::completion::{Message, Usage};
-use rig_core::message::{AssistantContent, Text, UserContent};
 use serde_json::json;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use tabit_config::TabitConfig;
+use tabit_engine::agent::ModelHandle;
+use tabit_engine::test_utils::{MockCompletionModel, MockStreamEvent};
+use tabit_engine::tool::DynamicTool;
 use tabit_protocol::{ModelSelection, SessionEvent};
+use tabit_providers::OneOrMany;
+use tabit_providers::completion::{Message, Usage};
+use tabit_providers::message::{AssistantContent, Text, UserContent};
 
 /// The file path of a file-backed session (tests here always build
 /// persisted sessions; the ephemeral suite asserts `path().is_none()`
@@ -196,7 +196,7 @@ pub(crate) fn echo_tool() -> DynamicTool {
         json!({"type":"object","properties":{"value":{"type":"string"}}}),
         |_ctx, args| {
             Box::pin(async move {
-                Ok(rig_agent::tool::ToolOutput::text(
+                Ok(tabit_engine::tool::ToolOutput::text(
                     args.get("value").and_then(|v| v.as_str()).unwrap_or(""),
                 ))
             })
@@ -250,7 +250,7 @@ impl Factory {
     }
 
     /// The requests served by the latest model this factory handed out.
-    pub(crate) fn requests(&self) -> Vec<rig_core::completion::CompletionRequest> {
+    pub(crate) fn requests(&self) -> Vec<tabit_providers::completion::CompletionRequest> {
         self.models
             .lock()
             .ok()
@@ -533,7 +533,7 @@ async fn failing_tool_results_carry_status_and_content() -> Result<(), SessionEr
         |_ctx, _args| {
             Box::pin(async move {
                 Err(
-                    rig_agent::tool::ToolExecutionError::other("boom: the thing failed")
+                    tabit_engine::tool::ToolExecutionError::other("boom: the thing failed")
                         .with_code("3"),
                 )
             })
@@ -688,13 +688,13 @@ async fn truncated_turn_warns_and_the_run_still_completes() -> Result<(), Sessio
     let factory = Factory::new(vec![vec![
         MockStreamEvent::text("partial answer"),
         MockStreamEvent::FinalResponse(
-            rig_agent::test_utils::mock_final(Usage {
+            tabit_engine::test_utils::mock_final(Usage {
                 input_tokens: 100,
                 output_tokens: 10,
                 total_tokens: 110,
                 ..Usage::default()
             })
-            .with_finish_reason(rig_core::completion::FinishReason::Length),
+            .with_finish_reason(tabit_providers::completion::FinishReason::Length),
         ),
     ]]);
     let mut session = factory.into_builder(store.clone()).create("C:/w")?;
@@ -847,9 +847,9 @@ async fn a_dangling_tool_roundtrip_fails_the_resume_loudly() -> Result<(), Sessi
             message: Message::Assistant {
                 id: None,
                 content: OneOrMany::one(AssistantContent::ToolCall(
-                    rig_core::message::ToolCall::new(
+                    tabit_providers::message::ToolCall::new(
                         "c1".to_string(),
-                        rig_core::message::ToolFunction::new("echo".to_string(), json!({})),
+                        tabit_providers::message::ToolFunction::new("echo".to_string(), json!({})),
                     ),
                 )),
             },
@@ -919,7 +919,7 @@ async fn failed_run_still_records_the_user_message() -> Result<(), SessionError>
 #[tokio::test]
 async fn malformed_tool_call_exhaustion_fails_the_run_and_leaves_the_session_alive()
 -> Result<(), SessionError> {
-    use rig_agent::test_utils::MockError;
+    use tabit_engine::test_utils::MockError;
 
     let store = temp_store("malformed-exhaustion");
     let malformed = || {
@@ -1368,7 +1368,7 @@ async fn persistence_failure_fails_the_run_loudly() -> Result<(), SessionError> 
                         }
                     }
                 }
-                Ok(rig_agent::tool::ToolOutput::text("log deleted"))
+                Ok(tabit_engine::tool::ToolOutput::text("log deleted"))
             })
         },
     );
@@ -1539,7 +1539,7 @@ async fn steering_during_a_run_is_recorded_one_to_one() -> Result<(), SessionErr
 #[tokio::test]
 async fn one_context_builder_spans_the_run_boundary() -> Result<(), SessionError> {
     // The engine's run-scoped conversation and the recorder's durable
-    // fold are one implementation (`rig_agent::agent::conversation`),
+    // fold are one implementation (`tabit_engine::agent::conversation`),
     // fed by the same events. This pins that structurally: the request
     // the model actually receives for the next run's first turn is
     // exactly the durable projection plus the new prompt — every
@@ -1795,13 +1795,13 @@ async fn a_post_tool_stop_discards_the_pending_queue() -> Result<(), SessionErro
     // where a post-failure message starts the next run (the test above).
     // The session itself stays alive: a later message runs.
     struct StopAfterEcho;
-    impl rig_agent::agent::AgentHook for StopAfterEcho {
+    impl tabit_engine::agent::AgentHook for StopAfterEcho {
         async fn on_tool_result(
             &self,
-            _ctx: &rig_agent::agent::HookContext,
-            _event: rig_agent::agent::hook::ToolResultEvent<'_>,
-        ) -> rig_agent::agent::hook::ToolResultAction {
-            rig_agent::agent::hook::ToolResultAction::stop("stopped: one echo is enough")
+            _ctx: &tabit_engine::agent::HookContext,
+            _event: tabit_engine::agent::hook::ToolResultEvent<'_>,
+        ) -> tabit_engine::agent::hook::ToolResultAction {
+            tabit_engine::agent::hook::ToolResultAction::stop("stopped: one echo is enough")
         }
     }
 
@@ -1810,7 +1810,7 @@ async fn a_post_tool_stop_discards_the_pending_queue() -> Result<(), SessionErro
     let mut session = factory
         .into_builder(store.clone())
         .dynamic_tool(echo_tool())
-        .hooks(rig_agent::agent::HookStack::with(StopAfterEcho))
+        .hooks(tabit_engine::agent::HookStack::with(StopAfterEcho))
         .create("C:/w")?;
     let mailbox = session.mailbox_handle();
     session.submit("start");
@@ -2165,13 +2165,13 @@ async fn rewinding_into_an_open_roundtrip_resolves_forward() -> Result<(), Sessi
             message: Message::Assistant {
                 id: None,
                 content: OneOrMany::many(vec![
-                    AssistantContent::ToolCall(rig_core::message::ToolCall::new(
+                    AssistantContent::ToolCall(tabit_providers::message::ToolCall::new(
                         "c1".to_string(),
-                        rig_core::message::ToolFunction::new("echo".to_string(), json!({})),
+                        tabit_providers::message::ToolFunction::new("echo".to_string(), json!({})),
                     )),
-                    AssistantContent::ToolCall(rig_core::message::ToolCall::new(
+                    AssistantContent::ToolCall(tabit_providers::message::ToolCall::new(
                         "c2".to_string(),
-                        rig_core::message::ToolFunction::new("echo".to_string(), json!({})),
+                        tabit_providers::message::ToolFunction::new("echo".to_string(), json!({})),
                     )),
                 ])
                 .expect("two calls"),
@@ -2185,11 +2185,11 @@ async fn rewinding_into_an_open_roundtrip_resolves_forward() -> Result<(), Sessi
         &mut writer,
         Some(&assistant.id),
         EntryKind::ToolResult {
-            result: rig_core::message::ToolResult {
+            result: tabit_providers::message::ToolResult {
                 id: "c1".to_string(),
                 call_id: None,
                 details: None,
-                content: OneOrMany::one(rig_core::message::ToolResultContent::text("one")),
+                content: OneOrMany::one(tabit_providers::message::ToolResultContent::text("one")),
                 status: None,
             },
         },
@@ -2198,11 +2198,11 @@ async fn rewinding_into_an_open_roundtrip_resolves_forward() -> Result<(), Sessi
         &mut writer,
         Some(&first_result.id),
         EntryKind::ToolResult {
-            result: rig_core::message::ToolResult {
+            result: tabit_providers::message::ToolResult {
                 id: "c2".to_string(),
                 call_id: None,
                 details: None,
-                content: OneOrMany::one(rig_core::message::ToolResultContent::text("two")),
+                content: OneOrMany::one(tabit_providers::message::ToolResultContent::text("two")),
                 status: None,
             },
         },
@@ -2460,13 +2460,13 @@ extra_body = { shared = "level" }
 async fn an_empty_truncated_stream_warns_and_completes() -> Result<(), SessionError> {
     let store = temp_store("truncation-empty");
     let factory = Factory::new(vec![vec![MockStreamEvent::FinalResponse(
-        rig_agent::test_utils::mock_final(Usage {
+        tabit_engine::test_utils::mock_final(Usage {
             input_tokens: 100,
             output_tokens: 10,
             total_tokens: 110,
             ..Usage::default()
         })
-        .with_finish_reason(rig_core::completion::FinishReason::Length),
+        .with_finish_reason(tabit_providers::completion::FinishReason::Length),
     )]]);
     let mut session = factory.into_builder(store.clone()).create("C:/w")?;
 
@@ -2657,9 +2657,9 @@ async fn a_runs_tools_see_the_session_cwd() {
             let seen = probe_seen.clone();
             Box::pin(async move {
                 *seen.lock().expect("probe lock") = ctx
-                    .get::<rig_agent::tool::SessionCwd>()
+                    .get::<tabit_engine::tool::SessionCwd>()
                     .map(|cwd| cwd.0.clone());
-                Ok(rig_agent::tool::ToolOutput::text("probed"))
+                Ok(tabit_engine::tool::ToolOutput::text("probed"))
             })
         },
     );

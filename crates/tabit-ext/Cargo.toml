@@ -2,7 +2,9 @@
 name = "tabit-ext"
 version.workspace = true
 edition.workspace = true
-license = "MIT"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
 description = "Tabit extension host: subprocess extensions over the frozen JSONL pipe."
 
 [lints]
@@ -19,17 +21,17 @@ futures = { workspace = true }
 # The host-service verbs — the supervisor relays `model_prompt` (the
 # service envelope's one verb) through the engine's `HostServices`,
 # usage billed through the session's ledger.
-rig-agent = { path = "../rig-agent", version = "0.41.0", default-features = false }
+tabit-engine = { path = "../tabit-engine", version = "0.1.0", default-features = false }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 # The shared grammar on the pipe: commands in, emissions out, watched
 # events back (the routing generalization rides tabit-protocol's
 # vocabulary verbatim, flat beside the lane frames).
-tabit-log = { path = "../tabit-log", version = "0.41.0" }
-tabit-protocol = { path = "../tabit-protocol", version = "0.41.0" }
+tabit-log = { path = "../tabit-log", version = "0.1.0" }
+tabit-protocol = { path = "../tabit-protocol", version = "0.1.0" }
 # The child-process substrate (moved to tabit-wire; the supervisor's
 # spawn/reap plumbing rides it).
-tabit-wire = { path = "../tabit-wire", version = "0.41.0" }
+tabit-wire = { path = "../tabit-wire", version = "0.1.0" }
 uuid = { workspace = true, features = ["v7"] }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = [

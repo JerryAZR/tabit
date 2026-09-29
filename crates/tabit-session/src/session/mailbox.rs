@@ -5,7 +5,7 @@ use super::Session;
 use super::wire::user_text;
 use crate::lock::lock;
 use crate::notice::{NoticeSink, NoticeSlot};
-use rig_agent::completion::Message;
+use tabit_engine::completion::Message;
 use tabit_protocol::SessionEvent;
 use tokio_util::sync::CancellationToken;
 
@@ -271,7 +271,7 @@ pub(super) struct SessionSteers {
     pub(super) mailbox: Mailbox,
 }
 
-impl rig_agent::SteeringSource for SessionSteers {
+impl tabit_engine::SteeringSource for SessionSteers {
     fn drain(&self) -> Vec<(String, Message)> {
         self.mailbox.take_all()
     }

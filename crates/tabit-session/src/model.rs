@@ -83,7 +83,10 @@ mod tests;
 
 /// The dollars of a usage report under a rate card: the four billing
 /// legs, per million tokens.
-pub(crate) fn cost_of(usage: &rig_core::completion::Usage, cost: &tabit_config::Cost) -> f64 {
+pub(crate) fn cost_of(
+    usage: &tabit_providers::completion::Usage,
+    cost: &tabit_config::Cost,
+) -> f64 {
     (usage.input_tokens as f64 / 1_000_000.0) * cost.input
         + (usage.output_tokens as f64 / 1_000_000.0) * cost.output
         + (usage.cached_input_tokens as f64 / 1_000_000.0) * cost.cache_read
@@ -99,7 +102,7 @@ pub(crate) fn cost_of(usage: &rig_core::completion::Usage, cost: &tabit_config::
 pub(crate) fn turn_cost(
     config: &TabitConfig,
     selection: &ModelSelection,
-    usage: &rig_core::completion::Usage,
+    usage: &tabit_providers::completion::Usage,
 ) -> Option<f64> {
     if usage.total_tokens == 0 {
         return None;

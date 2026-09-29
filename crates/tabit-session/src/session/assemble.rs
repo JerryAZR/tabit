@@ -6,11 +6,11 @@ use super::mailbox::Mailbox;
 use super::{Session, SharedConversation};
 use crate::context_manager::ContextManager;
 use crate::error::SessionError;
-use rig_agent::agent::{Agent, AgentBuilder};
-use rig_agent::tool::DynamicTool;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use tabit_config::TabitConfig;
+use tabit_engine::agent::{Agent, AgentBuilder};
+use tabit_engine::tool::DynamicTool;
 use tabit_protocol::ModelSelection;
 use tokio_util::sync::CancellationToken;
 

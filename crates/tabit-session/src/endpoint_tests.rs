@@ -5,9 +5,9 @@
 use super::*;
 use crate::SessionEvent;
 use crate::tests::{Factory, echo_tool, temp_store, text_turn, text_turn_reported, tool_turn};
-use rig_agent::tool::{DynamicTool, ToolOutput};
 use serde_json::json;
 use std::time::Duration;
+use tabit_engine::tool::{DynamicTool, ToolOutput};
 use tabit_protocol::{ModelSelection, SessionCommand};
 
 /// Wiring whose builders refuse (tests that never drive session
@@ -49,7 +49,7 @@ fn slow_tool() -> DynamicTool {
 
 /// A tool whose body blocks its thread outright — no awaits, no token
 /// observation, the worst-behaved body the execution substrate must
-/// absorb (rig-agent dispatches bodies onto a sidecar runtime).
+/// absorb (tabit-engine dispatches bodies onto a sidecar runtime).
 fn blocking_tool() -> DynamicTool {
     DynamicTool::new(
         "blocking",
@@ -3223,9 +3223,9 @@ id = "m"
 
 /// A scripted turn whose request the wall rejects — the typed overflow
 /// error carrying the numbers that teach the window.
-fn overflow_turn(maximum: u64) -> Vec<rig_agent::test_utils::MockStreamEvent> {
-    vec![rig_agent::test_utils::MockStreamEvent::Error(
-        rig_agent::test_utils::MockError::http(
+fn overflow_turn(maximum: u64) -> Vec<tabit_engine::test_utils::MockStreamEvent> {
+    vec![tabit_engine::test_utils::MockStreamEvent::Error(
+        tabit_engine::test_utils::MockError::http(
             400,
             format!(
                 "prompt is too long: {} tokens > {maximum} tokens maximum",
@@ -3344,10 +3344,10 @@ async fn the_idle_door_compacts_after_a_large_run_and_the_file_holds_the_entry()
     .messages();
     assert!(matches!(
         messages.first(),
-        Some(rig_agent::completion::Message::User { content })
+        Some(tabit_engine::completion::Message::User { content })
             if matches!(
                 content.first(),
-                rig_core::message::UserContent::Text(text)
+                tabit_providers::message::UserContent::Text(text)
                     if text.text.contains("summarized work")
             )
     ));
@@ -3495,10 +3495,10 @@ async fn an_overflow_failure_is_intercepted_compacted_and_the_run_retried() {
     .messages();
     assert!(matches!(
         messages.first(),
-        Some(rig_agent::completion::Message::User { content })
+        Some(tabit_engine::completion::Message::User { content })
             if matches!(
                 content.first(),
-                rig_core::message::UserContent::Text(text)
+                tabit_providers::message::UserContent::Text(text)
                     if text.text.contains("summarized work")
             )
     ));

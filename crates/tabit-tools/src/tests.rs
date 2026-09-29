@@ -10,13 +10,13 @@ fn temp_dir(tag: &str) -> std::path::PathBuf {
     dir
 }
 
-fn ctx() -> rig_agent::tool::ToolContext {
-    rig_agent::tool::ToolContext::new()
+fn ctx() -> tabit_engine::tool::ToolContext {
+    tabit_engine::tool::ToolContext::new()
 }
 
 /// The (text, details) split of a successful multi-part tool result.
 /// Details ride the output's own field — never a content block.
-fn split_parts(result: rig_core::tool::ToolOutput) -> (String, Option<serde_json::Value>) {
+fn split_parts(result: tabit_providers::tool::ToolOutput) -> (String, Option<serde_json::Value>) {
     let mut text = String::new();
     for part in result.as_content().iter() {
         if let Some(t) = part.as_text() {
@@ -437,12 +437,12 @@ async fn powershell_missing_program_is_a_clear_error() {
 async fn portable_structs_are_named_and_erased_correctly() {
     // All four coding tools are contextual now (they read the session
     // cwd from the run's ToolContext).
-    assert_eq!(<Read as rig_agent::tool::Tool>::NAME, "read");
-    assert_eq!(<Bash as rig_agent::tool::Tool>::NAME, "bash");
+    assert_eq!(<Read as tabit_engine::tool::Tool>::NAME, "read");
+    assert_eq!(<Bash as tabit_engine::tool::Tool>::NAME, "bash");
     #[cfg(windows)]
-    assert_eq!(<Powershell as rig_agent::tool::Tool>::NAME, "powershell");
+    assert_eq!(<Powershell as tabit_engine::tool::Tool>::NAME, "powershell");
 
-    let mut set = rig_agent::tool::ToolSet::default();
+    let mut set = tabit_engine::tool::ToolSet::default();
     set.add_dynamic_tool(dynamic_contextual(Read));
     set.add_dynamic_tool(dynamic_contextual(Bash));
     let defs = set.get_tool_definitions();
@@ -467,7 +467,7 @@ async fn portable_structs_are_named_and_erased_correctly() {
 /// runs PowerShell).
 #[tokio::test]
 async fn shell_tool_registers_the_resolved_dialect() {
-    let mut set = rig_agent::tool::ToolSet::default();
+    let mut set = tabit_engine::tool::ToolSet::default();
     set.add_dynamic_tool(shell_tool());
     let defs = set.get_tool_definitions();
     assert_eq!(defs.len(), 1, "one shell tool, not a set: {defs:?}");
@@ -491,7 +491,7 @@ async fn shell_tool_registers_the_resolved_dialect() {
 
 #[tokio::test]
 async fn dynamic_tool_executes_the_contextual_body() {
-    let mut set = rig_agent::tool::ToolSet::default();
+    let mut set = tabit_engine::tool::ToolSet::default();
     set.add_dynamic_tool(dynamic_contextual(Read));
     let dir = temp_dir("dyn-read");
     fs::write(dir.join("f.txt"), "via-dynamic").expect("write");
@@ -604,7 +604,7 @@ async fn a_cancel_during_a_run_interrupts_the_command() {
         return;
     }
     let token = tokio_util::sync::CancellationToken::new();
-    let mut context = rig_agent::tool::ToolContext::new();
+    let mut context = tabit_engine::tool::ToolContext::new();
     context.insert(token.clone());
     let fire = token.clone();
     std::thread::spawn(move || {
@@ -636,7 +636,7 @@ async fn stderr_joins_the_report_behind_its_marker() {
         eprintln!("skipped: no verified Git Bash on this machine");
         return;
     }
-    let mut context = rig_agent::tool::ToolContext::new();
+    let mut context = tabit_engine::tool::ToolContext::new();
     let output = bash(
         &mut context,
         "echo the-out-line; echo the-err-line 1>&2".to_string(),
@@ -675,8 +675,8 @@ three
 ",
     )
     .expect("file");
-    let mut context = rig_agent::tool::ToolContext::new();
-    context.insert(rig_agent::tool::SessionCwd(dir.clone()));
+    let mut context = tabit_engine::tool::ToolContext::new();
+    context.insert(tabit_engine::tool::SessionCwd(dir.clone()));
     let output = read(&mut context, file.display().to_string(), Some(1), Some(0))
         .await
         .expect("a zero limit is a page, not an error");
@@ -695,7 +695,7 @@ async fn pre_cancelled_bash_never_runs() {
     }
     let token = tokio_util::sync::CancellationToken::new();
     token.cancel();
-    let mut context = rig_agent::tool::ToolContext::new();
+    let mut context = tabit_engine::tool::ToolContext::new();
     context.insert(token);
     let error = bash(&mut context, "echo must-not-run".to_string(), None)
         .await
@@ -1091,12 +1091,12 @@ async fn read_returns_an_image_content_part() {
         parts[0].as_text()
     );
     match &parts[1] {
-        rig_core::message::ToolResultContent::Image(image) => {
+        tabit_providers::message::ToolResultContent::Image(image) => {
             assert_eq!(
                 image.media_type,
-                Some(rig_core::message::ImageMediaType::PNG)
+                Some(tabit_providers::message::ImageMediaType::PNG)
             );
-            let rig_core::message::DocumentSourceKind::Base64(data) = &image.data else {
+            let tabit_providers::message::DocumentSourceKind::Base64(data) = &image.data else {
                 panic!(
                     "the image part is base64, never raw bytes (the log would bloat as a JSON number array)"
                 );
@@ -1148,9 +1148,9 @@ async fn read_rejects_paging_args_on_images() {
 // --- the session cwd: relative paths resolve against it ---
 
 /// A context scoped to `dir`.
-fn ctx_in(dir: &std::path::Path) -> rig_agent::tool::ToolContext {
+fn ctx_in(dir: &std::path::Path) -> tabit_engine::tool::ToolContext {
     let mut context = ctx();
-    context.insert(rig_agent::tool::SessionCwd(dir.to_path_buf()));
+    context.insert(tabit_engine::tool::SessionCwd(dir.to_path_buf()));
     context
 }
 
@@ -1268,7 +1268,7 @@ async fn bash_runs_in_the_session_cwd() {
 
 #[test]
 fn image_magic_detection_covers_the_provider_set() {
-    use rig_core::message::ImageMediaType;
+    use tabit_providers::message::ImageMediaType;
     assert_eq!(image_media_type(TINY_PNG), Some(ImageMediaType::PNG));
     assert_eq!(
         image_media_type(&[0xff, 0xd8, 0xff, 0xe0]),
@@ -1341,7 +1341,7 @@ async fn bash_one_huge_line_gets_the_honest_notice() {
 async fn edit_parts(
     path: &std::path::Path,
     edits: Vec<EditReplacement>,
-) -> Result<rig_core::tool::ToolOutput, ToolExecutionError> {
+) -> Result<tabit_providers::tool::ToolOutput, ToolExecutionError> {
     edit(&mut ctx(), path.to_string_lossy().into_owned(), edits).await
 }
 

@@ -46,8 +46,8 @@ use crate::protocol::{
     EXTENSION_PROTOCOL_VERSION, ExtFrame, HookDecl, HookResult, HostFrame, KIND_HOOK_RESULT,
     KIND_SERVICE_RESPONSE, KIND_TOOL_RESULT, Report, ServiceVerb, ToolDecl, ToolWireResult,
 };
-use rig_agent::tool::services::{HostServices, ModelPromptOk, ModelPromptRequest, ServiceUsage};
 use std::io::Write;
+use tabit_engine::tool::services::{HostServices, ModelPromptOk, ModelPromptRequest, ServiceUsage};
 use tabit_wire::node::{AnswerOutcome, Channel, Locality, Node, parse_shared, violation_panic};
 use tabit_wire::process::ChildWrapper;
 use tabit_wire::process::{self, wrap_command};

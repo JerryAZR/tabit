@@ -20,7 +20,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use futures::future::BoxFuture;
-use rig_agent::tool::services::{HostServices, ModelPromptOk, ModelPromptRequest, ServiceUsage};
+use tabit_engine::tool::services::{HostServices, ModelPromptOk, ModelPromptRequest, ServiceUsage};
 use tabit_ext::supervisor::{self, BOOT_TIMEOUT, ExtensionEvent, Status};
 
 /// Generous bound for real-process roundtrips (spawn + handshake on a

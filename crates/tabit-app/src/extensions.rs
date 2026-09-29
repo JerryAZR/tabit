@@ -22,16 +22,16 @@
 
 use std::sync::Arc;
 
-use rig_agent::agent::hook::{ToolCallAction, ToolResultAction};
-use rig_agent::agent::{HookStack, on};
-use rig_agent::tool::{DynamicTool, ToolContext};
-use rig_core::tool::{ToolExecutionError, content_parts};
+use tabit_engine::agent::hook::{ToolCallAction, ToolResultAction};
+use tabit_engine::agent::{HookStack, on};
+use tabit_engine::tool::{DynamicTool, ToolContext};
 use tabit_ext::protocol::ToolDecl;
 use tabit_ext::supervisor::{ExtensionHandle, ExtensionReport, Status, Supervisor};
 use tabit_protocol::{
     AvailableExtension, AvailableExtensionTool, ExtensionConflict, ExtensionConflictKind,
     ExtensionsCatalog,
 };
+use tabit_providers::tool::{ToolExecutionError, content_parts};
 
 /// The boot's mounted extension surface: the proxy tools, the hook
 /// stack (forwarding closures over the pipes), the replacements the
@@ -270,7 +270,7 @@ fn proxy(handle: ExtensionHandle, extension: String, decl: ToolDecl) -> DynamicT
                 // and verbs error (the lane's fail-closed, same as
                 // core tools).
                 let services = context
-                    .get::<Arc<dyn rig_agent::tool::services::HostServices>>()
+                    .get::<Arc<dyn tabit_engine::tool::services::HostServices>>()
                     .cloned();
                 // The run token crosses the pipe: abort detaches this
                 // body (the core contract), the select inside `call`
@@ -304,8 +304,8 @@ fn proxy(handle: ExtensionHandle, extension: String, decl: ToolDecl) -> DynamicT
 /// reported loudly (stderr, the catalog's dead standing).
 fn forward_tool_call<'a>(
     handle: ExtensionHandle,
-    ctx: &'a rig_agent::agent::HookContext,
-    call: rig_agent::agent::hook::ToolCall<'a>,
+    ctx: &'a tabit_engine::agent::HookContext,
+    call: tabit_engine::agent::hook::ToolCall<'a>,
 ) -> futures::future::BoxFuture<'static, ToolCallAction> {
     let payload = serde_json::json!({
         "session": ctx.session_id(),
@@ -335,8 +335,8 @@ fn forward_tool_call<'a>(
 /// consumer asks).
 fn forward_tool_result<'a>(
     handle: ExtensionHandle,
-    ctx: &'a rig_agent::agent::HookContext,
-    result: rig_agent::agent::hook::ToolResultEvent<'a>,
+    ctx: &'a tabit_engine::agent::HookContext,
+    result: tabit_engine::agent::hook::ToolResultEvent<'a>,
 ) -> futures::future::BoxFuture<'static, ToolResultAction> {
     let payload = serde_json::json!({
         "session": ctx.session_id(),

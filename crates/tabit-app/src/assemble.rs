@@ -114,10 +114,10 @@ fn tool_filter(args: &AppOptions) -> (Option<Vec<String>>, Vec<String>) {
 /// here, which is correct (proxy shaping is the child's business,
 /// via the crossing flags).
 fn retain_filtered(
-    tools: Vec<rig_agent::tool::DynamicTool>,
+    tools: Vec<tabit_engine::tool::DynamicTool>,
     allow: &Option<Vec<String>>,
     deny: &[String],
-) -> Vec<rig_agent::tool::DynamicTool> {
+) -> Vec<tabit_engine::tool::DynamicTool> {
     tools
         .into_iter()
         .filter(|tool| {
@@ -177,7 +177,7 @@ fn assemble_session(
     // against their own core set (the child set): they boot their own
     // hosts.
     let mut manifest_disables: Vec<String> = Vec::new();
-    let candidate: Vec<rig_agent::tool::DynamicTool> = match extensions {
+    let candidate: Vec<tabit_engine::tool::DynamicTool> = match extensions {
         Some(mounted) => {
             manifest_disables = mounted.manifest_disables().to_vec();
             let replaced = mounted.replaced_core();
@@ -228,7 +228,7 @@ fn assemble_session(
         let mut stack = if gate_enabled {
             gate::PermissionGate::stack()
         } else {
-            rig_agent::agent::HookStack::new()
+            tabit_engine::agent::HookStack::new()
         };
         if let Some(mounted) = extensions {
             stack = stack.merge(mounted.hooks());
@@ -273,7 +273,7 @@ fn assemble_session(
 /// they read the session cwd and the run token from the per-run
 /// ToolContext) plus the skill tool, except the subagent tool.
 /// The coding tools every assembly starts from.
-fn coding_tools() -> Vec<rig_agent::tool::DynamicTool> {
+fn coding_tools() -> Vec<tabit_engine::tool::DynamicTool> {
     vec![
         dynamic_contextual(tabit_tools::Read),
         dynamic_contextual(tabit_tools::Write),
@@ -292,7 +292,7 @@ fn coding_tools() -> Vec<rig_agent::tool::DynamicTool> {
 /// candidate set (core plus extension proxies). The extension
 /// mount's conflict baseline is this set — exactly what the session
 /// would mount without extensions.
-pub fn core_tools() -> Vec<rig_agent::tool::DynamicTool> {
+pub fn core_tools() -> Vec<tabit_engine::tool::DynamicTool> {
     let mut tools = coding_tools();
     tools.push(tabit_session::subagent::subagent_tool());
     tools.push(tabit_session::subagent::followup_tool());
@@ -698,14 +698,14 @@ id = "m2"
         .expect("test config")
     }
 
-    fn named_tool(name: &'static str) -> rig_agent::tool::DynamicTool {
-        rig_agent::tool::DynamicTool::new(
+    fn named_tool(name: &'static str) -> tabit_engine::tool::DynamicTool {
+        tabit_engine::tool::DynamicTool::new(
             name,
             "a test tool",
             serde_json::json!({"type": "object"}),
             move |_ctx, _args| {
                 let output = name;
-                Box::pin(async move { Ok(rig_agent::tool::ToolOutput::text(output)) })
+                Box::pin(async move { Ok(tabit_engine::tool::ToolOutput::text(output)) })
             },
         )
     }

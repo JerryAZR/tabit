@@ -26,7 +26,7 @@
 //!   buys the parent's latency.
 
 use crate::session::RunSummary;
-use rig_agent::completion::Message;
+use tabit_engine::completion::Message;
 use tokio_util::sync::CancellationToken;
 
 /// Drive one spawned child to its terminal and map the settlement to

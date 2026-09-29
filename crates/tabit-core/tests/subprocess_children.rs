@@ -23,11 +23,11 @@
 
 use httpmock::MockServer;
 use httpmock::prelude::*;
-use rig_agent::agent::ModelHandle;
-use rig_agent::test_utils::{MockCompletionModel, MockStreamEvent};
 use serde_json::json;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
+use tabit_engine::agent::ModelHandle;
+use tabit_engine::test_utils::{MockCompletionModel, MockStreamEvent};
 use tabit_protocol::SessionEvent;
 use tabit_session::{
     ModelSelection, Node, Session, SessionBuilder, SessionHost, SessionHostWiring, SessionStore,
@@ -536,7 +536,7 @@ async fn a_preamble_override_replaces_the_preamble_and_appends_the_context() {
     let summary = ctx
         .drive_subprocess(
             &mut child,
-            rig_agent::completion::Message::user("report"),
+            tabit_engine::completion::Message::user("report"),
             None,
         )
         .await;
@@ -631,7 +631,7 @@ async fn the_forwarded_blacklist_shapes_the_childs_toolset() {
     let summary = ctx
         .drive_subprocess(
             &mut child,
-            rig_agent::completion::Message::user("report"),
+            tabit_engine::completion::Message::user("report"),
             None,
         )
         .await;
@@ -888,7 +888,7 @@ id = "m"
     let denied_summary = deny_ctx
         .drive_subprocess(
             &mut denied,
-            rig_agent::completion::Message::user("denied-task-8d21"),
+            tabit_engine::completion::Message::user("denied-task-8d21"),
             None,
         )
         .await;
@@ -949,7 +949,7 @@ fn pooled_parent(
     cwd: &Path,
     node: Arc<Node>,
     first_turns: Vec<Vec<MockStreamEvent>>,
-) -> (Session, rig_agent::test_utils::MockCompletionModel) {
+) -> (Session, tabit_engine::test_utils::MockCompletionModel) {
     let config = Arc::new(
         tabit_config::TabitConfig::from_toml_str(
             r#"
@@ -974,7 +974,7 @@ id = "m"
         exe: PathBuf::from(env!("CARGO_BIN_EXE_tabit-core")),
         extensions: cwd.join(".tabit/no-extensions"),
     });
-    let model = rig_agent::test_utils::MockCompletionModel::from_stream_turns(first_turns);
+    let model = tabit_engine::test_utils::MockCompletionModel::from_stream_turns(first_turns);
     let scripted = model.clone();
     let session = SessionBuilder::new(store.clone(), config, auth, ModelSelection::new("p", "m"))
         .expect("builder")

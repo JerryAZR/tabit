@@ -23,7 +23,7 @@ use futures::future::BoxFuture;
 use tabit_protocol::StreamId;
 use tabit_wire::node::Node;
 
-use rig_agent::tool::interaction::{InteractionOutcome, UserInteraction};
+use tabit_engine::tool::interaction::{InteractionOutcome, UserInteraction};
 
 /// The session's interaction face over the node. Cheap to clone (one
 /// `Arc`); one hub per session worker, attached when the worker takes
@@ -49,7 +49,7 @@ impl InteractionHub {
     }
 
     /// The capability tools consume: `Arc<dyn UserInteraction>` for
-    /// [`rig_agent::tool::ToolContext`]'s typed map.
+    /// [`tabit_engine::tool::ToolContext`]'s typed map.
     pub fn capability(&self) -> Arc<dyn UserInteraction> {
         Arc::new(self.clone())
     }

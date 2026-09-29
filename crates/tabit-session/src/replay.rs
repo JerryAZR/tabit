@@ -24,9 +24,9 @@
 
 use crate::entry::{EntryKind, SessionEntry};
 use crate::session::{result_details, result_text, user_text, wire_status};
-use rig_core::message::{AssistantContent, Message};
 use std::collections::HashMap;
 use tabit_protocol::SessionEvent;
+use tabit_providers::message::{AssistantContent, Message};
 
 /// Project the active chain (root → leaf, the entries the next outer
 /// loop sees) into the finalized live events of a replay pass.
@@ -150,7 +150,7 @@ impl Projection {
         &mut self,
         entry: &SessionEntry,
         message: &Message,
-        usage: rig_core::completion::Usage,
+        usage: tabit_providers::completion::Usage,
         cost: Option<f64>,
         events: &mut Vec<SessionEvent>,
     ) {
@@ -261,7 +261,7 @@ impl Projection {
     fn tool_result(
         &mut self,
         entry: &SessionEntry,
-        result: &rig_core::message::ToolResult,
+        result: &tabit_providers::message::ToolResult,
         events: &mut Vec<SessionEvent>,
     ) {
         // Sanctioned crash (AGENTS.md doctrine): a tool result without a

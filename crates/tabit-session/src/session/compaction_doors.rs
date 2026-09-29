@@ -6,9 +6,9 @@
 
 use super::Session;
 use crate::compaction::{self as box_module, Door, Outcome};
-use rig_agent::agent::PreRequestSource;
-use rig_core::completion::ContextOverflow;
 use std::sync::Arc;
+use tabit_engine::agent::PreRequestSource;
+use tabit_providers::completion::ContextOverflow;
 use tokio_util::sync::CancellationToken;
 
 impl Session {

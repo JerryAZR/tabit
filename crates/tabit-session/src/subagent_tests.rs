@@ -24,7 +24,7 @@ async fn a_pre_cancelled_token_refuses_before_spawning() {
     // Bash's rule (tabit-tools' run_shell): "it never ran" is
     // structural — the check sits ahead of the SpawnContext fetch, so
     // a refused call spawns nothing (and needs no mounted capability).
-    let mut context = rig_agent::tool::ToolContext::new();
+    let mut context = tabit_engine::tool::ToolContext::new();
     let token = tokio_util::sync::CancellationToken::new();
     token.cancel();
     context.insert(token);
@@ -40,7 +40,7 @@ async fn the_tool_refuses_when_the_capability_is_not_mounted() {
     // A session whose assembly skipped subagents still has the tool
     // reachable only through explicit registration — the error names
     // the missing mount.
-    let mut context = rig_agent::tool::ToolContext::new();
+    let mut context = tabit_engine::tool::ToolContext::new();
     let error = super::subagent(&mut context, "do a thing".to_string(), None)
         .await
         .expect_err("no capability mounted");
@@ -341,7 +341,7 @@ id = \"dead\"
         std::time::Duration::from_secs(60),
         ctx.drive_subprocess(
             &mut child,
-            rig_agent::completion::Message::user("do the thing"),
+            tabit_engine::completion::Message::user("do the thing"),
             None,
         ),
     )
@@ -381,7 +381,7 @@ id = \"dead\"
 
 #[tokio::test]
 async fn a_followup_refuses_when_the_capability_is_not_mounted() {
-    let mut context = rig_agent::tool::ToolContext::new();
+    let mut context = tabit_engine::tool::ToolContext::new();
     let error = super::followup(&mut context, "swift-fox".to_string(), "again".to_string())
         .await
         .expect_err("no capability mounted");
@@ -394,7 +394,7 @@ async fn a_pre_cancelled_token_refuses_the_followup_before_sending() {
     // The structural "it never ran" refusal, shared with the subagent
     // tool — ahead of the capability fetch, so a refused follow-up
     // sends nothing to any child.
-    let mut context = rig_agent::tool::ToolContext::new();
+    let mut context = tabit_engine::tool::ToolContext::new();
     let token = tokio_util::sync::CancellationToken::new();
     token.cancel();
     context.insert(token);

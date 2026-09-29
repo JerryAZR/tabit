@@ -103,8 +103,8 @@ ruling). Two ways to make that correct in your app:
 
 - `tabit-session` is mechanism with no policy — the gate, the
   toolset, the extension world are `tabit-app`'s opinions.
-- The rig crates beneath (`rig-core`, `rig-agent`) remain usable
-  directly; `rig_agent`'s `runner_over` is the upgrade path from a
+- The rig crates beneath (`tabit-providers`, `tabit-engine`) remain usable
+  directly; `tabit_engine`'s `runner_over` is the upgrade path from a
   plain rig agent to a tabit session's durable conversation.
 - Sessions are native-only (filesystem, OS entropy). Providers ride
   the rig stack and keep its portability.

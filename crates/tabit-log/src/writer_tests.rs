@@ -30,7 +30,7 @@ fn user_record(id: &str, parent: Option<&str>) -> FileRecord {
         parent.map(str::to_string),
         "t".to_string(),
         EntryKind::UserMessage {
-            message: rig_core::completion::Message::user("x"),
+            message: tabit_providers::completion::Message::user("x"),
         },
     ))
 }

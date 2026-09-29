@@ -10,9 +10,9 @@
 //! `aborted`, …) are session state, not context, and never fold.
 
 use crate::entry::{EntryKind, SessionEntry};
-use rig_core::OneOrMany;
-use rig_core::completion::Message;
-use rig_core::message::{ToolCall, UserContent};
+use tabit_providers::OneOrMany;
+use tabit_providers::completion::Message;
+use tabit_providers::message::{ToolCall, UserContent};
 
 /// How the summary enters the model-visible context: a user-role
 /// message wrapping the summary text (the references' pattern — codex's
@@ -85,7 +85,7 @@ pub fn calls_of(message: &Message) -> Vec<&ToolCall> {
     content
         .iter()
         .filter_map(|part| match part {
-            rig_core::message::AssistantContent::ToolCall(call) => Some(call),
+            tabit_providers::message::AssistantContent::ToolCall(call) => Some(call),
             _ => None,
         })
         .collect()

@@ -8,11 +8,11 @@ use crate::model::validate_selection;
 use crate::registry::ModelRegistry;
 use crate::store::SessionStore;
 use crate::writer::SessionWriter;
-use rig_agent::agent::ModelHandle;
-use rig_agent::tool::DynamicTool;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tabit_config::{AuthConfig, TabitConfig};
+use tabit_engine::agent::ModelHandle;
+use tabit_engine::tool::DynamicTool;
 use tabit_protocol::ModelSelection;
 
 /// Builds a [`Session`], either fresh or resumed from a log.
@@ -24,7 +24,7 @@ pub struct SessionBuilder {
     pub(super) tools: Vec<DynamicTool>,
     pub(super) max_turns: usize,
     pub(super) model_factory: ModelFactory,
-    pub(super) run_hooks: Option<rig_agent::agent::HookStack>,
+    pub(super) run_hooks: Option<tabit_engine::agent::HookStack>,
     pub(super) subagent_parts: Option<Arc<crate::subagent::SubagentParts>>,
     pub(super) skills: Option<Arc<crate::skills::Skills>>,
 }
@@ -116,7 +116,7 @@ impl SessionBuilder {
     /// dev-time/extension policy — the permission gate). The stack is
     /// a value: build it once, closures capture their own
     /// session-scoped state, and it clones into each run.
-    pub fn hooks(mut self, stack: rig_agent::agent::HookStack) -> Self {
+    pub fn hooks(mut self, stack: tabit_engine::agent::HookStack) -> Self {
         self.run_hooks = Some(stack);
         self
     }

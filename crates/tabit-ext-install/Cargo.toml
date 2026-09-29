@@ -2,7 +2,9 @@
 name = "tabit-ext-install"
 version.workspace = true
 edition.workspace = true
-license = "MIT"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
 description = "Tabit extension installation: npm/git/path sources, disk as the single truth."
 
 [lints]
@@ -23,7 +25,7 @@ serde_json = { workspace = true }
 # battle-tested readers.
 flate2 = "1.1"
 tar = "0.4.44"
-tabit-ext = { path = "../tabit-ext", version = "0.41.0" }
+tabit-ext = { path = "../tabit-ext", version = "0.1.0" }
 thiserror = { workspace = true }
 
 [dev-dependencies]

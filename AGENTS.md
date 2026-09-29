@@ -52,15 +52,15 @@ never mechanism.
 
 Current workspace layout:
 
-- `crates/rig-core` — provider API clients, streaming, tools (providers kept:
+- `crates/tabit-providers` — provider API clients, streaming, tools (providers kept:
   **anthropic + openai** + the shared openai-compatible engine in
   `providers/internal`)
-- `crates/rig-agent` — agent loop / runtime, plus the host-service
+- `crates/tabit-engine` — agent loop / runtime, plus the host-service
   capabilities (`tool/services.rs`: `HostServices` — the extension
   envelope's ask + `model_prompt`, carried by contexts like
   `UserInteraction`)
-- `crates/rig-derive` — `#[rig_tool]` proc macros
-- `crates/rig` — facade crate re-exporting the three above
+- `crates/tabit-derive` — `#[rig_tool]` proc macros
+- `crates/tabit-rig` — facade crate re-exporting the three above
 - `crates/tabit-protocol` — the shared vocabulary crate (commands,
   stamped events, handshake frames; `FRONTEND.md` is the contract),
   plus `points` — the hook-point declarations (the per-point ruling,
@@ -81,7 +81,7 @@ Current workspace layout:
   tree, format-versioned), the write-behind writer, the parser, the
   context manager (the resident tree + the model-facing history
   view), the delta-token regime compaction reads — engine-free,
-  consumed by rig-agent and tabit-session
+  consumed by tabit-engine and tabit-session
 - `crates/tabit-wire` — the frozen wire's client role and the node
   runtime every tabit process is (routing layer + functional layer,
   the 2026-09 architecture): `node.rs` is the node — the three
@@ -319,8 +319,8 @@ Current workspace layout:
 8. **Canonical surfaces.** Tabit's tools are contextual
    `#[rig_tool]`s (they take `#[rig(context)] &mut ToolContext` —
    the session cwd, the run token, capabilities); `PortableTool`
-   remains rig-core's surface for non-contextual tools. Erasure into
-   `DynamicTool` goes through `rig_agent::tool::dynamic_contextual`
+   remains tabit-providers's surface for non-contextual tools. Erasure into
+   `DynamicTool` goes through `tabit_engine::tool::dynamic_contextual`
    (one implementation). OpenAI code targets
    the Responses API; chat completions is the compat-gateway wire format.
    Tool-call arguments parse strictly — truncated JSON is an error, never a
@@ -458,7 +458,7 @@ consistency, never design fit (see the gate bullet below).
 
 - WebSocket streaming: **removed** — HTTP SSE only.
 - Companion crates (bedrock, gemini-grpc, vector stores, …), `discord-bot`,
-  `rmcp` (the rig-agent `rmcp` module is **kept, feature-gated, off by
+  `rmcp` (the tabit-engine `rmcp` module is **kept, feature-gated, off by
   default** — MCP is a bad protocol, but some services are only
   reachable through it; whether tabit ships an MCP client is a later
   decision, low priority).

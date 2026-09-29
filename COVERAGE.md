@@ -214,13 +214,13 @@ conformance harness when that grows its event-level scenarios.
 ## Filled
 
 Three passes over the workspace drove the line coverage from 87.0% to
-97.3% (~250 new tests across rig-core, rig-agent, and rig-derive). The
+97.3% (~250 new tests across tabit-providers, tabit-engine, and tabit-derive). The
 tests themselves are the record; notable full-coverage files include
 `completion/message.rs`, `http_client/retry.rs`, `http_client/multipart.rs`,
 `client/*`, `embeddings/*`, `loaders/file.rs`, `vector_store/*`,
 `providers/anthropic/*`, `providers/openai/{client,embedding,model_listing}`,
 `providers/internal/wire.rs`, `tool/{output,portable,result}.rs`,
-`json_utils.rs`, `agent/{model,tool}.rs`, `rig-derive` (in-crate unit tests
+`json_utils.rs`, `agent/{model,tool}.rs`, `tabit-derive` (in-crate unit tests
 for the proc-macro grammar + `tests/embed_behavior.rs` for the Embed
 codegen).
 
@@ -661,7 +661,7 @@ the `createEmptyConfig` empty-shape pin).
 **Filled (the functional review's verified finds):**
 
 - **The gate card matrix** (`tabit-core/src/gate.rs` tests, over a
-  new `rig_agent::test_utils::hook_context` seam — hosts drive
+  new `tabit_engine::test_utils::hook_context` seam — hosts drive
   mounted hooks directly over the same capability lookup the engine
   uses): the whole decision table plus the card shape.
 - **tabit-wire**: the child-role CLI mapping (`ChildSpec::
@@ -705,7 +705,7 @@ the `createEmptyConfig` empty-shape pin).
 - **tabit-ext-install**: the manifestless-package validate refusal
   (the never-leaves-a-half-package contract's front door; the root
   stays clean) and uninstall of a never-installed name.
-- **rig-agent**: detach-on-drop — the token-and-detach ruling's
+- **tabit-engine**: detach-on-drop — the token-and-detach ruling's
   detach half had no pin (a parked body, the dispatch future
   dropped without joining, a later dispatch works; drives the
   `MockControlledTool` pair that existed unused for it).
@@ -860,7 +860,7 @@ named, the classification applies to its current lcov-uncovered ranges.
 6. **Subprocess-executed tests are not attributed**: trybuild compile-fail
    cases and the `dependency_rename` fixture crates run `cargo`/`rustc` as
    subprocesses llvm-cov does not instrument (e.g. the
-   contextual-tool-without-runtime-dep arm in `rig-derive`). The crash
+   contextual-tool-without-runtime-dep arm in `tabit-derive`). The crash
    contract (`tests/crash.rs`) joins this class: the panic hook and
    injection branch run in the spawned `tabit` child, asserted there by
    exit code 101, the stderr report, and empty stdout.
@@ -893,7 +893,7 @@ named, the classification applies to its current lcov-uncovered ranges.
      fallback (this machine has Git Bash), interpreter spawn failure, the
      `try_wait` OS-error arm, and the abnormal-signal exit description.
    - Engine-driven event arms in `stream_item_event`: `TurnRetried` (the
-     engine emits it on the malformed-tool-args defect path — rig-agent's
+     engine emits it on the malformed-tool-args defect path — tabit-engine's
      loop tests cover that engine path), `NativeItem` from `Unknown` stream
      items (no mock builder emits them), and the `FinalResponse`/
      `StreamUserItem` catch-arms the caller handles directly.
@@ -1004,7 +1004,7 @@ kept as the record of what they were)
   card-denial round-trip) were deleted with the package — **closed
   2026-09, the coverage round**: the built-in gate is in-process and
   directly pinned — the full card matrix drives `PermissionGate::
-  on_tool_call` through the new `rig_agent::test_utils::
+  on_tool_call` through the new `tabit_engine::test_utils::
   hook_context` seam (allow, deny-with-reason, ask-answered-allow,
   block with and without custom text, dismissed, malformed-answer
   fails closed, no-UI fails closed, and the native:select_one card
@@ -1027,7 +1027,7 @@ kept as the record of what they were)
 
 ## v2 slice 1 — ids, brackets, tool status, error carrier (2026-08)
 
-- Turn announcement (rig-agent `drive_agent`, `TurnStarted`/
+- Turn announcement (tabit-engine `drive_agent`, `TurnStarted`/
   `TurnCommitted` items, hook-context id) — **covered** by the
   streaming tests: announcement-before-content, ids reach
   the hook context, retry announces a fresh id and only the
@@ -1046,7 +1046,7 @@ kept as the record of what they were)
 - `tool_result` content+status — **covered** (`tool_roundtrip` success
   shape, `failing_tool_results_carry_status_and_content` for
   `failed { exit_code }` + faithful content; bash's structured code
-  pinned in tabit-tools; disposition mapping unit-tested in rig-core).
+  pinned in tabit-tools; disposition mapping unit-tested in tabit-providers).
 - Startup degradations — **covered** (`default_selection_*` note
   assertions; endpoint first-frame; bridge ack-then-note ordering).
   The `push`/`pump` liveness race arms are documented both-orders-safe

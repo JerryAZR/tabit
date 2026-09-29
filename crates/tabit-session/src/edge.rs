@@ -221,13 +221,13 @@ mod tests {
         EventFrame, ModelSelection, Session, SessionBuilder, SessionHost, SessionHostWiring,
         SessionSource, SessionStore,
     };
-    use rig_agent::agent::ModelHandle;
-    use rig_agent::test_utils::{MockCompletionModel, MockStreamEvent};
-    use rig_core::completion::Usage;
     use std::io::{Cursor, Read};
     use std::path::Path;
     use std::sync::Arc;
     use tabit_config::{AuthConfig, TabitConfig};
+    use tabit_engine::agent::ModelHandle;
+    use tabit_engine::test_utils::{MockCompletionModel, MockStreamEvent};
+    use tabit_providers::completion::Usage;
 
     fn script(text: &str) -> Vec<MockStreamEvent> {
         vec![
@@ -293,7 +293,7 @@ id = "m"
     fn test_session_with(
         tag: &str,
         turns: Vec<Vec<MockStreamEvent>>,
-        tools: Vec<rig_agent::tool::DynamicTool>,
+        tools: Vec<tabit_engine::tool::DynamicTool>,
     ) -> Session {
         let dir = test_dir(tag);
         let _ = std::fs::remove_dir_all(&dir);
@@ -357,15 +357,15 @@ id = "m"
 
     /// A tool that takes real time, so a run is provably in flight when
     /// the client's input closes.
-    fn slow_tool() -> rig_agent::tool::DynamicTool {
-        rig_agent::tool::DynamicTool::new(
+    fn slow_tool() -> tabit_engine::tool::DynamicTool {
+        tabit_engine::tool::DynamicTool::new(
             "slow",
             "sleeps then echoes",
             serde_json::json!({"type":"object","properties":{"value":{"type":"string"}}}),
             |_ctx, _args| {
                 Box::pin(async move {
                     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-                    Ok(rig_agent::tool::ToolOutput::text("slept"))
+                    Ok(tabit_engine::tool::ToolOutput::text("slept"))
                 })
             },
         )

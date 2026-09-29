@@ -62,10 +62,10 @@
 //!   model-visible record for calls that never answered); it never
 //!   returns output that looks like a completed run.
 
-use rig_agent::tool::{DynamicTool, ToolContext};
-use rig_core::tool::{ToolExecutionError, ToolOutput};
-use rig_derive::rig_tool;
 use std::time::{Duration, Instant};
+use tabit_derive::rig_tool;
+use tabit_engine::tool::{DynamicTool, ToolContext};
+use tabit_providers::tool::{ToolExecutionError, ToolOutput};
 
 mod diff;
 mod file_io;
@@ -79,7 +79,7 @@ pub const MAX_TIMEOUT_SECS: u64 = 600;
 
 /// Resolve a model-given path for this run: absolute paths pass
 /// through; relative paths join the session's working directory (the
-/// [`SessionCwd`](rig_agent::tool::SessionCwd) capability, mounted by
+/// [`SessionCwd`](tabit_engine::tool::SessionCwd) capability, mounted by
 /// the run's opener), falling back to the process cwd for standalone
 /// tool use — the same bytes the OS would resolve today.
 fn resolve(context: &ToolContext, path: &str) -> std::path::PathBuf {
@@ -88,7 +88,7 @@ fn resolve(context: &ToolContext, path: &str) -> std::path::PathBuf {
         return given.to_path_buf();
     }
     match context
-        .get::<rig_agent::tool::SessionCwd>()
+        .get::<tabit_engine::tool::SessionCwd>()
         .map(|cwd| cwd.0.clone())
     {
         Some(cwd) => cwd.join(given),
@@ -102,7 +102,7 @@ fn resolve(context: &ToolContext, path: &str) -> std::path::PathBuf {
 /// is session-scoped.
 fn session_cwd(context: &ToolContext) -> Option<std::path::PathBuf> {
     context
-        .get::<rig_agent::tool::SessionCwd>()
+        .get::<tabit_engine::tool::SessionCwd>()
         .map(|cwd| cwd.0.clone())
 }
 
@@ -153,8 +153,8 @@ pub(crate) const IMAGE_MAX_BYTES: usize = 3 * 1024 * 1024;
 
 /// The image formats every provider carries (magic-byte detected);
 /// matches pi's native set. HEIC/HEIF/SVG stay text-path files.
-fn image_media_type(bytes: &[u8]) -> Option<rig_core::message::ImageMediaType> {
-    use rig_core::message::ImageMediaType;
+fn image_media_type(bytes: &[u8]) -> Option<tabit_providers::message::ImageMediaType> {
+    use tabit_providers::message::ImageMediaType;
     match bytes {
         [0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, ..] => Some(ImageMediaType::PNG),
         [0xff, 0xd8, 0xff, ..] => Some(ImageMediaType::JPEG),
@@ -187,7 +187,7 @@ fn image_media_type(bytes: &[u8]) -> Option<rig_core::message::ImageMediaType> {
 fn image_read(
     path: &str,
     bytes: &[u8],
-    media_type: rig_core::message::ImageMediaType,
+    media_type: tabit_providers::message::ImageMediaType,
     paged_args: bool,
 ) -> Result<ToolOutput, ToolExecutionError> {
     if paged_args {
@@ -205,13 +205,14 @@ fn image_read(
         )));
     }
     use base64::Engine as _;
-    use rig_core::message::ToolResultContent;
-    let mime = rig_core::completion::message::MimeType::to_mime_type(&media_type).to_string();
+    use tabit_providers::message::ToolResultContent;
+    let mime =
+        tabit_providers::completion::message::MimeType::to_mime_type(&media_type).to_string();
     let report = format!("Read image `{path}` ({mime}, {} bytes)", bytes.len());
     let parts = vec![
         ToolResultContent::Text(report.into()),
-        ToolResultContent::Image(rig_core::message::Image {
-            data: rig_core::message::DocumentSourceKind::Base64(
+        ToolResultContent::Image(tabit_providers::message::Image {
+            data: tabit_providers::message::DocumentSourceKind::Base64(
                 base64::engine::general_purpose::STANDARD.encode(bytes),
             ),
             media_type: Some(media_type),
@@ -222,7 +223,7 @@ fn image_read(
     // Two parts by construction.
     #[allow(clippy::expect_used)]
     Ok(ToolOutput::content(
-        rig_core::OneOrMany::many(parts).expect("the parts vector is non-empty"),
+        tabit_providers::OneOrMany::many(parts).expect("the parts vector is non-empty"),
     ))
 }
 
@@ -437,14 +438,14 @@ pub async fn edit(
     let resolved = resolve(context, &path);
     let _guard = file_io::lock(&resolved).await;
     let outcome = edit_core(&resolved.to_string_lossy(), &edits)?;
-    rig_core::tool::content_parts(outcome.report, outcome.details)
+    tabit_providers::tool::content_parts(outcome.report, outcome.details)
 }
 
 /// One targeted replacement: `old_text` must occur exactly once in the
 /// file (LF-normalized); `new_text` replaces it.
-#[derive(serde::Deserialize, rig_core::schemars::JsonSchema)]
-#[serde(crate = "rig_core::serde")]
-#[schemars(crate = "rig_core::schemars")]
+#[derive(serde::Deserialize, tabit_providers::schemars::JsonSchema)]
+#[serde(crate = "tabit_providers::serde")]
+#[schemars(crate = "tabit_providers::schemars")]
 pub struct EditReplacement {
     /// Exact text to replace (must occur exactly once in the file).
     pub old_text: String,
@@ -867,7 +868,7 @@ async fn run_shell(
         }));
     }
     if output.status.success() {
-        rig_core::tool::content_parts(visible, details)
+        tabit_providers::tool::content_parts(visible, details)
     } else {
         // The exit status rides structure too (the protocol's
         // `failed { exit_code }`): numeric codes pass through as
@@ -1029,8 +1030,8 @@ fn join_reader(handle: ReaderJoin) -> Vec<u8> {
 /// The contextual-tool erasure (every tabit tool is contextual — they
 /// read the session cwd and the run token from the per-run
 /// [`ToolContext`]). The implementation lives with its types in
-/// rig-agent; re-exported here as the tools crate's registration door.
-pub use rig_agent::tool::dynamic_contextual;
+/// tabit-engine; re-exported here as the tools crate's registration door.
+pub use tabit_engine::tool::dynamic_contextual;
 
 #[cfg(test)]
 mod tests;

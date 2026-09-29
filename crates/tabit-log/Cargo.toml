@@ -2,7 +2,9 @@
 name = "tabit-log"
 version.workspace = true
 edition.workspace = true
-license = "MIT"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
 description = "The durable conversation: tree, records, context manager, write buffer — agent-agnostic."
 
 [lints]
@@ -15,7 +17,7 @@ doctest = true
 
 [dependencies]
 humantime = { workspace = true }
-rig-core = { path = "../rig-core", version = "0.41.0", default-features = false }
+tabit-providers = { path = "../tabit-providers", version = "0.1.0", default-features = false }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

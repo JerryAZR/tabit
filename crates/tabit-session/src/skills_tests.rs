@@ -2,9 +2,9 @@
 //! scan shape, the catalog render, and the confined tool.
 
 use super::*;
-use rig_agent::tool::ToolContext;
 use std::fs;
 use std::path::{Path, PathBuf};
+use tabit_engine::tool::ToolContext;
 
 fn temp_dir(tag: &str) -> PathBuf {
     let dir = std::env::temp_dir()

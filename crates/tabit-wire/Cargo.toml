@@ -2,7 +2,9 @@
 name = "tabit-wire"
 version.workspace = true
 edition.workspace = true
-license = "MIT"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
 description = "The frozen wire's client role and the child-process substrate: spawn a tabit-core child, speak the frontend protocol to it."
 
 [lints]
@@ -24,8 +26,8 @@ process-wrap = { version = "10", default-features = false, features = [
 serde_json = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true, features = ["v7"] }
-tabit-log = { path = "../tabit-log", version = "0.41.0" }
-tabit-protocol = { path = "../tabit-protocol", version = "0.41.0" }
+tabit-log = { path = "../tabit-log", version = "0.1.0" }
+tabit-protocol = { path = "../tabit-protocol", version = "0.1.0" }
 tokio = { workspace = true, features = [
     "io-util",
     "macros",

@@ -8,7 +8,7 @@ fn node(id: &str, parent: Option<&str>) -> SessionEntry {
         parent.map(str::to_string),
         "t".to_string(),
         crate::entry::EntryKind::UserMessage {
-            message: rig_core::completion::Message::user("x"),
+            message: tabit_providers::completion::Message::user("x"),
         },
     )
 }
@@ -131,7 +131,7 @@ fn compaction_node(id: &str, parent: Option<&str>, cut_child: &str) -> SessionEn
             cut_child: cut_child.to_string(),
             tokens_before: 0,
             tokens_after: 0,
-            usage: rig_core::completion::Usage::default(),
+            usage: tabit_providers::completion::Usage::default(),
             cost: None,
         },
     )

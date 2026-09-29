@@ -26,10 +26,10 @@
 //! then symlink-resolved at read time — so a symlink inside the
 //! skill dir pointing outside cannot escape.
 
-use rig_agent::tool::{DynamicTool, ToolContext, ToolExecutionError, ToolOutput};
-use rig_derive::rig_tool;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use tabit_derive::rig_tool;
+use tabit_engine::tool::{DynamicTool, ToolContext, ToolExecutionError, ToolOutput};
 
 /// One discovered skill. `base_dir` is the canonical directory
 /// containing SKILL.md (symlinks resolved at discovery — the tool's
@@ -406,7 +406,7 @@ impl Skills {
 /// The `skill` tool's mount point — the assembly's contextual
 /// [`dynamic_contextual`] shape (the subagent tool's sibling).
 pub fn skill_tool() -> DynamicTool {
-    rig_agent::tool::dynamic_contextual(Skill)
+    tabit_engine::tool::dynamic_contextual(Skill)
 }
 
 /// Invoke a skill from the available-skills catalog — the model

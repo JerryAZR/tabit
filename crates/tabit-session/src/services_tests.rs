@@ -6,10 +6,10 @@
 
 use std::sync::Arc;
 
-use rig_agent::agent::ModelHandle;
-use rig_agent::test_utils::{MockCompletionModel, MockStreamEvent};
-use rig_agent::tool::services::{HostServices as _, ModelPromptRequest};
 use tabit_config::TabitConfig;
+use tabit_engine::agent::ModelHandle;
+use tabit_engine::test_utils::{MockCompletionModel, MockStreamEvent};
+use tabit_engine::tool::services::{HostServices as _, ModelPromptRequest};
 use tabit_protocol::ModelSelection;
 
 use crate::services::ExtensionServices;

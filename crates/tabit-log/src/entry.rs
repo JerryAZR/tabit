@@ -28,10 +28,10 @@
 //! a newer tabit, and silently dropping records would corrupt the
 //! conversation.
 
-use rig_core::completion::{Message, Usage};
-use rig_core::message::ToolResult;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use tabit_providers::completion::{Message, Usage};
+use tabit_providers::message::ToolResult;
 
 /// The session file format, major.minor. **Major** increments on a
 /// breaking vocabulary change — older readers reject the file loudly.

@@ -6,9 +6,9 @@ use crate::entry::{EntryKind, FileRecord, SessionEntry, SideKind, SideRecord};
 use crate::error::LogError;
 use crate::tree::SessionTree;
 use crate::writer::WriteBuffer;
-use rig_core::OneOrMany;
-use rig_core::completion::{Message, Usage};
-use rig_core::message::{
+use tabit_providers::OneOrMany;
+use tabit_providers::completion::{Message, Usage};
+use tabit_providers::message::{
     AssistantContent, ToolCall, ToolFunction, ToolResult, ToolResultContent, UserContent,
 };
 

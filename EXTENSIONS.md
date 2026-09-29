@@ -688,7 +688,7 @@ this verb is what makes the attribution story real).
 **Shipped (2026-09)**: the envelope is `service_request { request_id,
 call_id, verb, …payload }` in / `service_response { request_id,
 result?, error? }` out; `model_prompt` is its one verb. The capability —
-`HostServices`, in rig-agent beside `UserInteraction` (the contexts
+`HostServices`, in tabit-engine beside `UserInteraction` (the contexts
 are the carriers) — is snapshotted per run into the tool context;
 `model_prompt` is a BARE completion (no preamble, no tools, no
 history, its own standalone conversation and cache route — the
@@ -738,8 +738,8 @@ Implications:
   context-carriage when a consumer exists — pause points stay
   enumerable (ENGINE.md lists them), and adding one is a design
   event, not a freedom.
-- The capability type lives in rig-agent
-  (`crates/rig-agent/src/tool/interaction.rs`) — one crate below the
+- The capability type lives in tabit-engine
+  (`crates/tabit-engine/src/tool/interaction.rs`) — one crate below the
   session layer, reachable by every hook and tool site. Dependency
   direction is architecture law, not license law, but it still points
   one way.

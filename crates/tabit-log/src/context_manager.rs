@@ -28,8 +28,8 @@ use crate::ids;
 use crate::lock;
 use crate::tree::{SessionTree, TreeFault};
 use crate::writer::SharedBuffer;
-use rig_core::completion::{Message, Usage};
-use rig_core::message::{AssistantContent, ToolResult, UserContent};
+use tabit_providers::completion::{Message, Usage};
+use tabit_providers::message::{AssistantContent, ToolResult, UserContent};
 
 /// A refused checkout: the target names no node the tree holds. User
 /// input — graceful. A target *inside* an open roundtrip is not this

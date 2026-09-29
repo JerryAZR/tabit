@@ -15,9 +15,9 @@
 // (the same allowance the extension SDK's bins carry).
 #![allow(clippy::indexing_slicing)]
 
-use rig_agent::agent::hook::{AgentHook, HookContext, ToolCall, ToolCallAction};
-use rig_agent::tool::interaction::InteractionOutcome;
 use serde_json::json;
+use tabit_engine::agent::hook::{AgentHook, HookContext, ToolCall, ToolCallAction};
+use tabit_engine::tool::interaction::InteractionOutcome;
 
 /// The gate: the default rule set plus the ask. Shared across
 /// sessions like every hook member (stateless per call — the policy
@@ -40,8 +40,8 @@ impl PermissionGate {
     /// The hook stack with the gate mounted — priority 0, ahead of
     /// whatever the extension mount carries (the cheap in-process
     /// checks run first; extensions see what survived).
-    pub fn stack() -> rig_agent::agent::HookStack {
-        let mut stack = rig_agent::agent::HookStack::new();
+    pub fn stack() -> tabit_engine::agent::HookStack {
+        let mut stack = tabit_engine::agent::HookStack::new();
         stack.push(Self::mount());
         stack
     }
@@ -167,7 +167,7 @@ fn skip(reason: Option<String>, call: ToolCall<'_>) -> ToolCallAction {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rig_agent::tool::interaction::UserInteraction;
+    use tabit_engine::tool::interaction::UserInteraction;
 
     /// The scripted user: one canned answer per ask, remembering the
     /// ask it answered (ui_type + payload) for the assertions.
@@ -219,11 +219,11 @@ mod tests {
     }
 
     fn ctx(user: Option<&std::sync::Arc<ScriptedUser>>) -> HookContext {
-        let mut capabilities = rig_agent::tool::ToolContext::new();
+        let mut capabilities = tabit_engine::tool::ToolContext::new();
         if let Some(user) = user {
             capabilities.insert(user.clone() as std::sync::Arc<dyn UserInteraction>);
         }
-        rig_agent::test_utils::hook_context(capabilities)
+        tabit_engine::test_utils::hook_context(capabilities)
     }
 
     fn call(args: &str) -> ToolCall<'_> {

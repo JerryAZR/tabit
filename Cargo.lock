@@ -2283,122 +2283,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "rig"
-version = "0.41.0"
-dependencies = [
- "anyhow",
- "async-stream",
- "aws-smithy-eventstream",
- "aws-smithy-types",
- "axum",
- "base64",
- "bytes",
- "futures",
- "httpmock",
- "reqwest",
- "reqwest-middleware",
- "rig-agent",
- "rig-core",
- "rig-derive",
- "schemars",
- "serde",
- "serde_json",
- "serde_yaml",
- "sha2",
- "syn 2.0.119",
- "tabit-log",
- "thiserror",
- "tokio",
- "tracing-subscriber",
- "url",
-]
-
-[[package]]
-name = "rig-agent"
-version = "0.41.0"
-dependencies = [
- "anyhow",
- "async-stream",
- "fastrand",
- "futures",
- "http 1.5.0",
- "indexmap",
- "rig-core",
- "rig-derive",
- "rmcp",
- "schemars",
- "serde",
- "serde_json",
- "tabit-log",
- "thiserror",
- "tokio",
- "tokio-test",
- "tokio-util",
- "tracing",
- "tracing-futures",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "rig-core"
-version = "0.41.0"
-dependencies = [
- "anyhow",
- "as-any",
- "async-stream",
- "base64",
- "bytes",
- "eventsource-stream",
- "fastrand",
- "futures",
- "futures-timer",
- "http 1.5.0",
- "httpdate",
- "indexmap",
- "mime",
- "mime_guess",
- "percent-encoding",
- "pin-project-lite",
- "proptest",
- "reqwest",
- "reqwest-middleware",
- "rig-derive",
- "schemars",
- "serde",
- "serde_json",
- "serde_path_to_error",
- "thiserror",
- "tokio",
- "tokio-test",
- "tracing",
- "tracing-futures",
- "tracing-subscriber",
- "trybuild",
- "url",
-]
-
-[[package]]
-name = "rig-derive"
-version = "0.41.0"
-dependencies = [
- "anyhow",
- "convert_case",
- "futures",
- "proc-macro-crate",
- "proc-macro2",
- "quote",
- "rig-agent",
- "rig-core",
- "schemars",
- "serde",
- "serde_json",
- "syn 2.0.119",
- "tokio",
- "tracing-subscriber",
- "trybuild",
-]
-
-[[package]]
 name = "ring"
 version = "0.17.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2958,16 +2842,16 @@ dependencies = [
 
 [[package]]
 name = "tabit-app"
-version = "0.41.0"
+version = "0.1.0"
 dependencies = [
  "futures",
- "rig-agent",
- "rig-core",
  "serde_json",
  "tabit-config",
+ "tabit-engine",
  "tabit-ext",
  "tabit-gate",
  "tabit-protocol",
+ "tabit-providers",
  "tabit-session",
  "tabit-tools",
  "tokio",
@@ -2976,11 +2860,11 @@ dependencies = [
 
 [[package]]
 name = "tabit-config"
-version = "0.41.0"
+version = "0.1.0"
 dependencies = [
- "rig-core",
  "serde",
  "serde_json",
+ "tabit-providers",
  "thiserror",
  "tokio",
  "toml",
@@ -2989,18 +2873,18 @@ dependencies = [
 
 [[package]]
 name = "tabit-core"
-version = "0.41.0"
+version = "0.1.0"
 dependencies = [
  "futures",
  "httpmock",
  "reqwest",
- "rig-agent",
- "rig-core",
  "serde_json",
  "tabit-app",
  "tabit-config",
+ "tabit-engine",
  "tabit-ext-install",
  "tabit-protocol",
+ "tabit-providers",
  "tabit-session",
  "tokio",
  "tokio-util",
@@ -3008,13 +2892,60 @@ dependencies = [
 ]
 
 [[package]]
-name = "tabit-ext"
-version = "0.41.0"
+name = "tabit-derive"
+version = "0.1.0"
 dependencies = [
+ "anyhow",
+ "convert_case",
  "futures",
- "rig-agent",
+ "proc-macro-crate",
+ "proc-macro2",
+ "quote",
+ "schemars",
  "serde",
  "serde_json",
+ "syn 2.0.119",
+ "tabit-engine",
+ "tabit-providers",
+ "tokio",
+ "tracing-subscriber",
+ "trybuild",
+]
+
+[[package]]
+name = "tabit-engine"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-stream",
+ "fastrand",
+ "futures",
+ "http 1.5.0",
+ "indexmap",
+ "rmcp",
+ "schemars",
+ "serde",
+ "serde_json",
+ "tabit-derive",
+ "tabit-log",
+ "tabit-providers",
+ "thiserror",
+ "tokio",
+ "tokio-test",
+ "tokio-util",
+ "tracing",
+ "tracing-futures",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "tabit-ext"
+version = "0.1.0"
+dependencies = [
+ "futures",
+ "serde",
+ "serde_json",
+ "tabit-engine",
  "tabit-log",
  "tabit-protocol",
  "tabit-wire",
@@ -3026,7 +2957,7 @@ dependencies = [
 
 [[package]]
 name = "tabit-ext-install"
-version = "0.41.0"
+version = "0.1.0"
 dependencies = [
  "flate2",
  "httpmock",
@@ -3039,13 +2970,13 @@ dependencies = [
 
 [[package]]
 name = "tabit-ext-sdk"
-version = "0.41.0"
+version = "0.1.0"
 dependencies = [
  "futures",
  "reqwest",
- "rig-agent",
  "serde",
  "serde_json",
+ "tabit-engine",
  "tabit-ext",
  "tabit-log",
  "tabit-protocol",
@@ -3058,7 +2989,7 @@ dependencies = [
 
 [[package]]
 name = "tabit-gate"
-version = "0.41.0"
+version = "0.1.0"
 dependencies = [
  "brush-parser",
  "glob",
@@ -3072,12 +3003,12 @@ dependencies = [
 
 [[package]]
 name = "tabit-log"
-version = "0.41.0"
+version = "0.1.0"
 dependencies = [
  "humantime",
- "rig-core",
  "serde",
  "serde_json",
+ "tabit-providers",
  "thiserror",
  "tracing",
  "uuid",
@@ -3085,29 +3016,98 @@ dependencies = [
 
 [[package]]
 name = "tabit-protocol"
-version = "0.41.0"
+version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
 ]
 
 [[package]]
+name = "tabit-providers"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "as-any",
+ "async-stream",
+ "base64",
+ "bytes",
+ "eventsource-stream",
+ "fastrand",
+ "futures",
+ "futures-timer",
+ "http 1.5.0",
+ "httpdate",
+ "indexmap",
+ "mime",
+ "mime_guess",
+ "percent-encoding",
+ "pin-project-lite",
+ "proptest",
+ "reqwest",
+ "reqwest-middleware",
+ "schemars",
+ "serde",
+ "serde_json",
+ "serde_path_to_error",
+ "tabit-derive",
+ "thiserror",
+ "tokio",
+ "tokio-test",
+ "tracing",
+ "tracing-futures",
+ "tracing-subscriber",
+ "trybuild",
+ "url",
+]
+
+[[package]]
+name = "tabit-rig"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-stream",
+ "aws-smithy-eventstream",
+ "aws-smithy-types",
+ "axum",
+ "base64",
+ "bytes",
+ "futures",
+ "httpmock",
+ "reqwest",
+ "reqwest-middleware",
+ "schemars",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "sha2",
+ "syn 2.0.119",
+ "tabit-derive",
+ "tabit-engine",
+ "tabit-log",
+ "tabit-providers",
+ "thiserror",
+ "tokio",
+ "tracing-subscriber",
+ "url",
+]
+
+[[package]]
 name = "tabit-session"
-version = "0.41.0"
+version = "0.1.0"
 dependencies = [
  "futures",
  "http 1.5.0",
  "humantime",
  "petname",
- "rig-agent",
- "rig-core",
- "rig-derive",
  "serde",
  "serde_json",
  "serde_yaml",
  "tabit-config",
+ "tabit-derive",
+ "tabit-engine",
  "tabit-log",
  "tabit-protocol",
+ "tabit-providers",
  "tabit-wire",
  "thiserror",
  "tokio",
@@ -3118,18 +3118,18 @@ dependencies = [
 
 [[package]]
 name = "tabit-tools"
-version = "0.41.0"
+version = "0.1.0"
 dependencies = [
  "base64",
  "futures",
  "process-wrap",
- "rig-agent",
- "rig-core",
- "rig-derive",
  "serde",
  "serde_json",
  "similar",
+ "tabit-derive",
+ "tabit-engine",
  "tabit-protocol",
+ "tabit-providers",
  "tempfile",
  "tokio",
  "tokio-util",
@@ -3139,7 +3139,7 @@ dependencies = [
 
 [[package]]
 name = "tabit-wire"
-version = "0.41.0"
+version = "0.1.0"
 dependencies = [
  "process-wrap",
  "serde_json",

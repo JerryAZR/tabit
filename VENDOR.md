@@ -1,5 +1,13 @@
 # VENDOR.md
 
+> **Rename addendum (2026-09):** the four vendored crates no longer carry
+> upstream's names. `rig-core` → `crates/tabit-providers`, `rig-agent` →
+> `crates/tabit-engine`, `rig-derive` → `crates/tabit-derive`, `rig` →
+> `crates/tabit-rig`; every path and crate name below refers to the
+> pre-rename tree. The `#[rig_tool]` macro name is unchanged. Upstream's
+> MIT copyright notice is preserved in each renamed crate's LICENSE
+> alongside tabit's.
+
 Historical record of how this workspace was seeded from the [rig](https://github.com/0xPlaygrounds/rig)
 Rust AI framework. The rig source was vendored as a starting point for **tabit**
 — borrowed as source rather than an external crate so it can be modified

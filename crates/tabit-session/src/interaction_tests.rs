@@ -6,24 +6,24 @@
 use super::*;
 use crate::SessionEvent;
 use crate::tests::{Factory, temp_store, text_turn, tool_turn};
-use rig_agent::test_utils::MockStreamEvent;
-use rig_agent::tool::{DynamicTool, ToolOutput};
-use rig_core::completion::Usage;
 use serde_json::json;
+use tabit_engine::test_utils::MockStreamEvent;
+use tabit_engine::tool::{DynamicTool, ToolOutput};
 use tabit_protocol::SessionCommand;
+use tabit_providers::completion::Usage;
 
 /// A minimal ask-gate over the public hook surface — the seam these
 /// tests cover (a policy hook asking through the run context, the hub
 /// routing, the actor answering). The real permission gate is the
 /// `gate` extension package (EXTENSIONS.md); the binary assembles
 /// hooks exactly the way this factory does.
-fn gated_gate() -> rig_agent::agent::HookStack {
-    use rig_agent::agent::hook::ToolCallAction;
+fn gated_gate() -> tabit_engine::agent::HookStack {
+    use tabit_engine::agent::hook::ToolCallAction;
     let granted: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<String>>> =
         std::sync::Arc::default();
-    rig_agent::agent::HookStack::new().hook(
+    tabit_engine::agent::HookStack::new().hook(
         ("test-gate", 0),
-        rig_agent::agent::on::tool_call(move |ctx, call| {
+        tabit_engine::agent::on::tool_call(move |ctx, call| {
             let granted = granted.clone();
             let tool = call.tool_name.to_string();
             let args = call.args.to_string();
@@ -65,11 +65,11 @@ fn gated_gate() -> rig_agent::agent::HookStack {
                     .request(tabit_protocol::templates::ui::SELECT_ONE, payload)
                     .await
                 {
-                    rig_agent::tool::interaction::InteractionOutcome::Answered(payload) => {
+                    tabit_engine::tool::interaction::InteractionOutcome::Answered(payload) => {
                         serde_json::from_value::<tabit_protocol::templates::SelectAnswer>(payload)
                             .unwrap_or_default()
                     }
-                    rig_agent::tool::interaction::InteractionOutcome::Dismissed => {
+                    tabit_engine::tool::interaction::InteractionOutcome::Dismissed => {
                         tabit_protocol::templates::SelectAnswer::default()
                     }
                 };
@@ -122,7 +122,7 @@ fn asking_tool() -> DynamicTool {
         json!({"type":"object","properties":{"question":{"type":"string"}}}),
         |ctx, args| {
             Box::pin(async move {
-                use rig_agent::tool::interaction::UserInteraction;
+                use tabit_engine::tool::interaction::UserInteraction;
                 let question = args
                     .get("question")
                     .and_then(|v| v.as_str())
@@ -143,13 +143,13 @@ fn asking_tool() -> DynamicTool {
                     .request(tabit_protocol::templates::ui::SELECT_ANY, payload)
                     .await;
                 let text = match reply {
-                    rig_agent::tool::interaction::InteractionOutcome::Answered(payload) => {
+                    tabit_engine::tool::interaction::InteractionOutcome::Answered(payload) => {
                         serde_json::from_value::<tabit_protocol::templates::SelectAnswer>(payload)
                             .map(|a| a.text)
                             .ok()
                             .flatten()
                     }
-                    rig_agent::tool::interaction::InteractionOutcome::Dismissed => None,
+                    tabit_engine::tool::interaction::InteractionOutcome::Dismissed => None,
                 };
                 Ok(ToolOutput::text(
                     text.unwrap_or_else(|| "dismissed".to_string()),

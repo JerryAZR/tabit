@@ -22,12 +22,12 @@ use std::sync::{Arc, Mutex};
 
 use futures::StreamExt as _;
 use futures::future::BoxFuture;
-use rig_agent::agent::{Agent, MultiTurnStreamItem};
-use rig_agent::streaming::StreamingPrompt as _;
-use rig_agent::tool::services::{HostServices, ModelPromptOk, ModelPromptRequest, ServiceUsage};
-use rig_core::completion::Usage;
 use tabit_config::TabitConfig;
+use tabit_engine::agent::{Agent, MultiTurnStreamItem};
+use tabit_engine::streaming::StreamingPrompt as _;
+use tabit_engine::tool::services::{HostServices, ModelPromptOk, ModelPromptRequest, ServiceUsage};
 use tabit_protocol::ModelSelection;
+use tabit_providers::completion::Usage;
 
 use crate::session::ModelFactory;
 use crate::session::assemble::build_agent;

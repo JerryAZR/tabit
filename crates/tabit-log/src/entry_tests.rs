@@ -1,14 +1,14 @@
 use super::*;
-use rig_core::OneOrMany;
-use rig_core::completion::{Message, Usage};
-use rig_core::message::{ToolCall, ToolFunction, ToolResult, ToolResultContent};
 use serde_json::json;
+use tabit_providers::OneOrMany;
+use tabit_providers::completion::{Message, Usage};
+use tabit_providers::message::{ToolCall, ToolFunction, ToolResult, ToolResultContent};
 
 fn user_entry() -> EntryKind {
     EntryKind::UserMessage {
         message: Message::User {
-            content: OneOrMany::one(rig_core::message::UserContent::Text(
-                rig_core::message::Text::new("hello"),
+            content: OneOrMany::one(tabit_providers::message::UserContent::Text(
+                tabit_providers::message::Text::new("hello"),
             )),
         },
     }
@@ -18,7 +18,7 @@ fn assistant_entry_with_tool_call() -> EntryKind {
     EntryKind::AssistantMessage {
         message: Message::Assistant {
             id: None,
-            content: OneOrMany::one(rig_core::message::AssistantContent::ToolCall(
+            content: OneOrMany::one(tabit_providers::message::AssistantContent::ToolCall(
                 ToolCall::new(
                     "call-1".to_string(),
                     ToolFunction::new("echo".to_string(), json!({"v": 1})),

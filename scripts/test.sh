@@ -7,12 +7,13 @@
 # Usage:
 #   scripts/test.sh              cargo test --workspace --no-fail-fast
 #   scripts/test.sh <args...>    extra cargo-test args pass through
-#                                (e.g. `--target-dir target-test` when the
-#                                GUI holds a lock on target\debug). Note
+#                                (e.g. `--target-dir target-test` when a
+#                                running tabit-core holds a lock on
+#                                target\debug). Note
 #                                the workspace set is always included:
 #                                `-p crate` ADDS to it (cargo's rule), and
 #                                a bare name filters within every suite.
-#   scripts/test.sh --gate       fmt --check + clippy + build -p tabit
+#   scripts/test.sh --gate       fmt --check + clippy + build -p tabit-core
 #                               + test — the full
 #                                green gate, same quiet reporting
 #

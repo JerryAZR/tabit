@@ -370,7 +370,7 @@ bound unattended loops.
 **The classification is one exposed path (ruled 2026-09).** The
 response questions — does it carry tool calls? broken ones? stopped at
 the length cap? — are answered through
-`rig_agent::agent::turn` ([`AttemptOutcome`]), which drives the same
+`tabit_engine::agent::turn` ([`AttemptOutcome`]), which drives the same
 sans-io assembler the loop's MODEL phase uses; the loop's own
 classification consumes the same predicates (`carries_tools`, the
 malformed-call defect, the finish reason). Consumers outside the loop
