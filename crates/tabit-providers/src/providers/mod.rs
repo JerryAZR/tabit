@@ -6,8 +6,7 @@
 //!
 //! Each provider module defines a `Client` type and model types for the
 //! capabilities it supports. Capability traits such as
-//! [`CompletionClient`](crate::client::CompletionClient) and
-//! [`EmbeddingsClient`](crate::client::EmbeddingsClient) are implemented only
+//! [`CompletionClient`](crate::client::CompletionClient) are implemented only
 //! when the provider declares that capability.
 //!
 //! # Provider implementation checklist
@@ -48,10 +47,9 @@
 //!   [`CompletionModel`](crate::completion::CompletionModel) methods delegating
 //!   to them so there is exactly one request path either way;
 //! - streaming support when the provider supports streaming;
-//! - provider-response error preservation plus `ProviderResponseExt` and
-//!   telemetry fields consistent with nearby providers where applicable;
+//! - provider-response error preservation consistent with nearby providers;
 //! - unit, cassette, or live-test coverage appropriate to the changed behavior;
-//! - root facade feature/docs updates for companion provider crates; and
+//!   and
 //! - examples and documentation that match the actual API, feature flags, and
 //!   credential requirements.
 //!
