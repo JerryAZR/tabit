@@ -9,6 +9,14 @@ use tabit_engine::completion::Message;
 use tabit_protocol::SessionEvent;
 use tokio_util::sync::CancellationToken;
 
+/// The attachment door's mounted state: the session cwd and the live
+/// limits resolver (the active model's image limits, read at push so a
+/// mid-session model switch takes effect immediately).
+pub(crate) struct AttachmentDoor {
+    pub(crate) cwd: std::path::PathBuf,
+    pub(crate) limits: std::sync::Arc<dyn Fn() -> tabit_providers::image::Limits + Send + Sync>,
+}
+
 /// A queued user message with its born-early entry id:
 /// minted at accept, announced by `message_queued` when a run is live,
 /// carried into the log when the message drains, restated by
@@ -56,6 +64,11 @@ pub(crate) struct Mailbox {
     /// append their bodies here, at the one door every user message
     /// enters). Absent = no expansion, plain queuing.
     expander: std::sync::Arc<std::sync::OnceLock<std::sync::Arc<crate::skills::Skills>>>,
+    /// The attachment door (attachments.rs): the session cwd and the
+    /// live limits resolver (the active model's image limits, read at
+    /// push so a mid-session model switch takes effect immediately).
+    /// Attached at assembly; absent = no expansion (tests, bare drives).
+    attachments: std::sync::Arc<std::sync::OnceLock<AttachmentDoor>>,
     /// Wakes the resident worker when work arrives. One permit covers any
     /// number of pushes; the queue itself is the source of truth — the
     /// signal exists only so an empty queue can be waited on.
@@ -76,6 +89,16 @@ impl Mailbox {
         let _ = self.expander.set(skills);
     }
 
+    /// Attach the attachment door (the assembly): the session cwd and
+    /// the live limits resolver.
+    pub(crate) fn attach_attachments(
+        &self,
+        cwd: std::path::PathBuf,
+        limits: std::sync::Arc<dyn Fn() -> tabit_providers::image::Limits + Send + Sync>,
+    ) {
+        let _ = self.attachments.set(AttachmentDoor { cwd, limits });
+    }
+
     /// A pump began: submissions from here until [`Self::run_ended`] are
     /// acknowledged with `message_queued`.
     pub(crate) fn run_started(&self) {
@@ -88,12 +111,16 @@ impl Mailbox {
     }
 
     pub(crate) fn push(&self, message: Message) {
-        // Receive-time skill invocation (FRONTEND.md's tag): expand
-        // before the id is minted, so the queued acknowledgment, the
-        // steers, the events, and the log all carry the one expanded
-        // text — what the model actually sees is what replay shows.
-        // A message without resolvable tags passes through untouched
-        // (the expansion is the identity for it).
+        // Receive-time expansion (FRONTEND.md's tags): expand before the
+        // id is minted, so the queued acknowledgment, the steers, the
+        // events, and the log all carry the one expanded message — what
+        // the model actually sees is what replay shows. Skills first
+        // (text grows text); attachments last (text grows parts). The
+        // attachment scan reads the user's own words — a skill body
+        // documenting the tag must not attach itself. A message without
+        // resolvable tags passes through untouched (the expansion is the
+        // identity for it).
+        let user_typed = user_text(&message);
         let message = match self.expander.get() {
             Some(skills) => {
                 let text = user_text(&message);
@@ -102,6 +129,23 @@ impl Mailbox {
                     Message::user(expanded)
                 } else {
                     message
+                }
+            }
+            None => message,
+        };
+        let message = match self.attachments.get() {
+            Some(door) => {
+                let text = user_text(&message);
+                match crate::attachments::expand_attachments(
+                    &user_typed,
+                    &text,
+                    &door.cwd,
+                    &(door.limits)(),
+                ) {
+                    Some(parts) => Message::User {
+                        content: parts.into_content(),
+                    },
+                    None => message,
                 }
             }
             None => message,

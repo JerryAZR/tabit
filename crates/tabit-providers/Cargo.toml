@@ -28,6 +28,7 @@ base64 = { workspace = true }
 bytes = { workspace = true }
 futures = { workspace = true }
 httpdate = { workspace = true }
+image = { workspace = true }
 indexmap = { workspace = true }
 mime_guess = { workspace = true }
 reqwest = { workspace = true, features = ["json", "stream", "multipart"] }

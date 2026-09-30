@@ -2784,6 +2784,78 @@ async fn a_model_call_for_an_unoffered_tool_is_rejected_in_band_loudly() {
     );
 }
 
+/// The canonical 1x1 transparent PNG.
+const TINY_PNG: &[u8] = &[
+    0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
+    0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1f, 0x15, 0xc4,
+    0x89, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9c, 0x62, 0x00, 0x01, 0x00, 0x00,
+    0x05, 0x00, 0x01, 0x0d, 0x0a, 0x2d, 0xb4, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae,
+    0x42, 0x60, 0x82,
+];
+
+#[tokio::test]
+async fn an_attachment_tag_reaches_the_model_and_survives_the_file() -> Result<(), SessionError> {
+    // The attachment door (owner ruling 2026-09-28): a message's
+    // `<attachment path="..."/>` tags expand at the mailbox — anchors in
+    // the text, labeled image parts appended — and the log records the
+    // expansion, so replay never re-reads the file.
+    let store = temp_store("attachment-door");
+    let dir = std::env::temp_dir()
+        .join("tabit-session-tests")
+        .join(format!("attachment-door-cwd-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("cwd dir");
+    std::fs::write(dir.join("shot.png"), TINY_PNG).expect("image fixture");
+    let cwd = dir.to_string_lossy().to_string();
+
+    let factory = Factory::new(vec![text_turn("a nice dot")]);
+    let mut session = factory.clone().into_builder(store.clone()).create(&cwd)?;
+    let run = session
+        .prompt("what is in <attachment path=\"shot.png\"/>?")
+        .await;
+    assert_eq!(run.output, "a nice dot");
+
+    // The model saw the anchor, the label, and the image — in that order.
+    let requests = factory.requests();
+    let served = requests.last().expect("the run's request");
+    let Some(Message::User { content }) = served.chat_history.iter().last() else {
+        panic!("the last request message is the user's");
+    };
+    let parts: Vec<&UserContent> = content.iter().collect();
+    assert_eq!(parts.len(), 3, "anchor text + label + image: {parts:?}");
+    assert!(
+        matches!(&parts[0], UserContent::Text(t) if t.text.contains("<attachment path=\"shot.png\"/>")),
+        "the tag stays as the anchor"
+    );
+    assert!(
+        matches!(&parts[1], UserContent::Text(t) if t.text == "[attachment 1 of 1: shot.png]"),
+        "the label correlates: {parts:?}"
+    );
+    assert!(
+        matches!(&parts[2], UserContent::Image(_)),
+        "the image part carries the payload"
+    );
+
+    // The log recorded the expansion; replay needs no file.
+    let path = file_path(&session).to_path_buf();
+    drop(session);
+    std::fs::remove_file(dir.join("shot.png")).expect("the source file is gone");
+    let (resumed, _report) = Factory::new(vec![text_turn("b")])
+        .into_builder(store)
+        .resume(&path, &cwd)?;
+    let history = resumed.context();
+    let Some(Message::User { content }) = history.first() else {
+        panic!("the replayed history opens with the user's message");
+    };
+    assert!(
+        content
+            .iter()
+            .any(|part| matches!(part, UserContent::Image(_))),
+        "the replayed message still carries the image, the file long gone"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+    Ok(())
+}
+
 /// The event names, for the panic above's diagnosis line.
 fn discriminant(event: &SessionEvent) -> &'static str {
     match event {

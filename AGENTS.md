@@ -54,7 +54,9 @@ Current workspace layout:
 
 - `crates/tabit-providers` — provider API clients, streaming, tools (providers kept:
   **anthropic + openai** + the shared openai-compatible engine in
-  `providers/internal`)
+  `providers/internal`), plus `src/image.rs` — the one
+  image-preparation pipeline (sniff, limits, downscale) every image
+  door rides
 - `crates/tabit-engine` — agent loop / runtime, plus the host-service
   capabilities (`tool/services.rs`: `HostServices` — the extension
   envelope's ask + `model_prompt`, carried by contexts like
@@ -134,7 +136,9 @@ Current workspace layout:
   catalog, the confined `skill` tool, plus manual invocation — the
   `<skill name=.../>` tag in a user message appends the skill body at
   the mailbox door, the one funnel every message enters; FRONTEND.md
-  is the contract), plus the
+  is the contract), the attachment door (`src/attachments.rs`:
+  `<attachment path=.../>` tags append labeled image parts at the same
+  door, over tabit-providers' pipeline), plus the
   serve side of the frozen wire as a functional layer on the node
   (`src/endpoint.rs`: the session host — workers route by the node's
   learning table, lifecycle by type, interaction cards by the ask

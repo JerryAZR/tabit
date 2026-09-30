@@ -40,3 +40,5 @@ tokio-util = { version = "0.7", default-features = false }
 [dev-dependencies]
 tabit-engine = { path = "../tabit-engine", version = "0.1.0", default-features = false, features = ["test-utils"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
+image = { workspace = true }
+tempfile = "3"

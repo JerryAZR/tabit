@@ -10,6 +10,28 @@ use std::sync::{Arc, Mutex};
 use tabit_config::TabitConfig;
 use tabit_protocol::{ModelFacts, ModelSelection};
 
+/// The image-preparation limits for one selection: the model's
+/// config-declared `image_limits` over the pipeline's provider-safe
+/// defaults (tabit-providers' `image` module). Both image doors read it
+/// — the message door's attachment expansion and the per-run
+/// `SessionImageLimits` capability the `read` tool's image arm reads.
+pub(crate) fn image_limits(
+    config: &TabitConfig,
+    selection: &ModelSelection,
+) -> tabit_providers::image::Limits {
+    let configured = config
+        .model(&selection.provider, &selection.model)
+        .and_then(|(_, model)| model.image_limits);
+    let mut limits = tabit_providers::image::Limits::default();
+    if let Some(configured) = configured {
+        if let Some(max_bytes) = configured.max_bytes {
+            limits.max_bytes = max_bytes;
+        }
+        limits.max_long_edge = configured.max_long_edge;
+    }
+    limits
+}
+
 /// Validates a selection against a session's config without touching
 /// the session — the `model` command's receive-time check (the
 /// checkout probe's sibling; see [`Session::model_probe`]).
@@ -44,6 +66,12 @@ impl Session {
     /// cell is shared with the endpoint's receive-time writes).
     pub fn selection(&self) -> ModelSelection {
         lock(&self.selection).clone()
+    }
+
+    /// The active model's image-preparation limits (config over the
+    /// pipeline's defaults — [`image_limits`]).
+    pub(crate) fn image_limits(&self) -> tabit_providers::image::Limits {
+        image_limits(&self.config, &self.selection())
     }
 
     /// The shared register handle — the `model` command's write path at

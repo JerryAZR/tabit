@@ -43,4 +43,5 @@ windows = { version = "0.62.2", default-features = false, features = [
 
 [dev-dependencies]
 futures = { workspace = true }
+image = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

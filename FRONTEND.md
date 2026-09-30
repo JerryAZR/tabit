@@ -407,6 +407,29 @@ the future direction if that ever changes), and the bare leading
 `/name` shorthand is not recognized (deferred until the tag path is
 stable).
 
+**Image attachments in message text (2026-09):** a message may carry
+the attachment tag `<attachment path="docs/arch.png"/>` — the exact
+self-closing form, any number of them, anywhere in the text. The UX is
+yours: an `<image>`-style picker, drag-and-drop, or a paste — a pasted
+image rides a temp file you write (downscaling first if you like; the
+backend resizes regardless), and the file's life ends when
+`user_message` acknowledges the message — the log records the expanded
+bytes, so nothing reaches back to it. Paths resolve against the
+session's working directory (the backend shares your filesystem — it
+is your child). The backend expands at the message door: the text
+passes verbatim with the tags in place as anchors, and each resolvable
+tag **appends** a label text part (`[attachment 1 of 2: docs/arch.png]`)
+and the image part, in tag order — image blocks carry no metadata on
+any provider, so the label is the model's correlation. Oversized
+images are downscaled to the model's limits (per-model `image_limits`
+in providers.toml over the provider-safe defaults); what no halving
+can fit — and missing files, non-images, undecodable bytes — leaves
+the tag as-is and the message passes: the model's own `read` of the
+path is the in-band signal, so a user discussing the literal tag
+produces no noise. The wire carries no image bytes: your `user_message`
+echo is the text you sent, and you render attachments from the paths
+you already hold.
+
 ## 6. Events
 
 The `report` (the backend's first line) and `protocol_error` are

@@ -288,6 +288,10 @@ impl Session {
         let mut tool_context = tabit_engine::tool::ToolContext::new();
         tool_context.insert(run_token.clone());
         tool_context.insert(tabit_engine::tool::SessionCwd(self.cwd.clone()));
+        // The active model's image limits, per run: the `read` tool's
+        // image arm resizes to them (the same limits the message door's
+        // attachment expansion reads off the selection cell).
+        tool_context.insert(tabit_engine::tool::SessionImageLimits(self.image_limits()));
         // The session identity, per run: process-level hook forwarders
         // (extension policies) read it per event to scope their state.
         tool_context.insert(tabit_engine::tool::SessionTag(self.id.as_str().into()));

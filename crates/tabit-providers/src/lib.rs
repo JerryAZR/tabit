@@ -78,6 +78,7 @@ pub mod client;
 pub mod completion;
 pub mod http_client;
 pub mod id;
+pub mod image;
 /// Internal JSON helpers shared with sibling runtime crates (e.g. `tabit-engine`).
 /// Not part of tabit-providers's stable public API.
 #[doc(hidden)]

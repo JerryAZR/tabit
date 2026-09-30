@@ -1115,15 +1115,69 @@ async fn read_returns_an_image_content_part() {
 }
 
 #[tokio::test]
-async fn read_rejects_oversized_images_with_guidance() {
+async fn read_downscales_oversized_images() {
+    // The shared pipeline (tabit-providers' image module): an oversized
+    // image is downscaled under the byte cap, never rejected for size.
     let dir = temp_dir("read-image-huge");
     let path = dir.join("huge.png");
+    let mut rgb = ::image::RgbImage::new(2000, 2000);
+    let mut state = 0x2545F4914F6CDD1Du64;
+    for pixel in rgb.pixels_mut() {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        *pixel = ::image::Rgb([state as u8, (state >> 8) as u8, (state >> 16) as u8]);
+    }
+    let mut out = std::io::Cursor::new(Vec::new());
+    let encoder = ::image::codecs::png::PngEncoder::new(&mut out);
+    ::image::ImageEncoder::write_image(
+        encoder,
+        rgb.as_raw(),
+        2000,
+        2000,
+        ::image::ExtendedColorType::Rgb8,
+    )
+    .expect("test PNG encode");
+    let bytes = out.into_inner();
+    assert!(
+        bytes.len() > tabit_providers::image::DEFAULT_MAX_BYTES,
+        "the fixture must start over the cap"
+    );
+    fs::write(&path, &bytes).expect("write");
+    let parts: Vec<_> = read(&mut ctx(), path.to_string_lossy().to_string(), None, None)
+        .await
+        .expect("oversized images downscale, not reject")
+        .into_content()
+        .into_iter()
+        .collect();
+    assert!(
+        parts[0].as_text().is_some_and(|t| t.contains("downscaled")),
+        "the report owns the resize: {:?}",
+        parts[0].as_text()
+    );
+    match &parts[1] {
+        tabit_providers::message::ToolResultContent::Image(image) => {
+            assert_eq!(
+                image.media_type,
+                Some(tabit_providers::message::ImageMediaType::JPEG),
+                "re-encodes are JPEG"
+            );
+        }
+        other => panic!("the second part is the image: {other:?}"),
+    }
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[tokio::test]
+async fn read_rejects_undecodable_images_loudly() {
+    // Valid magic, garbage body: the pipeline's decode path says so.
+    let dir = temp_dir("read-image-broken");
+    let path = dir.join("broken.png");
     let mut bytes = TINY_PNG.to_vec();
-    bytes.resize(IMAGE_MAX_BYTES + 1, b'x');
+    bytes.resize(tabit_providers::image::DEFAULT_MAX_BYTES + 1, b'x');
     fs::write(&path, &bytes).expect("write");
     let error = err_text(read(&mut ctx(), path.to_string_lossy().to_string(), None, None).await);
-    assert!(error.contains("capped at"), "{error}");
-    assert!(error.contains("Downscale"), "{error}");
+    assert!(error.contains("did not decode"), "{error}");
     fs::remove_dir_all(&dir).ok();
 }
 
@@ -1264,27 +1318,6 @@ async fn bash_runs_in_the_session_cwd() {
         "ls sees the session dir: {out}"
     );
     fs::remove_dir_all(&dir).ok();
-}
-
-#[test]
-fn image_magic_detection_covers_the_provider_set() {
-    use tabit_providers::message::ImageMediaType;
-    assert_eq!(image_media_type(TINY_PNG), Some(ImageMediaType::PNG));
-    assert_eq!(
-        image_media_type(&[0xff, 0xd8, 0xff, 0xe0]),
-        Some(ImageMediaType::JPEG)
-    );
-    assert_eq!(image_media_type(b"GIF89a..."), Some(ImageMediaType::GIF));
-    assert_eq!(
-        image_media_type(&[b'R', b'I', b'F', b'F', 0, 0, 0, 0, b'W', b'E', b'B', b'P']),
-        Some(ImageMediaType::WEBP)
-    );
-    // RIFF, but not WebP (an AVI): not an image read.
-    assert_eq!(
-        image_media_type(&[b'R', b'I', b'F', b'F', 0, 0, 0, 0, b'A', b'V', b'I', b' ']),
-        None
-    );
-    assert_eq!(image_media_type(b"plain text"), None);
 }
 
 #[tokio::test]

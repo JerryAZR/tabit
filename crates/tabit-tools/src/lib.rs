@@ -110,13 +110,12 @@ fn session_cwd(context: &ToolContext) -> Option<std::path::PathBuf> {
 /// is capped at 50 KiB of whole lines ([`truncate`]) and every
 /// truncation notice carries the offset that continues the read: large
 /// files are paged, never spilled (the file is already on disk).
-/// Images (PNG/JPEG/GIF/WebP, by magic bytes) bypass the text cap
-/// entirely and ride as image content parts, capped at
-/// [`IMAGE_MAX_BYTES`] — no resize in v1, so oversized images are
-/// rejected with guidance (downscaling is a dependency decision,
-/// deferred). Directories list their entries inline. Binary and
-/// UTF-16/32 text files are rejected loudly. Relative paths resolve
-/// against the session's working directory.
+/// Images (PNG/JPEG/GIF/WebP) ride the shared image pipeline
+/// (`tabit_providers::image`): sniffed by magic bytes, passed through
+/// when they fit the model's limits, downscaled when they don't,
+/// rejected only when no halving can fit them. Directories list their
+/// entries inline. Binary and UTF-16/32 text files are rejected loudly.
+/// Relative paths resolve against the session's working directory.
 #[rig_tool(description = "Read a file (relative paths resolve against the \
                    session's working directory). Images are sent to the \
                    model as an image. Reading a directory lists its entries.")]
@@ -134,60 +133,18 @@ pub async fn read(
     }
     let bytes = std::fs::read(&resolved)
         .map_err(|e| ToolExecutionError::other(format!("cannot read `{path}`: {e}")))?;
-    if let Some(media_type) = image_media_type(&bytes) {
-        return image_read(
-            &path,
-            &bytes,
-            media_type,
-            offset.is_some() || limit.is_some(),
-        );
+    if tabit_providers::image::media_type(&bytes).is_some() {
+        return image_read(context, &path, &bytes, offset.is_some() || limit.is_some());
     }
     Ok(ToolOutput::text(read_text(&path, &bytes, offset, limit)?))
 }
 
-/// The largest image read returns, raw bytes. The provider ceiling is
-/// ~5 MiB of base64 (~3.75 MiB raw, Anthropic's per-image limit); 3 MiB
-/// keeps headroom. v1 has no resize — an image over the cap is rejected
-/// with guidance instead of silently downgraded.
-pub(crate) const IMAGE_MAX_BYTES: usize = 3 * 1024 * 1024;
-
-/// The image formats every provider carries (magic-byte detected);
-/// matches pi's native set. HEIC/HEIF/SVG stay text-path files.
-fn image_media_type(bytes: &[u8]) -> Option<tabit_providers::message::ImageMediaType> {
-    use tabit_providers::message::ImageMediaType;
-    match bytes {
-        [0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, ..] => Some(ImageMediaType::PNG),
-        [0xff, 0xd8, 0xff, ..] => Some(ImageMediaType::JPEG),
-        [b'G', b'I', b'F', b'8', b'7', b'a', ..] | [b'G', b'I', b'F', b'8', b'9', b'a', ..] => {
-            Some(ImageMediaType::GIF)
-        }
-        // RIFF container: the bytes at 8..12 name the codec.
-        [
-            b'R',
-            b'I',
-            b'F',
-            b'F',
-            _,
-            _,
-            _,
-            _,
-            b'W',
-            b'E',
-            b'B',
-            b'P',
-            ..,
-        ] => Some(ImageMediaType::WEBP),
-        _ => None,
-    }
-}
-
-/// One image, whole: a text part naming the read plus the image part
-/// itself (base64 — the session log and the provider wire both carry
-/// base64; raw bytes would serialize as a JSON number array).
+/// One image, whole: the pipeline prepares the payload (resize included),
+/// then a text part names the read and the image part carries it.
 fn image_read(
+    context: &ToolContext,
     path: &str,
     bytes: &[u8],
-    media_type: tabit_providers::message::ImageMediaType,
     paged_args: bool,
 ) -> Result<ToolOutput, ToolExecutionError> {
     if paged_args {
@@ -195,30 +152,31 @@ fn image_read(
             "images are read whole — offset/limit apply to text files only",
         ));
     }
-    if bytes.len() > IMAGE_MAX_BYTES {
-        return Err(ToolExecutionError::other(format!(
-            "`{path}` is {} bytes; images are capped at {} bytes ({} KiB). \
-             Downscale or crop it first, or extract a region with the shell tool",
-            bytes.len(),
-            IMAGE_MAX_BYTES,
-            IMAGE_MAX_BYTES / 1024
-        )));
-    }
-    use base64::Engine as _;
+    let limits = context
+        .get::<tabit_engine::tool::SessionImageLimits>()
+        .map(|limits| limits.0)
+        .unwrap_or_default();
+    let prepared = tabit_providers::image::prepare(bytes, &limits).map_err(|rejection| {
+        ToolExecutionError::other(format!("cannot read `{path}` as an image: {rejection}"))
+    })?;
     use tabit_providers::message::ToolResultContent;
-    let mime =
-        tabit_providers::completion::message::MimeType::to_mime_type(&media_type).to_string();
-    let report = format!("Read image `{path}` ({mime}, {} bytes)", bytes.len());
+    let mime = tabit_providers::completion::message::MimeType::to_mime_type(&prepared.media_type)
+        .to_string();
+    let report = if prepared.resized {
+        let (width, height) = prepared.dimensions.unwrap_or((0, 0));
+        format!(
+            "Read image `{path}` (downscaled to {width}x{height}, {mime}, {} bytes)",
+            prepared.bytes.len()
+        )
+    } else {
+        format!(
+            "Read image `{path}` ({mime}, {} bytes)",
+            prepared.bytes.len()
+        )
+    };
     let parts = vec![
         ToolResultContent::Text(report.into()),
-        ToolResultContent::Image(tabit_providers::message::Image {
-            data: tabit_providers::message::DocumentSourceKind::Base64(
-                base64::engine::general_purpose::STANDARD.encode(bytes),
-            ),
-            media_type: Some(media_type),
-            detail: None,
-            additional_params: None,
-        }),
+        ToolResultContent::Image(prepared.into_image()),
     ];
     // Two parts by construction.
     #[allow(clippy::expect_used)]

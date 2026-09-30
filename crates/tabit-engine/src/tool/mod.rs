@@ -147,7 +147,9 @@ compile_error!(
 pub mod rmcp;
 pub mod server;
 
-pub use extensions::{InternalCallId, MissingToolContext, SessionCwd, SessionTag, ToolContext};
+pub use extensions::{
+    InternalCallId, MissingToolContext, SessionCwd, SessionImageLimits, SessionTag, ToolContext,
+};
 pub use tabit_providers::tool::{
     IntoToolOutput, PortableDynamicTool, ToolErrorKind, ToolExecutionError, ToolOutput, ToolResult,
 };

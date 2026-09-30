@@ -120,6 +120,20 @@ impl Session {
         if let Some(skills) = &session.skills {
             session.mailbox.attach_expander(skills.clone());
         }
+        // The attachment door mounts the same way — the limits resolve
+        // live off the selection cell, so a mid-session model switch
+        // takes effect at the next message.
+        {
+            let config = session.config.clone();
+            let selection = session.selection.clone();
+            session.mailbox.attach_attachments(
+                session.cwd.clone(),
+                Arc::new(move || {
+                    let selection = crate::lock::lock(&selection).clone();
+                    super::selection::image_limits(&config, &selection)
+                }),
+            );
+        }
         Ok(session)
     }
 }
