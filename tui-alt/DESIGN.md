@@ -147,6 +147,46 @@ the whole block).
    (stock exports the same component names the sibling adapts), toolchain
    (Bun-first, exact pins, tsc strict, offline mock-driven tests).
 
+## Session tree: client-built, checkout now (owner ruling 2026-09)
+
+The tree is **constructed on the frontend from the wire itself** — no
+backend lane needed. Entry ids are stable across live and replay (the
+replay projects the log's own entry ids), so parenting every newly seen
+entry on the current chain head, and moving the head on
+`checked_out.entry_id`, accumulates every branch this process witnessed.
+A fresh attach sees only its replay's chain — a degenerate tree (a list)
+— until the backend names heads explicitly. The deferred piece is
+**branch enumeration for pre-attach history** (pi's `getTree()` reads the
+whole file; our wire re-emits the active chain only) — the owner resolves
+that separately; when it lands it slots into `SessionTree` without
+touching the view.
+
+- **`SessionTree`** (`src/session-tree.ts`): the store. Chain nodes are
+  exactly the events carrying entry ids — user messages, turns
+  (`turn_started`'s id), tool results, compaction passes. Each add is
+  create-or-advance: a known id (a replay re-walking the shared prefix)
+  only moves the head, never re-parents. Turn previews grow only while
+  the turn is open (`replay_started` closes the open turn — a
+  re-announce never doubles). `turn_retried` drops the subtree and falls
+  the head back to the surviving parent.
+- **The checkout action is real today**: the card's enter sends the
+  `checkout` command (the backend composes abort first — a rewind has
+  declared the run's continuation obsolete) and closes; `checked_out` +
+  the replay pass are the re-render, and the store unions the re-walk
+  with the off-path branch it just accumulated. Enter on the head is
+  pi's "already at this point" — it closes without sending.
+- **`TreeCardView`** (`src/components/tree-card.ts`): pi's
+  tree-selector language — `│`/`├─`/`└─` prefix cells (connectors only
+  where a parent actually branches; chains render as lists), accent `•`
+  on the active path, typed content (`user:`/`assistant:`/muted tool
+  call/compaction marker), a bounded viewport windowed on the cursor,
+  and the `(n/total)` status line. Keys move through the engine's select
+  actions (`tui.select.up/down/confirm/cancel`, cursor left/right to
+  page). Hosted in the dock's card slot (ctrl+t or `/tree`): while open
+  the input listener stands down, exactly like interaction cards; an
+  incoming ask displaces it, and a pending ask keeps the tree from
+  opening.
+
 ## Milestones
 
 - **M0 (this slice)**: seam + mode + root; mock-driven tests green; entry
@@ -169,9 +209,16 @@ the whole block).
   no landing). (Tool cards, usage row, and notes styling landed early
   during the pi-look port.)
 
-- **M2 — navigation**: rewind surface (`checkout`), session switcher
-  (`new`/`open` + catalog), child-session focus switching with steering
-  (SessionFocusController analog; route-all makes children addressable).
+- **M2 — navigation**: the tree-checkout surface landed (see the section
+  above). Remaining: the **session forest** — per-session state
+  (registries + facts keyed by session id, focus as a view swap), the
+  session switcher over the catalog (`new`/`open` + v16's
+  `available_sessions` with path/cwd, parent/child nesting from
+  `session_opened.parent`/`parent_call`, running/ask indicators), and
+  child-session steering. Awaiting the owner's ruling on the
+  focus-model design (persistent per-session registries over
+  rebuild-on-return — replay parks behind running runs, so
+  rebuild-on-return would show a headless tail until a run ends).
 - **M3 — context surfaces**: skills/extensions pages (currently notes-only),
   compaction surface (`compact` + live summary block), model picker (blocked
   upstream: no models-list command), streamed tool args (the one mock-ledger

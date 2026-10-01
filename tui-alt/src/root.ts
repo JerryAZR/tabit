@@ -34,6 +34,7 @@ import { StatusBar } from "./components/status-bar";
 import { ToolBlock } from "./components/tool-block";
 import { UserBlock } from "./components/user-block";
 import { TranscriptRegistry } from "./components/transcript-registry";
+import { TreeCardView } from "./components/tree-card";
 import { cardViewFor } from "./card-view";
 import { InputController } from "./input-controller";
 import { AtPathCompletionProvider } from "./path-completion";
@@ -57,6 +58,8 @@ export class AltRoot implements ModeView {
 	readonly #blocks = new TranscriptRegistry();
 	#mode: InteractiveMode | undefined;
 	#input: InputController | undefined;
+	/** The open session-tree card, when the tree owns the dock slot. */
+	#treeCard: TreeCardView | undefined;
 
 	constructor() {
 		this.tui = new TuiAltScreen(new ProcessTerminal(), false, undefined, {
@@ -107,16 +110,18 @@ export class AltRoot implements ModeView {
 			})),
 		);
 		this.editor.onSubmit = (text: string) => mode.submit(text);
+		mode.onTree = () => this.showTree();
 		// The command table exists now — the dropdown can list it before
-		// skills arrive (a skill-less machine still sees the four commands).
+		// skills arrive (a skill-less machine still sees the commands).
 		this.#attachProvider();
 		this.tui.setFocus(this.editor);
 		this.#input = new InputController({
 			tui: this.tui,
 			editor: this.editor,
 			isRunning: () => mode.running,
-			isCardOpen: () => mode.hasOpenCard,
+			isCardOpen: () => mode.hasOpenCard || this.#treeCard !== undefined,
 			interrupt: () => mode.interrupt(),
+			onTree: () => this.showTree(),
 			toggleAllCollapsibles: () => {
 				// Thinking lines and tool cards together: if any is collapsed,
 				// Ctrl+O expands everything, else it collapses everything.
@@ -253,6 +258,10 @@ export class AltRoot implements ModeView {
 	}
 
 	showCard(card: InteractionCard): void {
+		// The ask displaces an open tree card (the run is blocked; the tree
+		// reopens with ctrl+t). Without this the gate would keep standing
+		// down after the card closes — the tree field outlived its slot.
+		this.#treeCard = undefined;
 		this.#cardSlot.clear();
 		this.#cardSlot.addChild(cardViewFor(card, (selected, text) => this.#mode?.answerCard(card.id, selected, text)));
 		this.tui.setFocus(this.#cardSlot.children[0]!);
@@ -261,6 +270,43 @@ export class AltRoot implements ModeView {
 
 	closeCard(id: string, note: string | undefined): void {
 		if (note !== undefined) this.addNote(note, "info");
+		this.#cardSlot.clear();
+		this.tui.setFocus(this.editor);
+		this.#touch();
+	}
+
+	// --- session tree ---------------------------------------------------------
+
+	/** Open the tree card (ctrl+t or `/tree`). A pending interaction card
+	 *  keeps the slot — it owns the run; the tree can wait. */
+	showTree(): void {
+		const mode = this.#mode;
+		if (mode === undefined) return;
+		if (mode.hasOpenCard) {
+			this.addNote("answer the open question first — the tree can wait", "warn");
+			return;
+		}
+		if (this.#treeCard !== undefined) return;
+		this.#treeCard = new TreeCardView(
+			mode.tree,
+			{
+				onCheckout: entryId => {
+					this.closeTree();
+					mode.checkout(entryId);
+				},
+				onClose: () => this.closeTree(),
+			},
+			() => this.#touch(),
+		);
+		this.#cardSlot.clear();
+		this.#cardSlot.addChild(this.#treeCard);
+		this.tui.setFocus(this.#treeCard);
+		this.#touch();
+	}
+
+	closeTree(): void {
+		if (this.#treeCard === undefined) return;
+		this.#treeCard = undefined;
 		this.#cardSlot.clear();
 		this.tui.setFocus(this.editor);
 		this.#touch();

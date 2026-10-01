@@ -127,6 +127,12 @@ export class Backend {
 		this.send({ type: "compact", session, ...(directives !== undefined ? { directives } : {}) });
 	}
 
+	/** Rewind the active chain to an entry; the backend aborts a run in
+	 *  flight first and answers with `checked_out` + a full replay pass. */
+	checkout(session: string, entryId: string): void {
+		this.send({ type: "checkout", session, entry_id: entryId });
+	}
+
 	interactionResponse(session: string, id: string, payload: unknown): void {
 		this.send({ type: "interaction_response", session, id, payload });
 	}

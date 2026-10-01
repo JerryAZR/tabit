@@ -14,6 +14,8 @@ export const warn = (text: string): string => `\x1b[33m${text}\x1b[39m`;
 export const error = (text: string): string => `\x1b[31m${text}\x1b[39m`;
 /** Diff tokens: the edit card's expanded view colors. */
 export const diffAdd = (text: string): string => `\x1b[32m${text}\x1b[39m`;
+/** The green, named for meaning where it is not a diff (tree rows). */
+export const success = diffAdd;
 export const diffRemove = (text: string): string => `\x1b[31m${text}\x1b[39m`;
 export const diffContext = dim;
 export const diffHunk = (text: string): string => `\x1b[36m${text}\x1b[39m`;

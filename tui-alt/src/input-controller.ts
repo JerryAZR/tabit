@@ -9,8 +9,9 @@
  *
  *   1. interrupt a running turn        (tui.app.interrupt)
  *   2. toggle all thinking blocks      (tui.app.toggleCollapsibles)
- *   3. quit, only on an empty editor   (tui.app.quit — pi's rule)
- *   4. everything else falls through to the focused component
+ *   3. open the session tree           (tui.app.tree)
+ *   4. quit, only on an empty editor   (tui.app.quit — pi's rule)
+ *   5. everything else falls through to the focused component
  */
 
 import { getKeybindings, matchesKey, type Editor, type TuiAltScreen, type TuiInputListenerResult } from "@earendil-works/pi-tui";
@@ -26,6 +27,8 @@ export interface InputControllerDeps {
 	interrupt: () => void;
 	/** Ctrl+O: expand/collapse every collapsible block (thinking + tool cards). */
 	toggleAllCollapsibles: () => void;
+	/** Ctrl+T: open the session-tree card (same path as `/tree`). */
+	onTree: () => void;
 	onQuit: () => void;
 }
 
@@ -47,7 +50,7 @@ export class InputController {
 	}
 
 	#handle(data: string): TuiInputListenerResult {
-		const { editor, isRunning, isCardOpen, interrupt, toggleAllCollapsibles, onQuit } = this.#deps;
+		const { editor, isRunning, isCardOpen, interrupt, toggleAllCollapsibles, onTree, onQuit } = this.#deps;
 		if (isCardOpen()) {
 			// The card is focused and consumes everything it knows; only
 			// the abort affordance preempts (a literal: the interrupt
@@ -61,6 +64,10 @@ export class InputController {
 		const kb = getKeybindings();
 		if (kb.matches(data, "tui.app.interrupt") && isRunning()) {
 			interrupt();
+			return { consume: true };
+		}
+		if (kb.matches(data, "tui.app.tree")) {
+			onTree();
 			return { consume: true };
 		}
 		if (kb.matches(data, "tui.app.toggleCollapsibles")) {

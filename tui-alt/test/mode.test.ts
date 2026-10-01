@@ -15,7 +15,7 @@ const SESSION = "0199aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const CHILD = "0199bbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
 class FakeBackend implements BackendLink {
-	readonly sent: Array<{ kind: string; session?: string; id?: string; payload?: unknown; text?: string; directives?: string }> = [];
+	readonly sent: Array<{ kind: string; session?: string; id?: string; payload?: unknown; text?: string; directives?: string; entryId?: string }> = [];
 	message(session: string, text: string): void {
 		this.sent.push({ kind: "message", session, text });
 	}
@@ -24,6 +24,9 @@ class FakeBackend implements BackendLink {
 	}
 	compact(session: string, directives?: string): void {
 		this.sent.push({ kind: "compact", session, directives });
+	}
+	checkout(session: string, entryId: string): void {
+		this.sent.push({ kind: "checkout", session, entryId });
 	}
 	interactionResponse(session: string, id: string, payload: unknown): void {
 		this.sent.push({ kind: "interaction_response", session, id, payload });
@@ -327,13 +330,13 @@ describe("InteractiveMode", () => {
 		ack(control);
 		// Static commands first, none display-only — each carries its behavior.
 		const before = mode.slashCommands();
-		expect(before.map(c => c.name)).toEqual(["compact", "help", "exit", "quit"]);
+		expect(before.map(c => c.name)).toEqual(["compact", "help", "tree", "exit", "quit"]);
 		expect(before.some(c => c.displayOnly)).toBe(false);
 
 		// Skills join the same table as display-only entries.
 		feed({ type: "skills_available", skills: [{ name: "my-skill", description: "d", location: "l", level: "user" }] });
 		const after = mode.slashCommands();
-		expect(after).toHaveLength(5);
+		expect(after).toHaveLength(6);
 		expect(after.find(c => c.name === "my-skill")).toMatchObject({ displayOnly: true });
 	});
 
@@ -458,5 +461,40 @@ describe("InteractiveMode", () => {
 		expect(view.notes.some(n => n.text.includes("compaction failed"))).toBe(true);
 		expect(view.status).toBe("working — esc interrupts"); // the run continues
 		expect(view.footer?.inputTokens).toBe(0);
+	});
+
+	test("the session tree: chain events feed it, checkout moves the head and rides the wire, /tree dispatches", () => {
+		const { backend, mode, feed, control } = harness();
+		ack(control);
+		feed({ type: "session_opened", id: SESSION, path: "/w", model: { provider: "p", model: "m1" }, resumed: false });
+		feed({ type: "user_message", entry_id: "e1", text: "go" });
+		feed({ type: "turn_started", id: "t1", started_at_ms: 1 });
+		feed({ type: "text_delta", turn_id: "t1", text: "Working." });
+		feed({ type: "tool_call", turn_id: "t1", name: "bash", call_id: "c1", internal_call_id: "i1", arguments: "{\"cmd\":\"ls\"}" });
+		feed({ type: "tool_result", turn_id: "t1", entry_id: "e2", name: "bash", internal_call_id: "i1", content: "ok", status: { status: "success" } });
+
+		// The store built the chain; the tool row shows the call.
+		expect(mode.tree.rows().map(row => row.id)).toEqual(["e1", "t1", "e2"]);
+		expect(mode.tree.rows().find(row => row.id === "e2")!.preview).toBe("bash cmd: ls");
+
+		// Rewind via the tree: the command names the session and entry.
+		mode.checkout("e1");
+		expect(backend.sent).toEqual([{ kind: "checkout", session: SESSION, entryId: "e1" }]);
+		feed({ type: "checked_out", entry_id: "e1", base_id: null });
+		expect(mode.tree.headId).toBe("e1");
+		// The next message branches off the rewound head.
+		feed({ type: "user_message", entry_id: "e3", text: "again" });
+		expect(mode.tree.rows().map(row => row.id)).toEqual(["e1", "e3", "t1", "e2"]);
+
+		// /tree dispatches to the root's callback (as invocable, not display-only).
+		let opened = 0;
+		mode.onTree = () => opened++;
+		mode.submit("/tree");
+		expect(opened).toBe(1);
+		expect(mode.slashCommands().find(c => c.name === "tree")).toMatchObject({ displayOnly: false });
+
+		// A fresh session_opened resets the tree with the session.
+		feed({ type: "session_opened", id: SESSION, path: "/w", model: { provider: "p", model: "m1" }, resumed: false });
+		expect(mode.tree.size).toBe(0);
 	});
 });

@@ -22,6 +22,7 @@
  */
 
 import { log } from "./log";
+import { SessionTree } from "./session-tree";
 import { PROTOCOL_VERSION } from "./protocol";
 import type { ModelCost, ParsedServerFrame, ServerControlFrame, SessionEvent, Usage } from "./protocol";
 
@@ -129,6 +130,10 @@ export interface BackendLink {
 	 *  for this invocation (v16 — appended to the instruction, never
 	 *  persisted). */
 	compact(session: string, directives?: string): void;
+	/** Rewind the active chain to an entry (any entry the wire ever named —
+	 *  an off-chain target is a branch switch). The backend composes abort;
+	 *  the outcome is `checked_out` + a full replay pass. */
+	checkout(session: string, entryId: string): void;
 	interactionResponse(session: string, id: string, payload: unknown): void;
 }
 
@@ -165,6 +170,9 @@ export class InteractiveMode {
 	#pending: PendingMessage[] = [];
 	#skills: SkillInfo[] = [];
 	#keybindings: KeybindingFact[] = [];
+	/** The client-built session tree (see session-tree.ts) — fed by the
+	 *  same handler table, so replay passes resync it for free. */
+	readonly #tree = new SessionTree();
 	readonly #cards = new Map<string, InteractionCard>();
 	readonly #deltas: PendingDelta[] = [];
 	#flushTimer: ReturnType<typeof setTimeout> | undefined;
@@ -172,6 +180,9 @@ export class InteractiveMode {
 	onFatal: ((reason: string) => void) | undefined;
 	/** Set by the entry: the graceful shutdown path (`/exit`, `/quit`). */
 	onQuit: (() => void) | undefined;
+	/** Set by the root: opens the session-tree card (`/tree`; the ctrl+t
+	 *  action routes through the root too). */
+	onTree: (() => void) | undefined;
 
 	constructor(backend: BackendLink, view: ModeView) {
 		this.#backend = backend;
@@ -191,6 +202,17 @@ export class InteractiveMode {
 
 	get running(): boolean {
 		return this.#running;
+	}
+
+	/** The session tree — read-only for the view; the mode feeds it. */
+	get tree(): SessionTree {
+		return this.#tree;
+	}
+
+	/** Rewind to an entry (the tree card's enter). Fire-and-forget like
+	 *  every command; `checked_out` + the replay pass are the outcome. */
+	checkout(entryId: string): void {
+		if (this.#session) this.#backend.checkout(this.#session, entryId);
 	}
 
 	get replaying(): boolean {
@@ -238,6 +260,7 @@ export class InteractiveMode {
 				},
 			},
 			{ name: "help", description: "list keys and commands", run: () => this.#showHelp() },
+			{ name: "tree", description: "browse the session tree, rewind to an entry", run: () => this.onTree?.() },
 			{ name: "exit", description: "quit the TUI (shuts the backend down)", run: () => this.onQuit?.() },
 			{ name: "quit", description: "quit the TUI (shuts the backend down)", run: () => this.onQuit?.() },
 			...this.#skills.map(skill => ({ name: skill.name, description: skill.description })),
@@ -392,6 +415,7 @@ export class InteractiveMode {
 		// --- run lifecycle ---------------------------------------------------
 		user_message: event => {
 			if (!this.#replaying) this.#setRunning(true);
+			this.#tree.addUser(event.entry_id, event.text);
 			this.#view.addUser(event.entry_id, event.text);
 			const next = this.#pending.filter(p => p.id !== event.entry_id);
 			if (next.length !== this.#pending.length) {
@@ -433,8 +457,11 @@ export class InteractiveMode {
 		// --- transcript ----------------------------------------------------------
 		// turn_started allocates nothing: blocks are created on demand by
 		// their first content, so document order == wire arrival order.
-		turn_started: () => {},
+		turn_started: event => {
+			this.#tree.openTurn(event.id);
+		},
 		text_delta: event => {
+			this.#tree.appendTurnText(event.turn_id, event.text);
 			this.#deltas.push({ kind: "text", turnId: event.turn_id, text: event.text });
 			this.#scheduleFlush();
 		},
@@ -444,6 +471,7 @@ export class InteractiveMode {
 		},
 		turn_committed: () => {},
 		turn_retried: event => {
+			this.#tree.retryTurn(event.turn_id);
 			this.#dropTurnDeltas(event.turn_id);
 			this.#view.removeTurn(event.turn_id);
 			this.#view.addNote("turn discarded before commit — a retry follows", "info");
@@ -452,9 +480,11 @@ export class InteractiveMode {
 			this.#view.addNote("turn hit the provider output limit — the run continues", "warn");
 		},
 		tool_call: event => {
+			this.#tree.noteToolCall(event.internal_call_id, event.name, event.arguments);
 			this.#view.addTool(event.turn_id, event.internal_call_id, event.name, event.arguments);
 		},
 		tool_result: event => {
+			this.#tree.addTool(event.entry_id, event.internal_call_id, event.name, event.content);
 			this.#view.setToolResult(event.internal_call_id, event.content, event.status.status === "success", event.details);
 		},
 		completion_call: event => {
@@ -484,6 +514,7 @@ export class InteractiveMode {
 			this.#flush();
 			this.#replaying = true;
 			this.#deltas.length = 0;
+			this.#tree.closeTurn();
 			this.#view.beginReplay();
 		},
 		replay_done: () => {
@@ -491,7 +522,9 @@ export class InteractiveMode {
 			this.#view.endReplay();
 		},
 		checked_out: event => {
-			// The full re-render arrives as the following replay brackets.
+			// The head moves now; the full re-render arrives as the following
+			// replay brackets (which also re-walk the tree's shared prefix).
+			this.#tree.checkout(event.entry_id);
 			this.#view.addNote(`rewound to ${event.entry_id}`, "info");
 		},
 		// --- announcements / config ----------------------------------------------------
@@ -539,6 +572,7 @@ export class InteractiveMode {
 			this.#cacheHitRate = undefined;
 			this.#cost = undefined;
 			this.#contextUsed = undefined;
+			this.#tree.reset();
 			this.#emitFooter();
 			// Boot facts have landed — the connection is no longer "connecting".
 			if (!this.#running) this.#view.setStatus("idle");
@@ -574,6 +608,7 @@ export class InteractiveMode {
 		},
 		compaction_step: event => {
 			// Summarization spend meters exactly like a completion_call's.
+			this.#tree.addCompaction(event.id, event.usage.total_tokens);
 			this.#meter(event.usage, event.cost);
 		},
 		compaction_retried: () => {
