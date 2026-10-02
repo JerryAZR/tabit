@@ -82,5 +82,5 @@ pub enum SessionError {
 
     /// The agent outer loop failed.
     #[error("agent run failed: {0}")]
-    Prompt(#[from] rig_agent::completion::PromptError),
+    Prompt(#[from] tabit_engine::completion::PromptError),
 }

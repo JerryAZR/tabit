@@ -1,29 +1,42 @@
 //! `ext-double` — the extension host's behavior double: one binary,
 //! one protocol behavior per argv, for the supervisor's offline
-//! tests. It speaks the frozen pipe honestly (parse the initialize,
-//! ack by hand-built JSON — no host library linked in, proving the
-//! wire is the whole contract) and takes the pathological paths a
-//! real package never should.
+//! tests. It speaks the frozen pipe honestly (the report first,
+//! hand-built JSON — no host library linked in, proving the wire is
+//! the whole contract) and takes the pathological paths a real
+//! package never should. The `-ack` argv labels predate the
+//! report-first model (extension protocol v3's vocabulary); the
+//! behaviors they name are unchanged.
 //!
 //! Handshake/death behaviors:
-//! - `hello`         — ack empty capabilities, drain stdin to EOF, exit 0
-//! - `mute`          — read the initialize, then never answer
-//! - `die-pre-ack`   — exit 1 before answering anything
-//! - `die-post-ack`  — ack, then exit 0
-//! - `bad-ack`       — answer the initialize with garbage
-//! - `wrong-version` — ack speaking protocol version 99
-//! - `late-garbage`  — ack, then emit one unparseable line, then drain
-//! - `late-unknown`  — ack, then emit one WELL-FORMED line of an
+//! - `hello`         — report empty capabilities, drain stdin to EOF, exit 0
+//! - `mute`          — never report, never answer
+//! - `die-pre-ack`   — exit 1 before the report
+//! - `die-post-ack`  — report, then exit 0
+//! - `bad-ack`       — emit garbage where the report belongs
+//! - `wrong-version` — report speaking protocol version 99
+//! - `late-garbage`  — report, then one unparseable line, then drain
+//! - `late-unknown`  — report, then one WELL-FORMED line of an
 //!   unknown frame type, then drain (the compatibility ruling: an
 //!   extension speaking vocabulary its host lacks is a contract
 //!   break, same death as garbage)
 //!
-//! Tool-lane behaviors (task 2): ack with one declared tool, then
+//! Grammar behaviors (the routing generalization):
+//! - `grammar` — report watching `session_opened` and
+//!   `interaction_settled`; emit one `message` command and one
+//!   `interaction_request` (id `g-1`); then echo every inbound line
+//!   that is not a lane frame back out as an `error { kind:
+//!   session }` event whose message is the line verbatim — so the
+//!   tests can see exactly what the host mirrored or routed down
+//!   the pipe.
+//!
+//! Tool-lane behaviors (task 2): report with one declared tool, then
 //! serve it on the pipe:
 //! - `tools-echo`   — tool `echo`: answers with the args as the report
 //! - `tools-fail`   — tool `boom`: answers with an error
-//! - `tools-ask`    — tool `ask`: lifts one interaction (envelope
-//!   verb zero), answers with the outcome (or "dismissed")
+//! - `tools-ask`    — tool `ask`: lifts one interaction (a grammar
+//!   `interaction_request` emission, answered by the routed
+//!   `interaction_response`; a cancel for the owning call reads as
+//!   abandoned), answers with the outcome (or "dismissed")
 //! - `tools-model`  — tool `summarize`: calls `model_prompt` (envelope
 //!   verb one, hand-rolled — the any-language proof), answers with
 //!   the completion text (or the verb's error)
@@ -53,7 +66,7 @@ fn main() {
         | "late-unknown" => {}
         "die-pre-ack" => std::process::exit(1),
         "tools-echo" | "tools-fail" | "tools-ask" | "tools-shadow" | "tools-model"
-        | "tools-cancel" => {}
+        | "tools-cancel" | "grammar" | "svc-dupe" => {}
         "hooks-allow" | "hooks-skip" | "hooks-ask" | "hooks-hang" => {}
         other => {
             eprintln!("ext-double: unknown behavior `{other}`");
@@ -61,8 +74,8 @@ fn main() {
         }
     }
 
-    // The initialize crosses before anything else.
-    read_line();
+    // The report model: this guest speaks first — no initialize to
+    // consume.
 
     match behavior.as_str() {
         "mute" => loop {
@@ -74,12 +87,45 @@ fn main() {
         }
         "wrong-version" => {
             emit(json!({
-                "type": "ack", "protocol_version": 99,
+                "type": "report", "protocol_version": 99,
                 "tools": [], "hooks": [],
             }));
             drain();
         }
         "tools-echo" => serve_tools(json!([tool_decl("echo")])),
+        "grammar" => serve_grammar(),
+        // The mint-law violation over the real pipe: the same
+        // service-request id sent twice (a plain retry bug in a
+        // hand-rolled guest). The host must contain it — kill this
+        // lane — never crash.
+        "svc-dupe" => {
+            emit(json!({
+                "type": "report", "protocol_version": 5,
+                "tools": [], "hooks": [], "watch": [],
+            }));
+            // Both frames in ONE write syscall: the violation exists
+            // only while the first ask is live — two writes let the
+            // host answer (and settle) it before the second line
+            // arrives, and a settled id re-registers cleanly (the law
+            // guards live ids). One write is one pipe read on the
+            // host, so both lines process in a single poll run, the
+            // first ask still pending when the second registers.
+            // `emit_raw` cannot do this: std stdout is a LineWriter,
+            // so `writeln!` splits at the embedded newline and the
+            // pair lands as two syscalls — the race again.
+            let dupe = json!({
+                "type": "service_request",
+                "request_id": "dupe-1",
+                "call_id": "dupe-1",
+                "verb": "model_prompt",
+                "prompt": "same id twice",
+            });
+            let stdout = std::io::stdout();
+            let _ = stdout
+                .lock()
+                .write_all(format!("{dupe}\n{dupe}\n").as_bytes());
+            drain();
+        }
         "tools-fail" => serve_tools(json!([tool_decl("boom")])),
         "tools-ask" => serve_tools(json!([tool_decl("ask")])),
         "tools-shadow" => serve_tools(json!([tool_decl("read")])),
@@ -90,8 +136,8 @@ fn main() {
         }
         _ => {
             emit(json!({
-                "type": "ack", "protocol_version": 1,
-                "tools": [], "hooks": [],
+                "type": "report", "protocol_version": 5,
+                "tools": [], "hooks": [], "watch": [],
             }));
             if behavior == "die-post-ack" {
                 marker_and_exit(0);
@@ -113,12 +159,62 @@ fn main() {
     marker_and_exit(0);
 }
 
+/// The grammar behavior: speak the shared grammar both ways and
+/// mirror everything the host sends back as reportable events.
+/// Deliberately CHATTY from the ack (the peers ruling 2026-09): any
+/// node may send anything a frontend can from its handshake onward —
+/// a co-frontend's steer and ask need no supervisor action — and the
+/// prepared core takes them (routing by table, lifecycle by parking).
+fn serve_grammar() {
+    emit(json!({
+        "type": "report", "protocol_version": 5,
+        "tools": [], "hooks": [],
+        "watch": ["session_opened", "interaction_settled"],
+    }));
+    emit(json!({
+        "type": "message", "session": "boot-session",
+        "text": "steered by the extension",
+    }));
+    emit(json!({
+        "type": "interaction_request", "id": "g-1",
+        "ui_type": "native:select_any",
+        "payload": {"title": "The extension asks", "body": "grammar demo", "options": [], "free_text": true},
+    }));
+    // Everything inbound that is not a lane frame is the grammar
+    // coming home: mirror it out as an error event so the test's
+    // event recorder sees it.
+    loop {
+        let line = read_line();
+        let Ok(frame) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        let kind = frame["type"].as_str().unwrap_or_default().to_string();
+        if matches!(
+            kind.as_str(),
+            "tool_call" | "hook" | "cancel" | "service_response"
+        ) {
+            continue;
+        }
+        // A well-behaved origin announces the settle when its ask's
+        // answer comes home (the entry-owned-settles rule — g-1 was
+        // ours).
+        if kind == "interaction_response"
+            && let Some(id) = frame["id"].as_str()
+        {
+            emit(json!({"type": "interaction_settled", "id": id}));
+        }
+        emit(json!({
+            "type": "error", "kind": "session", "message": line.trim(),
+        }));
+    }
+}
+
 /// The tool-lane loop: one declared tool served sequentially — the
 /// pipe is one lane, and this double keeps it honest.
 fn serve_tools(tools: Value) {
     emit(json!({
-        "type": "ack", "protocol_version": 1,
-        "tools": tools, "hooks": [],
+        "type": "report", "protocol_version": 5,
+        "tools": tools, "hooks": [], "watch": [],
     }));
     let behavior = std::env::args().nth(1).unwrap_or_default();
     loop {
@@ -138,11 +234,12 @@ fn serve_tools(tools: Value) {
                 "error": "the boom tool refuses", "report": "", "details": null,
             })),
             "tools-ask" => {
+                // Grammar ask: emit the interaction request, await the
+                // routed response by id (or the owning call's cancel —
+                // the abandonment shape).
                 emit(json!({
-                    "type": "service_request",
-                    "request_id": format!("{call_id}-ask"),
-                    "call_id": call_id,
-                    "verb": "ask",
+                    "type": "interaction_request",
+                    "id": format!("{call_id}-ask"),
                     "ui_type": "native:select_any",
                     "payload": {
                         "title": "The extension asks",
@@ -151,21 +248,28 @@ fn serve_tools(tools: Value) {
                         "free_text": true,
                     },
                 }));
-                // The answer (or dismissal) is the next line owed to us.
-                let answer = loop {
+                let outcome = loop {
                     let line = read_line();
-                    match serde_json::from_str::<Value>(&line) {
-                        Ok(frame) if frame["type"] == "service_response" => break frame,
-                        _ => continue,
+                    let Ok(frame) = serde_json::from_str::<Value>(&line) else {
+                        continue;
+                    };
+                    if frame["type"] == "interaction_response"
+                        && frame["id"] == format!("{call_id}-ask")
+                    {
+                        // A well-behaved origin announces its settle
+                        // (the entry-owned-settles rule).
+                        emit(json!({
+                            "type": "interaction_settled",
+                            "id": format!("{call_id}-ask"),
+                        }));
+                        break format!(
+                            "answered: {}",
+                            frame["payload"]["text"].as_str().unwrap_or("<no text>")
+                        );
                     }
-                };
-                let outcome = if answer["result"].is_null() {
-                    "dismissed".to_string()
-                } else {
-                    format!(
-                        "answered: {}",
-                        answer["result"]["text"].as_str().unwrap_or("<no text>")
-                    )
+                    if frame["type"] == "cancel" && frame["call_id"] == call_id {
+                        break "dismissed".to_string();
+                    }
                 };
                 emit(json!({
                     "type": "tool_result", "call_id": call_id,
@@ -248,8 +352,8 @@ fn serve_tools(tools: Value) {
 /// sequentially. The behavior picks the decision path.
 fn serve_hooks(behavior: &str) {
     emit(json!({
-        "type": "ack", "protocol_version": 1,
-        "tools": [], "hooks": [{"event": "tool_call"}],
+        "type": "report", "protocol_version": 5,
+        "tools": [], "hooks": [{"event": "tool_call"}], "watch": [],
     }));
     loop {
         let line = read_line();
@@ -263,7 +367,7 @@ fn serve_hooks(behavior: &str) {
         match behavior {
             "hooks-skip" => emit(json!({
                 "type": "hook_result", "hook_id": hook_id,
-                "decision": "skip", "message": "the double denies",
+                "answer": {"verdict": "skip", "message": "the double denies"},
             })),
             "hooks-hang" => {
                 let _ = hook_id; // never answers: the drain test's wedge
@@ -272,11 +376,12 @@ fn serve_hooks(behavior: &str) {
                 }
             }
             "hooks-ask" => {
+                // Grammar ask: the hook's mid-call question rides the
+                // interaction request emission, the routed response
+                // decides run/skip.
                 emit(json!({
-                    "type": "service_request",
-                    "request_id": format!("{hook_id}-ask"),
-                    "call_id": hook_id.clone(),
-                    "verb": "ask",
+                    "type": "interaction_request",
+                    "id": format!("{hook_id}-ask"),
                     "ui_type": "native:select_one",
                     "payload": {
                         "title": "The hook asks",
@@ -290,29 +395,39 @@ fn serve_hooks(behavior: &str) {
                 }));
                 let answer = loop {
                     let line = read_line();
-                    match serde_json::from_str::<Value>(&line) {
-                        Ok(frame) if frame["type"] == "service_response" => break frame,
-                        _ => continue,
+                    let Ok(frame) = serde_json::from_str::<Value>(&line) else {
+                        continue;
+                    };
+                    if frame["type"] == "interaction_response"
+                        && frame["id"] == format!("{hook_id}-ask")
+                    {
+                        // A well-behaved origin announces its settle
+                        // (the entry-owned-settles rule).
+                        emit(json!({
+                            "type": "interaction_settled",
+                            "id": format!("{hook_id}-ask"),
+                        }));
+                        break frame;
                     }
                 };
-                match &answer["result"] {
-                    Value::Null => emit(json!({
-                        "type": "hook_result", "hook_id": hook_id,
-                        "decision": "skip", "message": "dismissed — the call did not run",
-                    })),
-                    other => {
-                        let allowed = other["selected"][0].as_str() == Some("Allow");
-                        emit(json!({
-                            "type": "hook_result", "hook_id": hook_id,
-                            "decision": if allowed { "run" } else { "skip" },
-                            "message": if allowed { Value::Null } else { json!("denied by the answer") },
-                        }));
-                    }
+                let allowed = answer["payload"]["selected"][0].as_str() == Some("Allow");
+                let (verdict, message) = if allowed {
+                    ("run", Value::Null)
+                } else {
+                    ("skip", json!("denied by the answer"))
+                };
+                let mut answer = json!({"verdict": verdict});
+                if !message.is_null() {
+                    answer["message"] = message;
                 }
+                emit(json!({
+                    "type": "hook_result", "hook_id": hook_id,
+                    "answer": answer,
+                }));
             }
             _ => emit(json!({
                 "type": "hook_result", "hook_id": hook_id,
-                "decision": "run",
+                "answer": {"verdict": "run"},
             })),
         }
     }

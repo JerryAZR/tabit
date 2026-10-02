@@ -9,10 +9,10 @@ use crate::entry::{FileRecord, SideKind, SideRecord};
 use crate::error::SessionError;
 use crate::lock::lock;
 use futures::StreamExt;
-use rig_agent::agent::{MultiTurnStreamItem, StreamingError};
-use rig_agent::completion::Message;
-use rig_agent::streaming::{StreamedUserContent, StreamingChat};
 use std::sync::Arc;
+use tabit_engine::agent::{MultiTurnStreamItem, StreamingError};
+use tabit_engine::completion::Message;
+use tabit_engine::streaming::{StreamedUserContent, StreamingChat};
 use tabit_protocol::SessionEvent;
 use tokio_util::sync::CancellationToken;
 
@@ -84,7 +84,7 @@ impl Session {
     /// drive loop for frontends ([`crate::SessionHost`]'s workers).
     pub async fn pump(&mut self, on_event: &mut (dyn FnMut(SessionEvent) + Send)) -> RunSummary {
         // A pump may drain at any instant from here to its end: submit
-        // acknowledgments switch to `message_queued` (PROTOCOL.md v2).
+        // acknowledgments switch to `message_queued` (FRONTEND.md §5).
         self.mailbox.run_started();
         let mut total = RunSummary {
             outcome: RunOutcome::Completed,
@@ -281,38 +281,42 @@ impl Session {
     /// and steering over the run-agnostic mailbox. The conversation is
     /// the shared cell — the loop's folds ARE the durable commits; the
     /// session never folds.
-    async fn open_run(&self, run_token: &CancellationToken) -> rig_agent::agent::StreamingResult {
-        let mut tool_context = rig_agent::tool::ToolContext::new();
+    async fn open_run(
+        &self,
+        run_token: &CancellationToken,
+    ) -> tabit_engine::agent::StreamingResult {
+        let mut tool_context = tabit_engine::tool::ToolContext::new();
         tool_context.insert(run_token.clone());
-        tool_context.insert(rig_agent::tool::SessionCwd(self.cwd.clone()));
+        tool_context.insert(tabit_engine::tool::SessionCwd(self.cwd.clone()));
         // The session identity, per run: process-level hook forwarders
         // (extension policies) read it per event to scope their state.
-        tool_context.insert(rig_agent::tool::SessionTag(self.id.as_str().into()));
+        tool_context.insert(tabit_engine::tool::SessionTag(self.id.as_str().into()));
         if let Some(hub) = &self.interaction {
             tool_context.insert(hub.capability());
         }
         // The host-service capability extension envelopes dispatch to
-        // (task 5): verb zero is the ask, verb one `model_prompt` —
-        // billed through this session's ledger under the caller's
-        // name. Snapshotted at open like every per-run capability.
+        // (task 5): `model_prompt` — the envelope's one verb (the ask
+        // verb is gone; asks ride the grammar), billed through this
+        // session's ledger under the caller's name. Snapshotted at
+        // open like every per-run capability.
         tool_context.insert(std::sync::Arc::new(crate::services::ExtensionServices::new(
-            self.interaction.as_ref().map(|hub| hub.capability()),
             self.model_factory.clone(),
             self.config.clone(),
             self.selection(),
             self.ledger.clone(),
         ))
-            as std::sync::Arc<dyn rig_agent::tool::services::HostServices>);
+            as std::sync::Arc<dyn tabit_engine::tool::services::HostServices>);
         // Subagent support, when mounted: the per-run capability is the
-        // parts plus THIS parent's identity and channels, snapshot at
-        // open (a mid-run model switch reaches the next run's children).
+        // parts, the session's pool, plus THIS parent's identity,
+        // snapshot at open (a mid-run model switch reaches the next
+        // run's children).
         if let Some(parts) = &self.subagent_parts {
             tool_context.insert(std::sync::Arc::new(crate::subagent::SpawnContext::new(
                 parts.clone(),
+                self.subagent_pool.clone(),
                 self.id.clone(),
                 self.selection(),
                 self.cwd.clone(),
-                self.event_tap.get().cloned(),
             )));
         }
         // The skills catalog (one discovery per process): the `skill`
@@ -348,7 +352,7 @@ impl Session {
             // 10): the engine mints from tabit's UUIDv7 source, so the id
             // a live `turn_started` carries is literally the id the
             // committed entry keeps in the log.
-            .turn_id_source(Arc::new(crate::ids::new_entry_id) as rig_agent::TurnIdSource)
+            .turn_id_source(Arc::new(crate::ids::new_entry_id) as tabit_engine::TurnIdSource)
             .await
     }
 
@@ -360,7 +364,7 @@ impl Session {
     /// atomic): there is nothing dangling to repair.
     async fn drive(
         &mut self,
-        mut stream: rig_agent::agent::StreamingResult,
+        mut stream: tabit_engine::agent::StreamingResult,
         run_token: &CancellationToken,
         started_at_ms: u64,
         sink: &mut EventSink<'_>,
@@ -409,6 +413,14 @@ impl Session {
                         id,
                         started_at_ms: started,
                     });
+                    // The subagent pool ages here — the one turn
+                    // boundary the session owns (session bookkeeping at
+                    // an item arm, the ledger's CompletionCall billing
+                    // the precedent). The previous turn's tools have
+                    // all settled by now (the roundtrip boundary sits
+                    // between turns), so "used this turn" is settled
+                    // truth.
+                    self.subagent_pool.turn_passed();
                 }
                 Ok(MultiTurnStreamItem::TurnCommitted { id, .. }) => {
                     // The engine's own fold is the durable commit; this
@@ -488,7 +500,8 @@ impl Session {
                     // failure (ENGINE.md behavior delta 9): the flow
                     // continues untouched — steers drain into the next
                     // turn, the run may end normally.
-                    if call.finish_reason == Some(rig_core::completion::FinishReason::Length) {
+                    if call.finish_reason == Some(tabit_providers::completion::FinishReason::Length)
+                    {
                         sink.emit(SessionEvent::TurnTruncated { turn_id });
                     }
                 }
@@ -518,7 +531,7 @@ impl Session {
     /// the model saw; `status` is the execution's structured outcome.
     fn note_tool_result(
         &self,
-        tool_result: rig_core::message::ToolResult,
+        tool_result: tabit_providers::message::ToolResult,
         internal_call_id: String,
         entry_id: String,
         turn_id: String,
@@ -615,12 +628,14 @@ fn run_failure_kind(failure: &SessionError) -> &'static str {
 
 /// Map an engine failure's provider error to its typed overflow
 /// classification, when it is one.
-fn overflow_of(failure: &SessionError) -> Option<rig_core::completion::ContextOverflow> {
+fn overflow_of(failure: &SessionError) -> Option<tabit_providers::completion::ContextOverflow> {
     let SessionError::Prompt(error) = failure else {
         return None;
     };
     match error {
-        rig_agent::completion::PromptError::CompletionError(inner) => inner.as_context_overflow(),
+        tabit_engine::completion::PromptError::CompletionError(inner) => {
+            inner.as_context_overflow()
+        }
         _ => None,
     }
 }
@@ -663,7 +678,7 @@ fn stream_item_event(
     turn_id: String,
     tool_names: &mut std::collections::BTreeMap<String, String>,
 ) -> Option<SessionEvent> {
-    use rig_agent::streaming::StreamedAssistantContent as A;
+    use tabit_engine::streaming::StreamedAssistantContent as A;
     match item {
         MultiTurnStreamItem::StreamAssistantItem(A::Text(text)) => Some(SessionEvent::TextDelta {
             turn_id,

@@ -1,0 +1,645 @@
+//! Completion helpers for deterministic agent-loop tests.
+
+use std::{
+    collections::VecDeque,
+    sync::{Arc, Mutex, MutexGuard},
+};
+
+use crate::{
+    OneOrMany,
+    completion::{
+        AssistantContent, CompletionError, CompletionModel, CompletionRequest, CompletionResponse,
+        Usage,
+    },
+    message::{ReasoningContent, ToolCall, ToolFunction},
+    streaming::StreamingCompletionResponse,
+};
+
+use super::streaming::{MOCK_PROVIDER, MockStreamEvent};
+
+/// Scripted error returned by [`MockCompletionModel`].
+#[derive(Clone, Debug)]
+pub enum MockError {
+    /// Provider error.
+    Provider(String),
+    /// Request construction error.
+    Request(String),
+    /// An HTTP response error (status + response body) — the wire
+    /// shape the overflow classifier and the compaction rejection
+    /// paths ride; a 4xx here classifies terminal like the real wire.
+    Http { status: u16, body: String },
+    /// A tool call whose arguments cannot be parsed — the model-side
+    /// defect the engine's turn-discard retry is exercised against.
+    MalformedToolCall { tool: String, reason: String },
+}
+
+impl MockError {
+    /// Create a provider error.
+    pub fn provider(message: impl Into<String>) -> Self {
+        Self::Provider(message.into())
+    }
+
+    /// Create a request error.
+    pub fn request(message: impl Into<String>) -> Self {
+        Self::Request(message.into())
+    }
+
+    /// Create an HTTP response error. Panics on an out-of-range
+    /// status — a test author's typo, not a runtime condition.
+    pub fn http(status: u16, body: impl Into<String>) -> Self {
+        Self::Http {
+            status,
+            body: body.into(),
+        }
+    }
+
+    /// Create a malformed-tool-call defect.
+    pub fn malformed_tool_call(tool: impl Into<String>, reason: impl Into<String>) -> Self {
+        Self::MalformedToolCall {
+            tool: tool.into(),
+            reason: reason.into(),
+        }
+    }
+
+    #[allow(clippy::expect_used)] // sanctioned crash: a scripted status outside u16's valid range is a test-author typo
+    pub(crate) fn into_completion_error(self) -> CompletionError {
+        match self {
+            Self::Provider(message) => CompletionError::ProviderError(message),
+            Self::Request(message) => CompletionError::RequestError(message.into()),
+            Self::Http { status, body } => {
+                CompletionError::HttpError(crate::http_client::Error::InvalidStatusCodeWithMessage(
+                    http::StatusCode::from_u16(status)
+                        .expect("a scripted status is always a valid u16 status"),
+                    body,
+                ))
+            }
+            Self::MalformedToolCall { tool, reason } => {
+                CompletionError::MalformedToolCall { tool, reason }
+            }
+        }
+    }
+}
+
+/// A scripted non-streaming mock completion turn.
+#[derive(Clone, Debug)]
+pub struct MockTurn {
+    response: Result<MockTurnResponse, MockError>,
+}
+
+#[derive(Clone, Debug)]
+struct MockTurnResponse {
+    choice: OneOrMany<AssistantContent>,
+    usage: Usage,
+    message_id: Option<String>,
+    response_id: Option<String>,
+}
+
+impl MockTurn {
+    /// Create a text response turn.
+    pub fn text(text: impl Into<String>) -> Self {
+        Self::from_content(AssistantContent::text(text.into()))
+    }
+
+    /// Create a tool-call response turn.
+    pub fn tool_call(
+        id: impl Into<String>,
+        name: impl Into<String>,
+        arguments: serde_json::Value,
+    ) -> Self {
+        Self::from_content(AssistantContent::ToolCall(ToolCall::new(
+            id.into(),
+            ToolFunction::new(name.into(), arguments),
+        )))
+    }
+
+    /// Create a provider-error response turn.
+    pub fn error(message: impl Into<String>) -> Self {
+        Self {
+            response: Err(MockError::provider(message)),
+        }
+    }
+
+    /// Create a request-error response turn.
+    pub fn request_error(message: impl Into<String>) -> Self {
+        Self {
+            response: Err(MockError::request(message)),
+        }
+    }
+
+    /// Create a response turn from one assistant content item.
+    pub fn from_content(content: AssistantContent) -> Self {
+        Self {
+            response: Ok(MockTurnResponse {
+                choice: OneOrMany::one(content),
+                usage: Usage::new(),
+                message_id: None,
+                response_id: None,
+            }),
+        }
+    }
+
+    /// Create a response turn from multiple assistant content items.
+    pub fn from_contents(
+        content: impl IntoIterator<Item = AssistantContent>,
+    ) -> Result<Self, crate::one_or_many::EmptyListError> {
+        Ok(Self {
+            response: Ok(MockTurnResponse {
+                choice: OneOrMany::many(content)?,
+                usage: Usage::new(),
+                message_id: None,
+                response_id: None,
+            }),
+        })
+    }
+
+    /// Attach a provider-specific call ID to a tool-call response turn.
+    pub fn with_call_id(mut self, call_id: impl Into<String>) -> Self {
+        let call_id = call_id.into();
+        if let Ok(response) = &mut self.response {
+            for content in response.choice.iter_mut() {
+                if let AssistantContent::ToolCall(tool_call) = content {
+                    tool_call.call_id = Some(call_id);
+                    break;
+                }
+            }
+        }
+        self
+    }
+
+    /// Override usage for this turn.
+    pub fn with_usage(mut self, usage: Usage) -> Self {
+        if let Ok(response) = &mut self.response {
+            response.usage = usage;
+        }
+        self
+    }
+
+    /// This turn as one scripted streaming turn: the same content, usage,
+    /// and identity expressed as stream events, ending in the terminal
+    /// record. The bridge for driving the streaming surface with scenarios
+    /// authored as unary turns; error turns convert to the matching stream
+    /// error event.
+    #[allow(clippy::panic)]
+    pub fn into_stream_events(self) -> Vec<MockStreamEvent> {
+        let response = match self.response {
+            Ok(response) => response,
+            Err(error) => return vec![MockStreamEvent::Error(error)],
+        };
+        let mut events = Vec::new();
+        if let Some(message_id) = response.message_id {
+            events.push(MockStreamEvent::MessageId(message_id));
+        }
+        for content in response.choice {
+            match content {
+                AssistantContent::Text(text) => {
+                    events.push(MockStreamEvent::TextStart {
+                        id: "text-0".to_string(),
+                        additional_params: text.additional_params,
+                    });
+                    events.push(MockStreamEvent::Text(text.text));
+                }
+                AssistantContent::ToolCall(tool_call) => {
+                    events.push(MockStreamEvent::ToolCall {
+                        id: tool_call.id,
+                        name: tool_call.function.name,
+                        arguments: tool_call.function.arguments,
+                        call_id: tool_call.call_id,
+                    });
+                }
+                AssistantContent::Reasoning(reasoning) => {
+                    // The stream-event grammar carries one reasoning block per
+                    // event; a multi-block turn is a test-authoring error.
+                    let [content] = reasoning.content.try_into().unwrap_or_else(
+                        |vec: Vec<ReasoningContent>| {
+                            panic!(
+                                "MockTurn reasoning with {} blocks has no single-event form",
+                                vec.len()
+                            )
+                        },
+                    );
+                    events.push(MockStreamEvent::Reasoning {
+                        id: reasoning.id.unwrap_or_else(|| "reasoning-0".to_string()),
+                        content,
+                    });
+                }
+                other => {
+                    // Image and future variants have no stream-event
+                    // spelling; converting them is a loud error, not a
+                    // silent drop.
+                    panic!("MockTurn content {other:?} has no stream-event form");
+                }
+            }
+        }
+        events.push(MockStreamEvent::final_response(response.usage));
+        events
+    }
+
+    /// Set a provider-assigned assistant message ID for this turn.
+    pub fn with_message_id(mut self, message_id: impl Into<String>) -> Self {
+        if let Ok(response) = &mut self.response {
+            response.message_id = Some(message_id.into());
+        }
+        self
+    }
+
+    /// Set a provider-assigned response-scoped ID for this turn.
+    pub fn with_response_id(mut self, response_id: impl Into<String>) -> Self {
+        if let Ok(response) = &mut self.response {
+            response.response_id = Some(response_id.into());
+        }
+        self
+    }
+
+    fn into_completion_response(self) -> Result<CompletionResponse, CompletionError> {
+        let response = self.response.map_err(MockError::into_completion_error)?;
+        Ok(
+            CompletionResponse::new(response.choice, response.usage, MOCK_PROVIDER)
+                .with_optional_message_id(response.message_id)
+                .with_optional_response_id(response.response_id),
+        )
+    }
+}
+
+#[derive(Default)]
+struct MockCompletionModelState {
+    turns: Mutex<VecDeque<MockTurn>>,
+    stream_turns: Mutex<VecDeque<Vec<MockStreamEvent>>>,
+    requests: Mutex<Vec<CompletionRequest>>,
+}
+
+/// A cloneable scripted [`CompletionModel`] for tests.
+///
+/// Each completion or stream call consumes exactly one scripted turn. If no turn
+/// is available, the model returns [`CompletionError::ProviderError`] with a
+/// clear message instead of repeating previous responses.
+#[derive(Clone, Default)]
+pub struct MockCompletionModel {
+    state: Arc<MockCompletionModelState>,
+}
+
+impl MockCompletionModel {
+    /// Create a mock model from scripted non-streaming turns.
+    pub fn new(turns: impl IntoIterator<Item = MockTurn>) -> Self {
+        Self::from_turns(turns)
+    }
+
+    /// Create a mock model that returns one text completion.
+    pub fn text(text: impl Into<String>) -> Self {
+        Self::from_turns([MockTurn::text(text)])
+    }
+
+    /// Create a mock model from scripted non-streaming turns.
+    pub fn from_turns(turns: impl IntoIterator<Item = MockTurn>) -> Self {
+        Self {
+            state: Arc::new(MockCompletionModelState {
+                turns: Mutex::new(turns.into_iter().collect()),
+                stream_turns: Mutex::new(VecDeque::new()),
+                requests: Mutex::new(Vec::new()),
+            }),
+        }
+    }
+
+    /// Create a mock model from scripted streaming turns.
+    pub fn from_stream_turns(
+        stream_turns: impl IntoIterator<Item = impl IntoIterator<Item = MockStreamEvent>>,
+    ) -> Self {
+        Self {
+            state: Arc::new(MockCompletionModelState {
+                turns: Mutex::new(VecDeque::new()),
+                stream_turns: Mutex::new(
+                    stream_turns
+                        .into_iter()
+                        .map(|turn| turn.into_iter().collect())
+                        .collect(),
+                ),
+                requests: Mutex::new(Vec::new()),
+            }),
+        }
+    }
+
+    /// Extend the stream-turn script at runtime (clones share state):
+    /// for scripts whose later turns depend on earlier results — a
+    /// tool result carrying a runtime-minted id, say — written between
+    /// model calls instead of upfront.
+    pub fn push_stream_turn(&self, turn: impl IntoIterator<Item = MockStreamEvent>) {
+        self.stream_turns_guard()
+            .push_back(turn.into_iter().collect());
+    }
+
+    /// Return cloned requests received by this model.
+    pub fn requests(&self) -> Vec<CompletionRequest> {
+        self.requests_guard().clone()
+    }
+
+    /// Return the number of requests received by this model.
+    pub fn request_count(&self) -> usize {
+        self.requests_guard().len()
+    }
+
+    fn record_request(&self, request: CompletionRequest) {
+        self.requests_guard().push(request);
+    }
+
+    fn next_turn(&self) -> Option<MockTurn> {
+        self.turns_guard().pop_front()
+    }
+
+    fn next_stream_turn(&self) -> Option<Vec<MockStreamEvent>> {
+        self.stream_turns_guard().pop_front()
+    }
+
+    fn turns_guard(&self) -> MutexGuard<'_, VecDeque<MockTurn>> {
+        match self.state.turns.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        }
+    }
+
+    fn stream_turns_guard(&self) -> MutexGuard<'_, VecDeque<Vec<MockStreamEvent>>> {
+        match self.state.stream_turns.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        }
+    }
+
+    fn requests_guard(&self) -> MutexGuard<'_, Vec<CompletionRequest>> {
+        match self.state.requests.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        }
+    }
+}
+
+impl CompletionModel for MockCompletionModel {
+    async fn completion(
+        &self,
+        request: CompletionRequest,
+    ) -> Result<CompletionResponse, CompletionError> {
+        self.record_request(request);
+        let Some(turn) = self.next_turn() else {
+            return Err(CompletionError::ProviderError(
+                "mock completion model has no scripted completion turn".to_string(),
+            ));
+        };
+
+        turn.into_completion_response()
+    }
+
+    async fn stream(
+        &self,
+        request: CompletionRequest,
+    ) -> Result<StreamingCompletionResponse, CompletionError> {
+        self.record_request(request);
+        let Some(events) = self.next_stream_turn() else {
+            return Err(CompletionError::ProviderError(
+                "mock completion model has no scripted streaming turn".to_string(),
+            ));
+        };
+
+        let stream = async_stream::stream! {
+            for event in events {
+                yield event.into_raw_choice();
+            }
+        };
+        // Scripted terminals go through `normalize_stream` like every real
+        // provider's, so the mock observes the same `Stop` -> `ToolCalls`
+        // reconciliation callers see in production.
+        let stream = crate::streaming::normalize_stream(Box::pin(stream), Ok);
+        Ok(StreamingCompletionResponse::stream(MOCK_PROVIDER, stream))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        message::Message,
+        streaming::{StreamedAssistantContent, ToolCallDeltaContent},
+    };
+    use futures::StreamExt;
+
+    fn request(prompt: &str) -> CompletionRequest {
+        CompletionRequest {
+            model: None,
+            preamble: None,
+            chat_history: OneOrMany::one(Message::user(prompt)),
+            documents: Vec::new(),
+            tools: Vec::new(),
+            temperature: None,
+            max_tokens: None,
+            tool_choice: None,
+            additional_params: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn completion_consumes_scripted_turns_and_records_requests() {
+        let model = MockCompletionModel::new([
+            MockTurn::text("first").with_message_id("msg_1"),
+            MockTurn::tool_call("tool_1", "calculator", serde_json::json!({"x": 1}))
+                .with_call_id("call_1"),
+        ]);
+
+        let first = model
+            .completion(request("hello"))
+            .await
+            .expect("first scripted turn should succeed");
+        assert_eq!(first.message_id.as_deref(), Some("msg_1"));
+        assert!(matches!(
+            first.choice.first(),
+            AssistantContent::Text(text) if text.text == "first"
+        ));
+
+        let second = model
+            .completion(request("use a tool"))
+            .await
+            .expect("second scripted turn should succeed");
+        assert!(matches!(
+            second.choice.first(),
+            AssistantContent::ToolCall(tool_call)
+                if tool_call.id == "tool_1"
+                    && tool_call.call_id.as_deref() == Some("call_1")
+        ));
+
+        assert_eq!(model.request_count(), 2);
+        assert_eq!(model.requests().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn missing_completion_turn_returns_provider_error() {
+        let model = MockCompletionModel::default();
+
+        let err = model
+            .completion(request("hello"))
+            .await
+            .expect_err("missing turn should error");
+
+        assert!(matches!(
+            err,
+            CompletionError::ProviderError(message)
+                if message.contains("no scripted completion turn")
+        ));
+    }
+
+    #[tokio::test]
+    async fn stream_yields_scripted_events_and_records_requests() {
+        let model = MockCompletionModel::from_stream_turns([[
+            MockStreamEvent::message_id("msg_stream"),
+            MockStreamEvent::text("hel"),
+            MockStreamEvent::text("lo"),
+            MockStreamEvent::tool_call_name_delta("tool_1", "calculator"),
+            MockStreamEvent::tool_call_arguments_delta("tool_1", "{\"x\":1}"),
+            MockStreamEvent::tool_call("tool_1", "calculator", serde_json::json!({"x": 1}))
+                .with_call_id("call_1"),
+            MockStreamEvent::final_response_with_total_tokens(7),
+        ]]);
+
+        let mut stream = model
+            .stream(request("stream"))
+            .await
+            .expect("stream should be created");
+
+        let mut text = String::new();
+        let mut saw_name_delta = false;
+        let mut saw_arguments_delta = false;
+        let mut saw_tool_call = false;
+        let mut saw_final = false;
+
+        while let Some(item) = stream.next().await {
+            match item.expect("stream event should succeed") {
+                StreamedAssistantContent::Text(chunk) => text.push_str(&chunk.text),
+                StreamedAssistantContent::ToolCallDelta { content, .. } => match content {
+                    ToolCallDeltaContent::Name(name) => {
+                        saw_name_delta = name == "calculator";
+                    }
+                    ToolCallDeltaContent::Delta(arguments) => {
+                        saw_arguments_delta = arguments == "{\"x\":1}";
+                    }
+                },
+                StreamedAssistantContent::ToolCall { tool_call, .. } => {
+                    saw_tool_call = tool_call.call_id.as_deref() == Some("call_1");
+                }
+                StreamedAssistantContent::Final(response) => {
+                    saw_final = matches!(
+                        response.usage,
+                        Usage {
+                            total_tokens: 7,
+                            ..
+                        }
+                    );
+                }
+                _ => {}
+            }
+        }
+
+        assert_eq!(text, "hello");
+        assert!(saw_name_delta);
+        assert!(saw_arguments_delta);
+        assert!(saw_tool_call);
+        assert!(saw_final);
+        assert_eq!(stream.message_id.as_deref(), Some("msg_stream"));
+        assert_eq!(model.request_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn stream_error_event_is_returned() {
+        let model = MockCompletionModel::from_stream_turns([[MockStreamEvent::error("boom")]]);
+        let mut stream = model
+            .stream(request("stream"))
+            .await
+            .expect("stream should be created");
+
+        let err = stream
+            .next()
+            .await
+            .expect("stream should yield one event")
+            .expect_err("scripted event should error");
+
+        assert!(matches!(
+            err,
+            CompletionError::ProviderError(message) if message == "boom"
+        ));
+    }
+
+    #[tokio::test]
+    async fn request_error_turn_maps_to_request_error() {
+        let model = MockCompletionModel::new([MockTurn::request_error("bad request")]);
+
+        let err = model
+            .completion(request("hello"))
+            .await
+            .err()
+            .expect("scripted request error should surface");
+
+        assert!(matches!(
+            err,
+            CompletionError::RequestError(message) if message.to_string().contains("bad request")
+        ));
+    }
+
+    #[tokio::test]
+    async fn missing_stream_turn_returns_provider_error() {
+        let model = MockCompletionModel::default();
+
+        let err = model
+            .stream(request("stream"))
+            .await
+            .err()
+            .expect("missing stream turn should error");
+
+        assert!(matches!(
+            err,
+            CompletionError::ProviderError(message)
+                if message.contains("no scripted streaming turn")
+        ));
+    }
+
+    #[tokio::test]
+    async fn with_call_id_ignores_non_tool_call_and_error_turns() {
+        // A text turn has no tool call to annotate; the builder must return the
+        // turn unchanged instead of panicking.
+        let text = MockTurn::text("hello").with_call_id("call_1");
+        let response = text
+            .into_completion_response()
+            .expect("text turn should still succeed");
+        assert!(matches!(
+            response.choice.first(),
+            AssistantContent::Text(text) if text.text == "hello"
+        ));
+
+        // An error turn has no response to mutate.
+        let error = MockTurn::error("boom").with_call_id("call_1");
+        assert!(error.into_completion_response().is_err());
+    }
+
+    #[tokio::test]
+    async fn poisoned_model_state_still_serves_turns() {
+        /// Panic in a scoped helper thread while holding the lock, poisoning it.
+        fn poison<T: Send>(mutex: &Mutex<T>) {
+            std::thread::scope(|scope| {
+                scope.spawn(move || {
+                    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        let _guard = mutex.lock();
+                        panic!("intentional mutex poison");
+                    }));
+                });
+            });
+        }
+
+        let model = MockCompletionModel::new([MockTurn::text("ok")]);
+        poison(&model.state.turns);
+        poison(&model.state.stream_turns);
+        poison(&model.state.requests);
+
+        let response = model
+            .completion(request("hello"))
+            .await
+            .expect("poisoned state should still serve scripted turns");
+        assert!(matches!(
+            response.choice.first(),
+            AssistantContent::Text(text) if text.text == "ok"
+        ));
+        assert_eq!(model.request_count(), 1);
+        assert_eq!(model.requests().len(), 1);
+    }
+}

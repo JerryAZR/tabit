@@ -5,25 +5,23 @@
 use super::*;
 use crate::SessionEvent;
 use crate::tests::{Factory, echo_tool, temp_store, text_turn, text_turn_reported, tool_turn};
-use rig_agent::tool::{DynamicTool, ToolOutput};
 use serde_json::json;
 use std::time::Duration;
+use tabit_engine::tool::{DynamicTool, ToolOutput};
 use tabit_protocol::{ModelSelection, SessionCommand};
 
 /// Wiring whose builders refuse (tests that never drive session
 /// lifecycle); the store stays real so the catalog is honest.
 fn plain_wiring(store: &SessionStore) -> SessionHostWiring {
     SessionHostWiring {
-        children: crate::ChildRouter::shared(),
+        node: std::sync::Arc::new(crate::Node::new("test")),
         boot_parent: None,
         boot_parent_call: None,
-        skills: Vec::new(),
-        extensions: Default::default(),
         store: store.clone(),
-        create: std::sync::Arc::new(|| Err("new_session is not driven".to_string())),
-        open: std::sync::Arc::new(|_| Err("open_session is not driven".to_string())),
     }
 }
+
+use crate::tests::plain_data;
 
 /// The boot session id, as the host's consumer learns it.
 fn boot_id(handle: &SessionHost) -> String {
@@ -51,7 +49,7 @@ fn slow_tool() -> DynamicTool {
 
 /// A tool whose body blocks its thread outright — no awaits, no token
 /// observation, the worst-behaved body the execution substrate must
-/// absorb (rig-agent dispatches bodies onto a sidecar runtime).
+/// absorb (tabit-engine dispatches bodies onto a sidecar runtime).
 fn blocking_tool() -> DynamicTool {
     DynamicTool::new(
         "blocking",
@@ -119,6 +117,7 @@ async fn startup_degradations_are_the_workers_first_frames() {
         session,
         vec!["default_model `gone` is not usable".to_string()],
         plain_wiring(&store),
+        plain_data(),
     );
     let id = boot_id(&handle);
 
@@ -158,52 +157,66 @@ async fn startup_degradations_are_the_workers_first_frames() {
 }
 
 #[tokio::test]
-async fn the_skills_catalog_follows_the_session_catalog() {
+async fn the_skills_catalog_is_the_sessions_stamped() {
+    // The session-level catalog ruling (2026-09, landed): each
+    // session's `skills_available` is stamped with its stream and
+    // lands right after its `session_opened`, ahead of the
+    // backend-level session catalog — the session's own fact, not
+    // the process's.
     let store = temp_store("endpoint-skills");
-    let session = Factory::new(vec![text_turn("hi")])
-        .into_builder(store.clone())
-        .create("C:/w")
-        .expect("session");
-    let mut wiring = plain_wiring(&store);
-    wiring.skills = vec![tabit_protocol::AvailableSkill {
+    // One registered entry is what `available()` snapshots (the
+    // discovery pass itself is the binary's business).
+    let mut catalog = crate::skills::Skills::default();
+    assert!(catalog.register(crate::skills::SkillEntry {
         name: "lint".to_string(),
         description: "Lint".to_string(),
-        location: "C:/w/.tabit/skills/lint/SKILL.md".to_string(),
-        level: "workspace".to_string(),
-    }];
-    let mut handle = SessionHost::spawn(session, Vec::new(), wiring);
+        base_dir: "C:/w/.tabit/skills/lint".into(),
+        skill_file: "C:/w/.tabit/skills/lint/SKILL.md".into(),
+        level: crate::skills::SkillLevel::Workspace,
+    }));
+    let session = Factory::new(vec![text_turn("hi")])
+        .into_builder(store.clone())
+        .skills(std::sync::Arc::new(catalog))
+        .create("C:/w")
+        .expect("session");
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store), plain_data());
     let id = boot_id(&handle);
     handle.message(&id, "go");
     let frames = drain(&mut handle).await;
-    // The skill announcement is backend-level (unstamped) and lands
-    // right after the session catalog, before any run event.
     let positions: Vec<(usize, &str)> = frames
         .iter()
         .enumerate()
         .filter_map(|(index, frame)| match &frame.event {
-            SessionEvent::SessionsAvailable { .. } => Some((index, "sessions")),
+            SessionEvent::SessionOpened { .. } => Some((index, "opened")),
             SessionEvent::SkillsAvailable { skills, .. } => {
                 assert_eq!(skills.len(), 1);
-                assert!(frame.stream.is_none(), "backend-level, unstamped");
+                assert_eq!(skills[0].name, "lint");
+                assert_eq!(
+                    frame.stream.as_ref().map(|s| s.as_str()),
+                    Some(id.as_str()),
+                    "stamped with the session's stream"
+                );
                 Some((index, "skills"))
             }
+            SessionEvent::SessionsAvailable { .. } => Some((index, "sessions")),
             _ => None,
         })
         .collect();
     assert_eq!(
         positions,
-        vec![(1, "sessions"), (2, "skills")],
+        vec![(0, "opened"), (1, "skills"), (2, "sessions")],
         "{positions:?}"
     );
     std::fs::remove_dir_all(store.dir()).ok();
 
-    // Empty discovery announces nothing — no empty frames.
+    // Empty discovery announces nothing — no empty frames, and with
+    // per-stream folding the absence is unambiguous.
     let store = temp_store("endpoint-skills-empty");
     let session = Factory::new(vec![text_turn("hi")])
         .into_builder(store.clone())
         .create("C:/w")
         .expect("session");
-    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store));
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store), plain_data());
     let id = boot_id(&handle);
     handle.message(&id, "go");
     let frames = drain(&mut handle).await;
@@ -213,7 +226,6 @@ async fn the_skills_catalog_follows_the_session_catalog() {
             .any(|f| matches!(f.event, SessionEvent::SkillsAvailable { .. })),
         "no empty announcement"
     );
-    std::fs::remove_dir_all(store.dir()).ok();
 }
 
 #[tokio::test]
@@ -223,7 +235,7 @@ async fn an_idle_message_runs_to_completion_over_the_stream() {
         .into_builder(store.clone())
         .create("C:/w")
         .expect("session");
-    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store));
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store), plain_data());
     let id = boot_id(&handle);
 
     handle.message(&id, "hi");
@@ -265,7 +277,7 @@ async fn a_message_mid_run_steers_instead_of_starting_a_second_run() {
         .dynamic_tool(slow_tool())
         .create("C:/w")
         .expect("session");
-    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store));
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store), plain_data());
     let id = boot_id(&handle);
 
     handle.message(&id, "run the tool");
@@ -333,7 +345,7 @@ async fn two_rapid_messages_both_land_in_order() {
         .into_builder(store.clone())
         .create("C:/w")
         .expect("session");
-    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store));
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store), plain_data());
     let id = boot_id(&handle);
 
     handle.message(&id, "first");
@@ -358,7 +370,7 @@ async fn abort_while_idle_discards_queued_messages() {
         .into_builder(store.clone())
         .create("C:/w")
         .expect("session");
-    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store));
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store), plain_data());
     let id = boot_id(&handle);
 
     // Queued while idle (the worker cannot have started: no await yet),
@@ -401,7 +413,7 @@ async fn abort_mid_run_discards_the_queue_and_ends_the_run() {
         .dynamic_tool(slow_tool())
         .create("C:/w")
         .expect("session");
-    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store));
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store), plain_data());
     let id = boot_id(&handle);
 
     handle.message(&id, "run the tool");
@@ -497,7 +509,7 @@ async fn abort_preempts_while_a_tool_body_blocks() {
         .dynamic_tool(blocking_tool())
         .create("C:/w")
         .expect("session");
-    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store));
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store), plain_data());
     let id = boot_id(&handle);
 
     handle.message(&id, "run the tool");
@@ -535,7 +547,7 @@ async fn a_failed_run_emits_run_failed_and_ends_the_stream_cleanly() {
         .dynamic_tool(echo_tool())
         .create("C:/w")
         .expect("session");
-    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store));
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store), plain_data());
     let id = boot_id(&handle);
 
     handle.message(&id, "will fail");
@@ -559,7 +571,7 @@ async fn a_link_outlives_the_handle_and_still_submits() {
         .into_builder(store.clone())
         .create("C:/w")
         .expect("session");
-    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store));
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store), plain_data());
     let id = boot_id(&handle);
     let link = handle.command_link();
 
@@ -594,6 +606,71 @@ async fn until_event(handle: &mut SessionHost, want: impl Fn(&SessionEvent) -> b
 }
 
 #[tokio::test]
+async fn every_session_becoming_visible_announces_its_own_skills() {
+    // The session-level catalog ruling, door arms: `new_session`
+    // and `open_session` announce the created/resumed session's
+    // skills, stamped with ITS stream — never the boot's, never
+    // backend-level.
+    let store = temp_store("endpoint-skills-door");
+    let session = Factory::new(vec![text_turn("boot")])
+        .into_builder(store.clone())
+        .create("C:/w")
+        .expect("session");
+    let mut catalog = crate::skills::Skills::default();
+    assert!(catalog.register(crate::skills::SkillEntry {
+        name: "sub-lint".to_string(),
+        description: "Sub lint".to_string(),
+        base_dir: "C:/other/.tabit/skills/sub-lint".into(),
+        skill_file: "C:/other/.tabit/skills/sub-lint/SKILL.md".into(),
+        level: crate::skills::SkillLevel::Workspace,
+    }));
+    let created = std::sync::Arc::new(catalog);
+    let create_store = store.clone();
+    let wiring = SessionHostWiring {
+        node: std::sync::Arc::new(crate::Node::new("test")),
+        boot_parent: None,
+        boot_parent_call: None,
+        store: store.clone(),
+    };
+    let data = SessionHostData {
+        create: std::sync::Arc::new(move || {
+            Factory::new(vec![text_turn("new")])
+                .into_builder(create_store.clone())
+                .skills(created.clone())
+                .create("C:/other")
+                .map(|session| (session, Vec::new()))
+                .map_err(|error| error.to_string())
+        }),
+        open: std::sync::Arc::new(|_| Err("not driven".to_string())),
+        extensions: Default::default(),
+    };
+    let mut handle = SessionHost::spawn(session, Vec::new(), wiring, data);
+    let boot = boot_id(&handle);
+    let link = handle.command_link();
+    link.send(SessionCommand::NewSession);
+    let frame = until_event(&mut handle, |event| {
+        matches!(event, SessionEvent::SkillsAvailable { .. })
+    })
+    .await;
+    let (stream, announced) = match frame {
+        tabit_protocol::EventFrame {
+            stream,
+            event: SessionEvent::SkillsAvailable { skills, .. },
+            ..
+        } => (stream, skills),
+        _ => unreachable!("until_event pinned the kind"),
+    };
+    assert_eq!(announced.len(), 1);
+    assert_eq!(announced[0].name, "sub-lint");
+    assert_ne!(
+        stream.as_ref().map(|s| s.as_str()),
+        Some(boot.as_str()),
+        "the created session's catalog is stamped with its own stream"
+    );
+    std::fs::remove_dir_all(store.dir()).ok();
+}
+
+#[tokio::test]
 async fn new_session_runs_a_second_stream_and_both_route_by_id() {
     let store = temp_store("endpoint-multi");
     let session = Factory::new(vec![text_turn("boot answer")])
@@ -602,12 +679,12 @@ async fn new_session_runs_a_second_stream_and_both_route_by_id() {
         .expect("session");
     let create_store = store.clone();
     let wiring = SessionHostWiring {
-        children: crate::ChildRouter::shared(),
+        node: std::sync::Arc::new(crate::Node::new("test")),
         boot_parent: None,
         boot_parent_call: None,
-        skills: Vec::new(),
-        extensions: Default::default(),
         store: store.clone(),
+    };
+    let data = SessionHostData {
         create: std::sync::Arc::new(move || {
             Factory::new(vec![text_turn("new answer")])
                 .into_builder(create_store.clone())
@@ -616,8 +693,9 @@ async fn new_session_runs_a_second_stream_and_both_route_by_id() {
                 .map_err(|error| error.to_string())
         }),
         open: std::sync::Arc::new(|_| Err("not driven".to_string())),
+        extensions: Default::default(),
     };
-    let mut handle = SessionHost::spawn(session, Vec::new(), wiring);
+    let mut handle = SessionHost::spawn(session, Vec::new(), wiring, data);
     let boot = boot_id(&handle);
     let link = handle.command_link();
 
@@ -704,12 +782,12 @@ async fn open_session_loads_a_stored_session_and_replays_it() {
         .expect("session");
     let open_store = store.clone();
     let wiring = SessionHostWiring {
-        children: crate::ChildRouter::shared(),
+        node: std::sync::Arc::new(crate::Node::new("test")),
         boot_parent: None,
         boot_parent_call: None,
-        skills: Vec::new(),
-        extensions: Default::default(),
         store: store.clone(),
+    };
+    let data = SessionHostData {
         create: std::sync::Arc::new(|| Err("not driven".to_string())),
         open: std::sync::Arc::new(move |id: &str| {
             let path = open_store
@@ -721,12 +799,13 @@ async fn open_session_loads_a_stored_session_and_replays_it() {
                 .path;
             Factory::new(vec![text_turn("reopened answer")])
                 .into_builder(open_store.clone())
-                .resume(&path)
+                .resume(&path, "C:/w")
                 .map(|(session, _)| (session, Vec::new()))
                 .map_err(|error| error.to_string())
         }),
+        extensions: Default::default(),
     };
-    let mut handle = SessionHost::spawn(boot_session, Vec::new(), wiring);
+    let mut handle = SessionHost::spawn(boot_session, Vec::new(), wiring, data);
     let boot = boot_id(&handle);
 
     // Lazy loading: the startup catalog lists the stored session (the
@@ -770,8 +849,8 @@ async fn open_session_loads_a_stored_session_and_replays_it() {
             "the pass is stamped with the opened id"
         );
         match frame.event {
-            SessionEvent::ReplayStarted { .. } => {}
-            SessionEvent::ReplayDone => break,
+            SessionEvent::ReplayBegin { .. } => {}
+            SessionEvent::ReplayEnd => break,
             SessionEvent::Error { message, .. } => panic!("open failed: {message}"),
             event => pass.push(kind_of(&event)),
         }
@@ -814,15 +893,15 @@ async fn open_session_loads_a_stored_session_and_replays_it() {
         let frame = until_event(&mut handle, |event| {
             matches!(
                 event,
-                SessionEvent::ReplayStarted { .. }
-                    | SessionEvent::ReplayDone
+                SessionEvent::ReplayBegin { .. }
+                    | SessionEvent::ReplayEnd
                     | SessionEvent::Error { .. }
             )
         })
         .await;
         match frame.event {
-            SessionEvent::ReplayStarted { .. } => pass_two += 1,
-            SessionEvent::ReplayDone => break,
+            SessionEvent::ReplayBegin { .. } => pass_two += 1,
+            SessionEvent::ReplayEnd => break,
             SessionEvent::Error { message, .. } => panic!("re-open failed: {message}"),
             _ => {}
         }
@@ -854,12 +933,12 @@ async fn open_session_emits_its_model_notes_ahead_of_the_replay() {
         .expect("session");
     let open_store = store.clone();
     let wiring = SessionHostWiring {
-        children: crate::ChildRouter::shared(),
+        node: std::sync::Arc::new(crate::Node::new("test")),
         boot_parent: None,
         boot_parent_call: None,
-        skills: Vec::new(),
-        extensions: Default::default(),
         store: store.clone(),
+    };
+    let data = SessionHostData {
         create: std::sync::Arc::new(|| Err("not driven".to_string())),
         open: std::sync::Arc::new(move |id: &str| {
             let path = open_store
@@ -871,7 +950,7 @@ async fn open_session_emits_its_model_notes_ahead_of_the_replay() {
                 .path;
             Factory::new(vec![text_turn("reopened answer")])
                 .into_builder(open_store.clone())
-                .resume(&path)
+                .resume(&path, "C:/w")
                 .map(|(session, _)| {
                     (
                         session,
@@ -880,8 +959,9 @@ async fn open_session_emits_its_model_notes_ahead_of_the_replay() {
                 })
                 .map_err(|error| error.to_string())
         }),
+        extensions: Default::default(),
     };
-    let mut handle = SessionHost::spawn(boot_session, Vec::new(), wiring);
+    let mut handle = SessionHost::spawn(boot_session, Vec::new(), wiring, data);
     boot_id(&handle);
 
     handle.command_link().send(SessionCommand::OpenSession {
@@ -904,7 +984,7 @@ async fn open_session_emits_its_model_notes_ahead_of_the_replay() {
     );
     // And the pass still follows, whole.
     until_event(&mut handle, |event| {
-        matches!(event, SessionEvent::ReplayDone)
+        matches!(event, SessionEvent::ReplayEnd)
     })
     .await;
     drain(&mut handle).await;
@@ -918,7 +998,7 @@ async fn an_unknown_session_target_is_a_backend_level_session_error() {
         .into_builder(store.clone())
         .create("C:/w")
         .expect("session");
-    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store));
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store), plain_data());
 
     handle.command_link().send(SessionCommand::Message {
         session: "no-such".to_string(),
@@ -959,10 +1039,10 @@ async fn a_replay_request_streams_the_pass_onto_the_event_channel() {
     };
     let session = Factory::new(vec![text_turn("second answer")])
         .into_builder(store.clone())
-        .resume(&path)
+        .resume(&path, "C:/w")
         .expect("resume")
         .0;
-    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store));
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store), plain_data());
     let id = boot_id(&handle);
 
     handle.replay(&id);
@@ -978,8 +1058,8 @@ async fn a_replay_request_streams_the_pass_onto_the_event_channel() {
             // the pass; session-level announcements are not pass
             // content.
             SessionEvent::SessionOpened { .. } | SessionEvent::SessionsAvailable { .. } => {}
-            SessionEvent::ReplayStarted { .. } => pass.push("started".to_string()),
-            SessionEvent::ReplayDone => {
+            SessionEvent::ReplayBegin { .. } => pass.push("started".to_string()),
+            SessionEvent::ReplayEnd => {
                 pass.push("done".to_string());
                 done = true;
             }
@@ -1041,14 +1121,15 @@ async fn a_catalog_failure_is_the_carrier_in_place_of_the_announcement() {
         session,
         Vec::new(),
         SessionHostWiring {
-            children: crate::ChildRouter::shared(),
+            node: std::sync::Arc::new(crate::Node::new("test")),
             boot_parent: None,
             boot_parent_call: None,
-            skills: Vec::new(),
-            extensions: Default::default(),
             store: SessionStore::new(&dir),
+        },
+        SessionHostData {
             create: std::sync::Arc::new(|| Err("not driven".to_string())),
             open: std::sync::Arc::new(|_| Err("not driven".to_string())),
+            extensions: Default::default(),
         },
     );
 
@@ -1083,18 +1164,19 @@ async fn lifecycle_failures_and_notes_ride_the_carrier() {
         session,
         Vec::new(),
         SessionHostWiring {
-            children: crate::ChildRouter::shared(),
+            node: std::sync::Arc::new(crate::Node::new("test")),
             boot_parent: None,
             boot_parent_call: None,
-            skills: Vec::new(),
-            extensions: Default::default(),
             store: store.clone(),
-            // The builder degrades: the failure is boot-stamped, the
-            // notes are new-session-stamped.
+        },
+        // The builder degrades: the failure is boot-stamped, the
+        // notes are new-session-stamped.
+        SessionHostData {
             create: std::sync::Arc::new(|| {
                 Err("any model to run with (providers.toml defines no models)".to_string())
             }),
             open: std::sync::Arc::new(|id: &str| Err(format!("no stored session with id `{id}`"))),
+            extensions: Default::default(),
         },
     );
     let _boot = boot_id(&handle);
@@ -1143,12 +1225,12 @@ async fn a_created_sessions_selection_notes_follow_its_stream() {
         session,
         Vec::new(),
         SessionHostWiring {
-            children: crate::ChildRouter::shared(),
+            node: std::sync::Arc::new(crate::Node::new("test")),
             boot_parent: None,
             boot_parent_call: None,
-            skills: Vec::new(),
-            extensions: Default::default(),
             store: store.clone(),
+        },
+        SessionHostData {
             create: std::sync::Arc::new(move || {
                 Factory::new(vec![text_turn("new answer")])
                     .into_builder(create_store.clone())
@@ -1162,6 +1244,7 @@ async fn a_created_sessions_selection_notes_follow_its_stream() {
                     .map_err(|error| error.to_string())
             }),
             open: std::sync::Arc::new(|_| Err("not driven".to_string())),
+            extensions: Default::default(),
         },
     );
     handle.command_link().send(SessionCommand::NewSession);
@@ -1214,12 +1297,12 @@ async fn new_session_is_never_blocked_by_a_running_session() {
         .expect("session");
     let create_store = store.clone();
     let wiring = SessionHostWiring {
-        children: crate::ChildRouter::shared(),
+        node: std::sync::Arc::new(crate::Node::new("test")),
         boot_parent: None,
         boot_parent_call: None,
-        skills: Vec::new(),
-        extensions: Default::default(),
         store: store.clone(),
+    };
+    let data = SessionHostData {
         create: std::sync::Arc::new(move || {
             Factory::new(vec![text_turn("new answer")])
                 .into_builder(create_store.clone())
@@ -1228,8 +1311,9 @@ async fn new_session_is_never_blocked_by_a_running_session() {
                 .map_err(|error| error.to_string())
         }),
         open: std::sync::Arc::new(|_| Err("not driven".to_string())),
+        extensions: Default::default(),
     };
-    let mut handle = SessionHost::spawn(session, Vec::new(), wiring);
+    let mut handle = SessionHost::spawn(session, Vec::new(), wiring, data);
     let boot = boot_id(&handle);
     let link = handle.command_link();
 
@@ -1301,7 +1385,7 @@ async fn a_post_abort_message_survives_and_runs() {
         .dynamic_tool(slow_tool())
         .create("C:/w")
         .expect("session");
-    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store));
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store), plain_data());
     let id = boot_id(&handle);
     let link = handle.command_link();
 
@@ -1377,12 +1461,12 @@ async fn frontend_death_aborts_every_sessions_run() {
         .expect("session");
     let create_store = store.clone();
     let wiring = SessionHostWiring {
-        children: crate::ChildRouter::shared(),
+        node: std::sync::Arc::new(crate::Node::new("test")),
         boot_parent: None,
         boot_parent_call: None,
-        skills: Vec::new(),
-        extensions: Default::default(),
         store: store.clone(),
+    };
+    let data = SessionHostData {
         create: std::sync::Arc::new(move || {
             Factory::new(vec![tool_turn("t2", "slow"), text_turn("never")])
                 .into_builder(create_store.clone())
@@ -1392,8 +1476,9 @@ async fn frontend_death_aborts_every_sessions_run() {
                 .map_err(|error| error.to_string())
         }),
         open: std::sync::Arc::new(|_| Err("not driven".to_string())),
+        extensions: Default::default(),
     };
-    let mut handle = SessionHost::spawn(session, Vec::new(), wiring);
+    let mut handle = SessionHost::spawn(session, Vec::new(), wiring, data);
     let boot = boot_id(&handle);
     let link = handle.command_link();
 
@@ -1480,7 +1565,7 @@ async fn frontend_death_aborts_every_sessions_run() {
 
 #[tokio::test]
 async fn a_replay_request_for_a_running_session_answers_after_its_terminal() {
-    // "The one wait in the design" (PROTOCOL.md v3): the pass for a
+    // "The one wait in the design" (FRONTEND.md §5, open_session): the pass for a
     // session whose own run is in flight waits for that run's
     // terminal — pinned as an ordering contract, not an accident: no
     // bracket interleaves the run's events.
@@ -1490,7 +1575,7 @@ async fn a_replay_request_for_a_running_session_answers_after_its_terminal() {
         .dynamic_tool(slow_tool())
         .create("C:/w")
         .expect("session");
-    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store));
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store), plain_data());
     let id = boot_id(&handle);
 
     handle.message(&id, "run the slow tool");
@@ -1506,7 +1591,7 @@ async fn a_replay_request_for_a_running_session_answers_after_its_terminal() {
     let finished = loop {
         let frame = handle.next_event().await.expect("the run continues");
         match frame.event {
-            SessionEvent::ReplayStarted { .. } | SessionEvent::ReplayDone => {
+            SessionEvent::ReplayBegin { .. } | SessionEvent::ReplayEnd => {
                 saw_bracket_before_terminal = true;
             }
             SessionEvent::RunFinished { .. } => break frame,
@@ -1524,7 +1609,7 @@ async fn a_replay_request_for_a_running_session_answers_after_its_terminal() {
 
     // …and answers right after it, stamped with the session's id.
     let started = until_event(&mut handle, |event| {
-        matches!(event, SessionEvent::ReplayStarted { .. })
+        matches!(event, SessionEvent::ReplayBegin { .. })
     })
     .await;
     assert_eq!(
@@ -1533,11 +1618,11 @@ async fn a_replay_request_for_a_running_session_answers_after_its_terminal() {
     );
     loop {
         let frame = until_event(&mut handle, |event| {
-            matches!(event, SessionEvent::ReplayDone | SessionEvent::Error { .. })
+            matches!(event, SessionEvent::ReplayEnd | SessionEvent::Error { .. })
         })
         .await;
         match frame.event {
-            SessionEvent::ReplayDone => break,
+            SessionEvent::ReplayEnd => break,
             SessionEvent::Error { message, .. } => panic!("replay failed: {message}"),
             _ => {}
         }
@@ -1547,7 +1632,7 @@ async fn a_replay_request_for_a_running_session_answers_after_its_terminal() {
 }
 
 // ---------------------------------------------------------------------------
-// Checkout (PROTOCOL.md v3 stage 2): pause-point semantics, the
+// Checkout (FRONTEND.md §7): pause-point semantics, the
 // watermark discard rule, and the full-re-render pass.
 
 /// The entry id of a user message, by text, from frames collected so
@@ -1589,7 +1674,7 @@ async fn collect_until(
 fn bracket_users(frames: &[EventFrame], checked_at: usize) -> Vec<String> {
     let done_at = frames[checked_at..]
         .iter()
-        .position(|frame| matches!(frame.event, SessionEvent::ReplayDone))
+        .position(|frame| matches!(frame.event, SessionEvent::ReplayEnd))
         .expect("the pass closes");
     user_texts(&frames[checked_at..checked_at + done_at + 1])
 }
@@ -1643,7 +1728,7 @@ async fn checkout_rewinds_replays_and_branches_the_next_prompt() {
     .into_builder(store.clone())
     .create("C:/w")
     .expect("session");
-    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store));
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store), plain_data());
     let id = boot_id(&handle);
 
     // Two exchanges, each to its terminal; then an idle checkout at
@@ -1656,7 +1741,7 @@ async fn checkout_rewinds_replays_and_branches_the_next_prompt() {
     let first_entry = entry_id_of(&frames, "one");
     handle.checkout(&id, &first_entry);
     collect_until(&mut handle, &mut frames, |e| {
-        matches!(e, SessionEvent::ReplayDone)
+        matches!(e, SessionEvent::ReplayEnd)
     })
     .await;
 
@@ -1694,7 +1779,7 @@ async fn a_checkout_during_a_run_aborts_it_then_rewinds_at_the_beat() {
         .dynamic_tool(slow_tool())
         .create("C:/w")
         .expect("session");
-    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store));
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store), plain_data());
     let id = boot_id(&handle);
 
     handle.message(&id, "go");
@@ -1717,7 +1802,7 @@ async fn a_checkout_during_a_run_aborts_it_then_rewinds_at_the_beat() {
             SessionEvent::CheckedOut { .. } => saw_checked_out = true,
             _ => {}
         }
-        let done = matches!(frame.event, SessionEvent::ReplayDone);
+        let done = matches!(frame.event, SessionEvent::ReplayEnd);
         frames.push(frame);
         if saw_checked_out && done {
             break;
@@ -1849,7 +1934,7 @@ id = "bare"
         .into_builder_with_config(store.clone(), config, ModelSelection::new("p", "m"))
         .create("C:/w")
         .expect("session");
-    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store));
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store), plain_data());
     let id = boot_id(&handle);
     let mut frames = Vec::new();
 
@@ -1921,7 +2006,7 @@ async fn a_model_switch_lands_at_receive_and_announces() {
         .into_builder(store.clone())
         .create("C:/w")
         .expect("session");
-    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store));
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store), plain_data());
     let id = boot_id(&handle);
 
     // One exchange, then an idle switch: it lands at receive — entry,
@@ -1981,7 +2066,7 @@ async fn a_bad_model_ref_errors_at_receive_and_parks_nothing() {
         .into_builder(store.clone())
         .create("C:/w")
         .expect("session");
-    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store));
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store), plain_data());
     let id = boot_id(&handle);
 
     let mut frames = Vec::new();
@@ -2033,7 +2118,7 @@ async fn a_mid_run_model_switch_lands_at_receive_under_the_run() {
         .dynamic_tool(slow_tool())
         .create("C:/w")
         .expect("session");
-    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store));
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store), plain_data());
     let id = boot_id(&handle);
 
     // Provably mid-run (the slow tool is executing): the switch lands
@@ -2090,7 +2175,7 @@ async fn a_model_switch_survives_an_abort() {
         .dynamic_tool(slow_tool())
         .create("C:/w")
         .expect("session");
-    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store));
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store), plain_data());
     let id = boot_id(&handle);
 
     // Mid-run switch, then abort: the switch is a state write, not run
@@ -2144,7 +2229,7 @@ async fn rapid_model_switches_each_land_and_the_last_wins() {
         .into_builder(store.clone())
         .create("C:/w")
         .expect("session");
-    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store));
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store), plain_data());
     let id = boot_id(&handle);
 
     // Two switches back-to-back: both land (each command is its own
@@ -2200,7 +2285,7 @@ async fn a_model_switch_precedes_a_parked_checkout() {
         .dynamic_tool(slow_tool())
         .create("C:/w")
         .expect("session");
-    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store));
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store), plain_data());
     let id = boot_id(&handle);
 
     // Switch then checkout, both mid-run: the switch lands at receive
@@ -2223,7 +2308,7 @@ async fn a_model_switch_precedes_a_parked_checkout() {
             }
             _ => {}
         }
-        let done = matches!(frame.event, SessionEvent::ReplayDone);
+        let done = matches!(frame.event, SessionEvent::ReplayEnd);
         frames.push(frame);
         if done {
             break;
@@ -2262,7 +2347,7 @@ async fn checkout_discards_what_was_submitted_before_it_and_keeps_the_rest() {
         .into_builder(store.clone())
         .create("C:/w")
         .expect("session");
-    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store));
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store), plain_data());
     let id = boot_id(&handle);
 
     // One exchange to its terminal, so the worker is provably back in
@@ -2305,7 +2390,7 @@ async fn checkout_discards_what_was_submitted_before_it_and_keeps_the_rest() {
     let done_at = checked_at
         + frames[checked_at..]
             .iter()
-            .position(|frame| matches!(frame.event, SessionEvent::ReplayDone))
+            .position(|frame| matches!(frame.event, SessionEvent::ReplayEnd))
             .expect("the pass closes");
     let after_at = frames
         .iter()
@@ -2332,7 +2417,7 @@ async fn parked_checkouts_collapse_to_the_last_and_spaced_ones_execute() {
         .into_builder(store.clone())
         .create("C:/w")
         .expect("session");
-    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store));
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store), plain_data());
     let id = boot_id(&handle);
 
     let mut frames = Vec::new();
@@ -2349,7 +2434,7 @@ async fn parked_checkouts_collapse_to_the_last_and_spaced_ones_execute() {
     handle.checkout(&id, &first);
     handle.checkout(&id, &second);
     collect_until(&mut handle, &mut frames, |e| {
-        matches!(e, SessionEvent::ReplayDone)
+        matches!(e, SessionEvent::ReplayEnd)
     })
     .await;
     let checked: Vec<String> = frames
@@ -2373,12 +2458,12 @@ async fn parked_checkouts_collapse_to_the_last_and_spaced_ones_execute() {
     // announcement — idempotent, the rewind never moved it — sits
     // between checked_out and the bracket; the slice starts past the
     // opener so only pass events count).
-    let SessionEvent::ReplayStarted { total } = &frames[survivor_at + 2].event else {
+    let SessionEvent::ReplayBegin { total } = &frames[survivor_at + 2].event else {
         panic!("the register announcement, then the re-render pass opens");
     };
     let pass_len = frames[survivor_at + 3..]
         .iter()
-        .position(|frame| matches!(frame.event, SessionEvent::ReplayDone))
+        .position(|frame| matches!(frame.event, SessionEvent::ReplayEnd))
         .expect("the pass closes");
     assert_eq!(*total, pass_len as u64);
 
@@ -2387,7 +2472,7 @@ async fn parked_checkouts_collapse_to_the_last_and_spaced_ones_execute() {
     // applies only to what parks at the same instant.
     handle.checkout(&id, &first);
     collect_until(&mut handle, &mut frames, |e| {
-        matches!(e, SessionEvent::ReplayDone)
+        matches!(e, SessionEvent::ReplayEnd)
     })
     .await;
     let checked: Vec<String> = frames
@@ -2414,7 +2499,7 @@ async fn parked_checkouts_collapse_to_the_last_and_spaced_ones_execute() {
     // resident set. The branch switch.
     handle.checkout(&id, &second);
     collect_until(&mut handle, &mut frames, |e| {
-        matches!(e, SessionEvent::ReplayDone)
+        matches!(e, SessionEvent::ReplayEnd)
     })
     .await;
     let checked: Vec<String> = frames
@@ -2448,7 +2533,7 @@ async fn a_checkout_parked_at_the_close_executes_before_wind_down() {
         .into_builder(store.clone())
         .create("C:/w")
         .expect("session");
-    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store));
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store), plain_data());
     let id = boot_id(&handle);
 
     let mut frames = Vec::new();
@@ -2491,7 +2576,7 @@ async fn an_unknown_entry_checkout_is_an_error_and_a_no_op() {
         .into_builder(store.clone())
         .create("C:/w")
         .expect("session");
-    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store));
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store), plain_data());
     let id = boot_id(&handle);
 
     let mut frames = Vec::new();
@@ -2535,7 +2620,7 @@ async fn an_unknown_checkout_during_a_run_errors_immediately() {
         .dynamic_tool(slow_tool())
         .create("C:/w")
         .expect("session");
-    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store));
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store), plain_data());
     let id = boot_id(&handle);
 
     // Verification is loop-independent: routed while the slow tool is
@@ -2591,7 +2676,7 @@ async fn an_abort_discards_a_pending_checkout() {
         .dynamic_tool(slow_tool())
         .create("C:/w")
         .expect("session");
-    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store));
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store), plain_data());
     let id = boot_id(&handle);
 
     // Checkout first, abort right behind it — drop-all-pending-intent:
@@ -2635,7 +2720,7 @@ async fn an_abort_discards_a_pending_checkout() {
     assert!(
         !frames
             .iter()
-            .any(|frame| matches!(frame.event, SessionEvent::ReplayStarted { .. })),
+            .any(|frame| matches!(frame.event, SessionEvent::ReplayBegin { .. })),
         "no pass followed — nothing rewound"
     );
     assert_eq!(chain_users(&handle, &store), vec!["go"]);
@@ -2649,7 +2734,7 @@ async fn a_pass_answers_ahead_of_a_queued_message_at_the_beat() {
         .into_builder(store.clone())
         .create("C:/w")
         .expect("session");
-    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store));
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store), plain_data());
     let id = boot_id(&handle);
 
     // One exchange to its terminal, so the worker is back in its wait;
@@ -2663,18 +2748,18 @@ async fn a_pass_answers_ahead_of_a_queued_message_at_the_beat() {
     handle.message(&id, "next");
     handle.replay(&id);
     collect_until(&mut handle, &mut frames, |e| {
-        matches!(e, SessionEvent::ReplayDone)
+        matches!(e, SessionEvent::ReplayEnd)
     })
     .await;
     frames.extend(drain(&mut handle).await);
 
     let pass_at = frames
         .iter()
-        .position(|frame| matches!(frame.event, SessionEvent::ReplayStarted { .. }))
+        .position(|frame| matches!(frame.event, SessionEvent::ReplayBegin { .. }))
         .expect("the pass");
     let done_at = frames
         .iter()
-        .rposition(|frame| matches!(frame.event, SessionEvent::ReplayDone))
+        .rposition(|frame| matches!(frame.event, SessionEvent::ReplayEnd))
         .expect("the pass closes");
     let next_at = frames
         .iter()
@@ -2703,7 +2788,7 @@ async fn an_id_announced_mid_run_is_validatable_the_moment_it_is_knowable() {
         .dynamic_tool(slow_tool())
         .create("C:/w")
         .expect("session");
-    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store));
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store), plain_data());
     let id = boot_id(&handle);
 
     // Publication precedes announcement: the steer's user_message id
@@ -2734,7 +2819,7 @@ async fn an_id_announced_mid_run_is_validatable_the_moment_it_is_knowable() {
             SessionEvent::CheckedOut { .. } => saw_checked_out = true,
             _ => {}
         }
-        let done = matches!(frame.event, SessionEvent::ReplayDone);
+        let done = matches!(frame.event, SessionEvent::ReplayEnd);
         frames.push(frame);
         if saw_checked_out && done {
             break;
@@ -2765,7 +2850,7 @@ async fn a_checkout_targeting_a_queued_steer_misses_and_is_a_no_op() {
         .dynamic_tool(slow_tool())
         .create("C:/w")
         .expect("session");
-    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store));
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store), plain_data());
     let id = boot_id(&handle);
 
     // A queued steer is announced (message_queued, born-early id) but
@@ -2841,7 +2926,7 @@ async fn a_continue_starts_a_run_over_the_existing_conversation() {
         .into_builder(store.clone())
         .create("C:/w")
         .expect("session");
-    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store));
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store), plain_data());
     let id = boot_id(&handle);
 
     handle.message(&id, "go");
@@ -2884,7 +2969,7 @@ async fn a_continue_on_an_empty_conversation_is_a_noop() {
         .into_builder(store.clone())
         .create("C:/w")
         .expect("session");
-    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store));
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store), plain_data());
     let id = boot_id(&handle);
 
     handle.continue_run(&id);
@@ -2917,7 +3002,7 @@ async fn a_replay_parked_at_close_is_served_before_wind_down() {
         .into_builder(store.clone())
         .create("C:/w")
         .expect("session");
-    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store));
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store), plain_data());
     let id = boot_id(&handle);
 
     handle.message(&id, "go");
@@ -2932,12 +3017,12 @@ async fn a_replay_parked_at_close_is_served_before_wind_down() {
     let rest = drain(&mut handle).await;
     assert!(
         rest.iter()
-            .any(|frame| matches!(frame.event, SessionEvent::ReplayStarted { .. })),
+            .any(|frame| matches!(frame.event, SessionEvent::ReplayBegin { .. })),
         "the parked replay was served ahead of the wind-down"
     );
     assert!(
         rest.iter()
-            .any(|frame| matches!(frame.event, SessionEvent::ReplayDone)),
+            .any(|frame| matches!(frame.event, SessionEvent::ReplayEnd)),
         "and completed before the stream ended"
     );
     std::fs::remove_dir_all(store.dir()).ok();
@@ -2951,7 +3036,7 @@ async fn abort_then_checkout_composes_at_the_pause_point() {
         .dynamic_tool(slow_tool())
         .create("C:/w")
         .expect("session");
-    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store));
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store), plain_data());
     let id = boot_id(&handle);
 
     // The composition a frontend sends when it wants stop-then-rewind:
@@ -2974,7 +3059,7 @@ async fn abort_then_checkout_composes_at_the_pause_point() {
             }
             _ => {}
         }
-        let done = matches!(frame.event, SessionEvent::ReplayDone);
+        let done = matches!(frame.event, SessionEvent::ReplayEnd);
         frames.push(frame);
         if done
             && frames
@@ -3021,7 +3106,7 @@ async fn a_blocked_store_blocks_starts_and_recovers() {
         .into_builder(store.clone())
         .create("C:/w")
         .expect("session (the file is deferred)");
-    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&base));
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&base), plain_data());
     let id = boot_id(&handle);
 
     // The free turn: the fresh session's probe skips under the gate,
@@ -3138,9 +3223,9 @@ id = "m"
 
 /// A scripted turn whose request the wall rejects — the typed overflow
 /// error carrying the numbers that teach the window.
-fn overflow_turn(maximum: u64) -> Vec<rig_agent::test_utils::MockStreamEvent> {
-    vec![rig_agent::test_utils::MockStreamEvent::Error(
-        rig_agent::test_utils::MockError::http(
+fn overflow_turn(maximum: u64) -> Vec<tabit_engine::test_utils::MockStreamEvent> {
+    vec![tabit_engine::test_utils::MockStreamEvent::Error(
+        tabit_engine::test_utils::MockError::http(
             400,
             format!(
                 "prompt is too long: {} tokens > {maximum} tokens maximum",
@@ -3173,7 +3258,7 @@ async fn the_idle_door_compacts_after_a_large_run_and_the_file_holds_the_entry()
     .create("C:/w")
     .expect("session");
     let path = session.path().expect("file-backed").to_path_buf();
-    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store));
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store), plain_data());
     let id = boot_id(&handle);
     handle.message(&id, "go");
     tokio::time::sleep(Duration::from_millis(200)).await;
@@ -3259,10 +3344,10 @@ async fn the_idle_door_compacts_after_a_large_run_and_the_file_holds_the_entry()
     .messages();
     assert!(matches!(
         messages.first(),
-        Some(rig_agent::completion::Message::User { content })
+        Some(tabit_engine::completion::Message::User { content })
             if matches!(
                 content.first(),
-                rig_core::message::UserContent::Text(text)
+                tabit_providers::message::UserContent::Text(text)
                     if text.text.contains("summarized work")
             )
     ));
@@ -3288,7 +3373,7 @@ async fn the_compact_command_forces_the_box_on_an_idle_session() {
     )
     .create("C:/w")
     .expect("session");
-    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store));
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store), plain_data());
     let id = boot_id(&handle);
     handle.message(&id, "go");
     tokio::time::sleep(Duration::from_millis(200)).await;
@@ -3348,7 +3433,7 @@ async fn an_overflow_failure_is_intercepted_compacted_and_the_run_retried() {
     .create("C:/w")
     .expect("session");
     let path = session.path().expect("file-backed").to_path_buf();
-    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store));
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store), plain_data());
     let id = boot_id(&handle);
     handle.message(&id, "go");
     tokio::time::sleep(Duration::from_millis(200)).await;
@@ -3410,10 +3495,10 @@ async fn an_overflow_failure_is_intercepted_compacted_and_the_run_retried() {
     .messages();
     assert!(matches!(
         messages.first(),
-        Some(rig_agent::completion::Message::User { content })
+        Some(tabit_engine::completion::Message::User { content })
             if matches!(
                 content.first(),
-                rig_core::message::UserContent::Text(text)
+                tabit_providers::message::UserContent::Text(text)
                     if text.text.contains("summarized work")
             )
     ));
@@ -3435,7 +3520,7 @@ async fn an_unrepairable_overflow_leaves_the_failure_standing() {
         )
         .create("C:/w")
         .expect("session");
-    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store));
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store), plain_data());
     let id = boot_id(&handle);
     handle.message(&id, "go");
     let frames = drain(&mut handle).await;
@@ -3452,4 +3537,458 @@ async fn an_unrepairable_overflow_leaves_the_failure_standing() {
         "nothing to compact — no bracket"
     );
     std::fs::remove_dir_all(store.dir()).ok();
+}
+
+/// The frontend stream's structure-first law: the stream is live
+/// from the mount (any frame any layer emits after it crosses —
+/// nothing is dropped for arriving "too early"), and ordering is
+/// arrival order — there is no "next frame after the ack" contract
+/// (the withdrawn guarantee); a chatty participant's frame simply
+/// lands where it happened.
+#[tokio::test]
+async fn the_stream_is_live_from_the_mount_in_arrival_order() {
+    let store = temp_store("endpoint-structure-first");
+    let session = Factory::new(vec![text_turn("never")])
+        .into_builder(store.clone())
+        .create("C:/w")
+        .expect("session");
+    let wiring = plain_wiring(&store);
+    let node = wiring.node.clone();
+
+    // A lane speaks after the mount but before the host exists —
+    // the co-frontend shape (peers may speak from their handshake
+    // onward): the frame crosses, and it lands where it happened.
+    let lane = crate::Channel::local("early-ext", |_| {}, |_| {});
+    let frontend = crate::mount_frontend(&node);
+    node.emit(
+        &lane,
+        crate::EventFrame {
+            stream: None,
+            origin: None,
+            ttl: None,
+            event: crate::SessionEvent::error_session("the early extension speaks".to_string()),
+        },
+    );
+
+    let mut handle =
+        SessionHost::spawn_with_frontend(session, Vec::new(), wiring, plain_data(), frontend);
+    let frames = drain(&mut handle).await;
+    let tags: Vec<&str> = frames.iter().map(|f| f.event.tag()).collect();
+    assert_eq!(
+        tags,
+        vec!["error", "session_opened", "sessions_available"],
+        "live from the mount, in arrival order — no buffer, no drop"
+    );
+    std::fs::remove_dir_all(store.dir()).ok();
+}
+
+/// The prepared-supervisor law (owner ruling 2026-09): any node may
+/// send anything a frontend can from its handshake onward — a
+/// co-frontend's `new_session` arriving while the boot's data is
+/// still gathering parks (the builders ARE that data), and serves in
+/// arrival order behind the boot's announcements.
+#[tokio::test]
+async fn an_early_new_session_parks_until_the_boot_attaches() {
+    let store = temp_store("endpoint-early-new-session");
+    let session = Factory::new(vec![text_turn("never")])
+        .into_builder(store.clone())
+        .create("C:/w")
+        .expect("session");
+    let wiring = plain_wiring(&store);
+    let node = wiring.node.clone();
+
+    // The structure mounts; the chatty participant speaks through an
+    // extension-shaped lane BEFORE the boot session or the builders
+    // exist — exactly the window a co-frontend's post-ack
+    // new_session lands in.
+    let structure = SessionHost::mount(wiring, crate::mount_frontend(&node));
+    let lane = crate::Channel::local("co-frontend", |_| {}, |_| {});
+    node.intake(
+        &lane,
+        tabit_wire::node::Inbound::Command(SessionCommand::NewSession),
+    );
+
+    // The boot's data arrives (a builder that CAN build), the boot
+    // attaches — and the parked command serves behind the
+    // announcements.
+    let create_store = store.clone();
+    let data = SessionHostData {
+        create: std::sync::Arc::new(move || {
+            Factory::new(vec![text_turn("new answer")])
+                .into_builder(create_store.clone())
+                .create("C:/w")
+                .map(|session| (session, Vec::new()))
+                .map_err(|error| error.to_string())
+        }),
+        ..plain_data()
+    };
+    let mut handle = structure.attach(session, Vec::new(), data);
+    let boot = boot_id(&handle);
+    let frames = drain(&mut handle).await;
+    let opened: Vec<String> = frames
+        .iter()
+        .filter_map(|frame| match &frame.event {
+            SessionEvent::SessionOpened { id, .. } => Some(id.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        opened.len(),
+        2,
+        "the boot's announcement and the parked session's: {opened:?}"
+    );
+    assert_eq!(opened[0], boot, "the boot's announcement leads");
+    assert_ne!(opened[1], boot, "the parked session follows behind it");
+    std::fs::remove_dir_all(store.dir()).ok();
+}
+
+#[tokio::test]
+async fn an_opened_session_announces_its_own_skills() {
+    // The session-level catalog ruling's open arm: a resumed-via-
+    // command session with a mounted catalog announces
+    // SkillsAvailable stamped with ITS stream — the third door the
+    // new-session twin pins, exercised here through `open_session`.
+    let store = temp_store("endpoint-skills-open");
+    let session = Factory::new(vec![text_turn("boot")])
+        .into_builder(store.clone())
+        .create("C:/w")
+        .expect("session");
+    let mut catalog = crate::skills::Skills::default();
+    assert!(catalog.register(crate::skills::SkillEntry {
+        name: "resumed-lint".to_string(),
+        description: "Resumed lint".to_string(),
+        base_dir: "C:/resumed/.tabit/skills/resumed-lint".into(),
+        skill_file: "C:/resumed/.tabit/skills/resumed-lint/SKILL.md".into(),
+        level: crate::skills::SkillLevel::Workspace,
+    }));
+    let resumed = std::sync::Arc::new(catalog);
+    let open_store = store.clone();
+    let data = SessionHostData {
+        create: std::sync::Arc::new(|| Err("not driven".to_string())),
+        open: std::sync::Arc::new(move |_id| {
+            Factory::new(vec![text_turn("re")])
+                .into_builder(open_store.clone())
+                .skills(resumed.clone())
+                .create("C:/resumed")
+                .map(|session| (session, Vec::new()))
+                .map_err(|error| error.to_string())
+        }),
+        extensions: Default::default(),
+    };
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store), data);
+    let boot = boot_id(&handle);
+    handle.command_link().send(SessionCommand::OpenSession {
+        id: "any-stored-id".to_string(),
+    });
+    let frame = until_event(&mut handle, |event| {
+        matches!(event, SessionEvent::SkillsAvailable { .. })
+    })
+    .await;
+    let (stream, skills) = match frame {
+        tabit_protocol::EventFrame {
+            stream,
+            event: SessionEvent::SkillsAvailable { skills, .. },
+            ..
+        } => (stream, skills),
+        _ => unreachable!("until_event pinned the kind"),
+    };
+    assert_ne!(
+        stream.as_ref().map(|id| id.as_str()),
+        Some(boot.as_str()),
+        "the announcement is the opened session's own stream"
+    );
+    assert!(
+        stream.is_some(),
+        "the announcement is stamped, never backend-level"
+    );
+    assert_eq!(skills.len(), 1);
+    assert_eq!(skills[0].name, "resumed-lint");
+    std::fs::remove_dir_all(store.dir()).ok();
+}
+
+#[tokio::test]
+async fn parked_compacts_collapse_to_one_invocation() {
+    // The compact slot is a slot, not a queue: two commands parked
+    // while the beat is provably busy (the second run's blocking
+    // tool) are one intent — one invocation, one bracket pair (the
+    // checkout twin's law, at the compact door). The history mirrors
+    // the manual-door test's (two 20k/50k turns) so the box has a
+    // feasible cut.
+    let store = temp_store("endpoint-compact-collapse");
+    let big = "x".repeat(80_000);
+    let session = Factory::new(vec![
+        tool_turn("t1", "blocking"),
+        text_turn_reported(&big, 20_000, 10_000),
+        tool_turn("t1", "blocking"),
+        text_turn_reported(&big, 50_000, 10_000),
+        text_turn_reported(
+            "## Goal
+- the collapsed summary",
+            100,
+            20,
+        ),
+    ])
+    .into_builder_with_config(
+        store.clone(),
+        windowed_config(100_000_000),
+        ModelSelection::new("p", "m"),
+    )
+    .dynamic_tool(blocking_tool())
+    .create("C:/w")
+    .expect("session");
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store), plain_data());
+    let id = boot_id(&handle);
+    handle.message(&id, "go");
+    let mut frames = Vec::new();
+    collect_until(&mut handle, &mut frames, terminal).await;
+    handle.message(&id, "more");
+    // Park both compacts while the SECOND run's body is mid-block —
+    // the beat cannot serve them until this run's terminal.
+    until_event(&mut handle, |event| {
+        matches!(event, SessionEvent::ToolCall { .. })
+    })
+    .await;
+    let link = handle.command_link();
+    link.send(SessionCommand::Compact {
+        session: id.clone(),
+        directives: None,
+    });
+    link.send(SessionCommand::Compact {
+        session: id.clone(),
+        directives: None,
+    });
+    collect_until(&mut handle, &mut frames, |event| {
+        matches!(event, SessionEvent::CompactionEnd { .. })
+    })
+    .await;
+    let begins = frames
+        .iter()
+        .filter(|frame| matches!(frame.event, SessionEvent::CompactionBegin))
+        .count();
+    assert_eq!(begins, 1, "two parked compacts are one invocation");
+    std::fs::remove_dir_all(store.dir()).ok();
+}
+
+#[tokio::test]
+async fn an_abort_drops_a_parked_compact() {
+    // Drop-all-pending-intent at the compact door: a parked compact
+    // cleared by an abort never runs — the beat would have served it
+    // ahead of any later batch, so a surviving slot would bracket
+    // before the next run's terminal.
+    let store = temp_store("endpoint-compact-abort");
+    let big = "x".repeat(80_000);
+    let session = Factory::new(vec![
+        text_turn_reported(&big, 20_000, 10_000),
+        text_turn_reported(&big, 50_000, 10_000),
+        text_turn_reported(
+            "## Goal
+- the dropped summary",
+            100,
+            20,
+        ),
+        text_turn("still runs"),
+    ])
+    .into_builder_with_config(
+        store.clone(),
+        windowed_config(100_000_000),
+        ModelSelection::new("p", "m"),
+    )
+    .create("C:/w")
+    .expect("session");
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store), plain_data());
+    let id = boot_id(&handle);
+    handle.message(&id, "go");
+    let mut frames = Vec::new();
+    collect_until(&mut handle, &mut frames, terminal).await;
+
+    let link = handle.command_link();
+    link.send(SessionCommand::Compact {
+        session: id.clone(),
+        directives: None,
+    });
+    link.send(SessionCommand::Abort {
+        session: id.clone(),
+    });
+    handle.message(&id, "after");
+    collect_until(&mut handle, &mut frames, terminal).await;
+    let begins = frames
+        .iter()
+        .filter(|frame| matches!(frame.event, SessionEvent::CompactionBegin))
+        .count();
+    assert_eq!(begins, 0, "the aborted compact never ran");
+    std::fs::remove_dir_all(store.dir()).ok();
+}
+
+#[tokio::test]
+async fn replay_requests_collapse_to_one_pass() {
+    // The replay flag is a flag, not a counter: two requests before
+    // the beat serve one pass (one bracket pair).
+    let store = temp_store("endpoint-replay-collapse");
+    let path = {
+        let mut session = Factory::new(vec![text_turn("first answer")])
+            .into_builder(store.clone())
+            .create("C:/w")
+            .expect("session");
+        session.prompt("hello").await;
+        session.path().expect("file-backed").to_path_buf()
+    };
+    let session = Factory::new(vec![text_turn("second answer")])
+        .into_builder(store.clone())
+        .resume(&path, "C:/w")
+        .expect("resume")
+        .0;
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store), plain_data());
+    let id = boot_id(&handle);
+    handle.replay(&id);
+    handle.replay(&id);
+    let mut frames = Vec::new();
+    collect_until(&mut handle, &mut frames, |event| {
+        matches!(event, SessionEvent::ReplayEnd)
+    })
+    .await;
+    let begins = frames
+        .iter()
+        .filter(|frame| matches!(frame.event, SessionEvent::ReplayBegin { .. }))
+        .count();
+    assert_eq!(begins, 1, "two replay requests are one pass");
+    std::fs::remove_dir_all(store.dir()).ok();
+}
+
+/// Receive-time skill invocation (FRONTEND.md's tag), through the real
+/// door: a message carrying `<skill name="..."/>` expands at submit —
+/// the queued user_message event carries the appended body, the tag
+/// stays as the anchor, and the model's request carries both. An
+/// unresolvable tag passes through untouched (the ruling: "write to
+/// /tmp" never becomes a fetch).
+#[tokio::test]
+async fn a_tagged_message_expands_at_the_door() {
+    let store = temp_store("endpoint-skill-tag");
+    let cwd = std::env::temp_dir().join(format!("tabit-skill-door-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&cwd);
+    std::fs::create_dir_all(cwd.join(".tabit/skills/commit")).expect("skill dir");
+    std::fs::write(
+        cwd.join(".tabit/skills/commit/SKILL.md"),
+        "---\nname: commit\ndescription: Make a commit.\n---\nCOMMIT-BODY-MARKER\n",
+    )
+    .expect("SKILL.md");
+
+    let skills = std::sync::Arc::new(crate::skills::discover_with_home(None, &cwd));
+    let factory = Factory::new(vec![text_turn("done")]);
+    let session = factory
+        .clone()
+        .into_builder(store.clone())
+        .skills(skills)
+        .create(&cwd.display().to_string())
+        .expect("session");
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store), plain_data());
+    let id = boot_id(&handle);
+
+    handle.message(
+        &id,
+        "run the checks <skill name=\"commit\"/> before pushing",
+    );
+    let frames = drain(&mut handle).await;
+    assert_eq!(
+        finished_outputs(&frames),
+        vec!["done".to_string()],
+        "the run completed"
+    );
+    let texts = user_texts(&frames);
+    assert_eq!(texts.len(), 1, "one user message");
+    assert!(
+        texts[0].starts_with("run the checks <skill name=\"commit\"/> before pushing"),
+        "the message is verbatim, the tag the anchor: {}",
+        texts[0]
+    );
+    assert!(
+        texts[0].contains("COMMIT-BODY-MARKER") && texts[0].ends_with("</skill>"),
+        "the skill body appended after the message: {}",
+        texts[0]
+    );
+    assert!(
+        !texts[0].contains("description: Make a commit"),
+        "frontmatter stripped"
+    );
+
+    // The model's request carried the expansion (the door, not the
+    // engine, did it — the request body is the folded conversation).
+    let requests = factory.requests();
+    let request = requests.last().expect("one model call");
+    let serialized = serde_json::to_string(&request.chat_history).expect("serialize");
+    assert!(
+        serialized.contains("COMMIT-BODY-MARKER"),
+        "the skill body rode the model's request"
+    );
+    let _ = std::fs::remove_dir_all(&cwd);
+}
+
+/// A mid-roundtrip checkout target resolves forward (the 2026-09-26
+/// ruling, replacing the old loud refusal): checking out to the tool
+/// turn's assistant entry — the announced turn id, mid-batch by
+/// construction — lands the head at the batch's last tool result, and
+/// `checked_out` reports the landing, not the ask.
+#[tokio::test]
+async fn a_midroundtrip_checkout_resolves_forward_to_the_batches_last_result() {
+    let store = temp_store("checkout-midroundtrip");
+    let session = Factory::new(vec![tool_turn("call-1", "echo"), text_turn("done")])
+        .into_builder(store.clone())
+        .dynamic_tool(echo_tool())
+        .create("C:/w")
+        .expect("session");
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store), plain_data());
+    let id = boot_id(&handle);
+
+    handle.message(&id, "go");
+    let mut frames = Vec::new();
+    collect_until(&mut handle, &mut frames, |event| {
+        matches!(event, SessionEvent::RunFinished { .. })
+    })
+    .await;
+
+    // The assistant-with-calls entry id is the announced turn id; the
+    // batch's last (only) result id rides the tool_result event.
+    let assistant_entry = frames
+        .iter()
+        .find_map(|frame| match &frame.event {
+            SessionEvent::TurnStarted { id, .. } => Some(id.clone()),
+            _ => None,
+        })
+        .expect("the tool turn announced");
+    let last_result = frames
+        .iter()
+        .find_map(|frame| match &frame.event {
+            SessionEvent::ToolResult { entry_id, .. } => Some(entry_id.clone()),
+            _ => None,
+        })
+        .expect("the batch's result announced");
+
+    handle.checkout(&id, &assistant_entry);
+    let mut checked = Vec::new();
+    collect_until(&mut handle, &mut checked, |event| {
+        matches!(event, SessionEvent::ReplayEnd)
+    })
+    .await;
+    let landed = checked
+        .iter()
+        .find_map(|frame| match &frame.event {
+            SessionEvent::CheckedOut { entry_id, .. } => Some(entry_id.clone()),
+            _ => None,
+        })
+        .expect("checked_out");
+    assert_eq!(
+        landed, last_result,
+        "the landing is the batch's last result, not the mid-batch ask"
+    );
+    // The pass re-rendered the NEW chain, which ends at the batch's
+    // result: the pass carries the tool result and no turn after it.
+    assert!(
+        checked.iter().any(|frame| matches!(&frame.event,
+            SessionEvent::ToolResult { entry_id, .. } if entry_id == &last_result)),
+        "the pass's chain ends with the batch's result"
+    );
+    let done_turns = checked
+        .iter()
+        .filter(|frame| matches!(&frame.event, SessionEvent::TurnCommitted { .. }))
+        .count();
+    assert_eq!(done_turns, 1, "only the tool turn precedes the landing");
 }

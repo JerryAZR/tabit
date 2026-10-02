@@ -10,9 +10,9 @@
 //! `aborted`, …) are session state, not context, and never fold.
 
 use crate::entry::{EntryKind, SessionEntry};
-use rig_core::OneOrMany;
-use rig_core::completion::Message;
-use rig_core::message::{ToolCall, UserContent};
+use tabit_providers::OneOrMany;
+use tabit_providers::completion::Message;
+use tabit_providers::message::{ToolCall, UserContent};
 
 /// How the summary enters the model-visible context: a user-role
 /// message wrapping the summary text (the references' pattern — codex's
@@ -85,7 +85,7 @@ pub fn calls_of(message: &Message) -> Vec<&ToolCall> {
     content
         .iter()
         .filter_map(|part| match part {
-            rig_core::message::AssistantContent::ToolCall(call) => Some(call),
+            tabit_providers::message::AssistantContent::ToolCall(call) => Some(call),
             _ => None,
         })
         .collect()
@@ -97,7 +97,8 @@ pub fn calls_of(message: &Message) -> Vec<&ToolCall> {
 /// one-commit-door invariant (a roundtrip enters the tree whole or not
 /// at all) everything further back is closed by construction, so the
 /// check is a bounded lookback, never a branch walk. The live checkout
-/// door (a mid-roundtrip target refuses) and the parser's torn-tail
+/// door (a mid-roundtrip target resolves forward to the first
+/// closed position) and the parser's torn-tail
 /// check both route through here.
 #[allow(clippy::panic_in_result_fn)] // the crash inside is sanctioned (AGENTS.md doctrine), annotated below
 pub fn tail_is_closed(path: &[SessionEntry]) -> Result<(), String> {

@@ -19,7 +19,7 @@ fn header() -> SessionHeader {
         minor: crate::entry::SESSION_FORMAT_MINOR,
         id: "sid".to_string(),
         created_at: "t".to_string(),
-        cwd: "C:/w".to_string(),
+        cwd: None,
         parent_session: None,
     }
 }
@@ -30,7 +30,7 @@ fn user_record(id: &str, parent: Option<&str>) -> FileRecord {
         parent.map(str::to_string),
         "t".to_string(),
         EntryKind::UserMessage {
-            message: rig_core::completion::Message::user("x"),
+            message: tabit_providers::completion::Message::user("x"),
         },
     ))
 }

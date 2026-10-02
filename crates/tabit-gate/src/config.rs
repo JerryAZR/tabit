@@ -162,6 +162,12 @@ pub struct ToolsConfig {
 /// The parsed gate configuration.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SanityConfig {
+    /// The world this table was expanded against — the one context
+    /// its patterns were preprocessed with (owner ruling 2026-09-27:
+    /// the world is a load-time fact; a check normalizes the runtime
+    /// path against THIS world and matches the already-expanded
+    /// patterns — nothing is derived at check time).
+    pub context: PathContext,
     pub permissions: PermissionsConfig,
     pub commands: CommandsConfig,
     pub tools: ToolsConfig,
@@ -193,6 +199,7 @@ impl Default for SanityConfig {
             tools: ToolsConfig {
                 rules: HashMap::new(),
             },
+            context: crate::path_permission::default_context(),
             ask_timeout: None,
         }
     }
@@ -202,21 +209,17 @@ impl Default for SanityConfig {
 // TOML → runtime config (config-loader.ts)
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Config-load context for pattern preprocessing (TS
-/// `createConfigContext`): patterns are preprocessed before any repo
-/// is known, so `{{REPO}}` falls back to cwd at load time.
+/// Config-load context for pattern preprocessing: patterns are
+/// preprocessed with no repo resolution, so `{{REPO}}` falls back to
+/// cwd at load time — the ruled shape (if the repo isn't known at
+/// expansion time, cwd it is; it is never probed). One constructor
+/// with [`crate::path_permission::default_context`] — TS carried two
+/// near-twins (`createConfigContext` and the check-time
+/// `getDefaultContext` with its git probe); the world being a
+/// load-time fact collapses them. The built context is KEPT — it
+/// travels with the table as [`SanityConfig::context`].
 fn create_config_context() -> PathContext {
-    PathContext {
-        cwd: std::env::current_dir()
-            .map(|p| p.to_string_lossy().into_owned())
-            .unwrap_or_else(|_| ".".to_string()),
-        home: home::home_dir()
-            .map(|p| p.to_string_lossy().into_owned())
-            .unwrap_or_else(|| ".".to_string()),
-        tmpdir: std::env::temp_dir().to_string_lossy().into_owned(),
-        repo: None,
-        platform: crate::path_utils::Platform::native(),
-    }
+    crate::path_permission::default_context()
 }
 
 fn value_str<'a>(value: &'a toml::Value, key: &str) -> Option<&'a str> {
@@ -680,8 +683,8 @@ fn build_sanity_config(
         read: build_permission_section(read, "read", &ctx, &mut sink),
         write: build_permission_section(write, "write", &ctx, &mut sink),
     };
-
     SanityConfig {
+        context: ctx,
         permissions,
         commands: CommandsConfig {
             default_action,

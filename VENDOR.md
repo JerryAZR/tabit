@@ -1,5 +1,13 @@
 # VENDOR.md
 
+> **Rename addendum (2026-09):** the four vendored crates no longer carry
+> upstream's names. `rig-core` → `crates/tabit-providers`, `rig-agent` →
+> `crates/tabit-engine`, `rig-derive` → `crates/tabit-derive`, `rig` →
+> `crates/tabit-rig`; every path and crate name below refers to the
+> pre-rename tree. The `#[rig_tool]` macro name is unchanged. Upstream's
+> MIT copyright notice is preserved in each renamed crate's LICENSE
+> alongside tabit's.
+
 Historical record of how this workspace was seeded from the [rig](https://github.com/0xPlaygrounds/rig)
 Rust AI framework. The rig source was vendored as a starting point for **tabit**
 — borrowed as source rather than an external crate so it can be modified
@@ -326,7 +334,8 @@ Reviewer-round item "vendored-mass policy", resolved in three rulings:
   trait zoo.
 - **Kept — model listing** (`model/listing.rs`, `client/model_listing.rs`,
   both provider listers, cassette-covered). Planned consumer: dynamic
-  listing merged with local config in the registry (ROADMAP). The call is
+  listing merged with local config in the registry (ROADMAP's config
+  follow-ups). The call is
   backend-only by construction (credentials + the front/back split).
 - **Telemetry — trimmed to bare spans** (ruled 2026-08, same round).
   Deleted: the 2k-line GenAI semantic-conventions module
@@ -409,6 +418,7 @@ access, response identity, error request-ids — no product pull),
 and the consolidation/erasure/audit sweeps wholesale.
 
 **Deferred with a home**: `4be867de` (per-breakpoint cache TTL) and
-`46c436b6` (anthropic strict tools) → ROADMAP item 10 / config knobs.
+`46c436b6` (anthropic strict tools) → config knobs (prompt caching
+shipped 2026-08).
 The embeddings ndims-style deferral is moot — the embeddings module is
 deleted (RAG mass removal below).

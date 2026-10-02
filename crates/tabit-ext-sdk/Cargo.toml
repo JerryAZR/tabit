@@ -2,7 +2,9 @@
 name = "tabit-ext-sdk"
 version.workspace = true
 edition.workspace = true
-license = "MIT"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
 description = "The tabit extension SDK: own the pipe loop so authors write tool bodies and hooks."
 
 [lints]
@@ -14,9 +16,7 @@ path = "src/lib.rs"
 doctest = true
 
 # Example extensions (ROADMAP item 9's roster): the task-2 demos and
-# the developer path's reference consumers. Hand-rolled frames below
-# live here on purpose — the SDK shares no code with the host, so the
-# protocol doc stays the whole contract.
+# the developer path's first consumers.
 [[bin]]
 name = "echo-ext"
 path = "src/bin/echo.rs"
@@ -38,11 +38,30 @@ path = "src/bin/clash_b.rs"
 name = "autotitle-ext"
 path = "src/bin/autotitle.rs"
 
+# The owned-children demo (the SDK round's C3 example).
+[[bin]]
+name = "child-ext"
+path = "src/bin/child_ext.rs"
+
 [[bin]]
 name = "lmstudio-ext"
 path = "src/bin/lmstudio.rs"
 
 [dependencies]
+serde = { workspace = true }
+# The SDK is async (owner ruling 2026-09): bodies are futures, asks
+# await their promises natively, and the shared client's settle folds
+# ride the same runtime.
+tabit-wire = { path = "../tabit-wire", version = "0.1.0" }
+tabit-log = { path = "../tabit-log", version = "0.1.0" }
+uuid = { workspace = true, features = ["v7"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "io-util", "io-std", "sync", "time"] }
+tokio-util = { version = "0.7", default-features = false }
+# The wire types, shared with the host (the 2026-09 sharing ruling:
+# one wire, one set of shapes — the docs stay the contract for other
+# languages, the conformance tests keep crate and docs honest).
+tabit-ext = { path = "../tabit-ext", version = "0.1.0" }
+tabit-protocol = { path = "../tabit-protocol", version = "0.1.0" }
 # The relay example's HTTP halves: tiny_http serves the local
 # openai-completions wire (the small, battle-tested, sync server) and
 # reqwest's blocking client speaks LM Studio's native REST API
@@ -55,6 +74,6 @@ tiny_http = { workspace = true }
 [dev-dependencies]
 futures = { workspace = true }
 tokio-util = { version = "0.7", default-features = false }
-rig-agent = { path = "../rig-agent", version = "0.41.0", default-features = false }
-tabit-ext = { path = "../tabit-ext", version = "0.41.0" }
+tabit-engine = { path = "../tabit-engine", version = "0.1.0", default-features = false }
+tabit-ext = { path = "../tabit-ext", version = "0.1.0" }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }

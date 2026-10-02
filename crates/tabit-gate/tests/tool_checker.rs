@@ -169,7 +169,7 @@ fn aggregates_reasons_from_multiple_checks() {
         "write",
         &["{{HOME}}/**"],
         Action::Ask,
-        "Writing to home directory requires confirmation",
+        "Writing outside working directory requires confirmation",
     ));
     let result = check_tool_call(
         "copy",
@@ -184,7 +184,7 @@ fn aggregates_reasons_from_multiple_checks() {
         "the read reason must appear: {reason:?}"
     );
     assert!(
-        reason.contains("home directory"),
+        reason.contains("working directory"),
         "the write reason must appear: {reason:?}"
     );
 }

@@ -1,0 +1,813 @@
+//! The frontend-role client: spawn a tabit-core process in `--json`
+//! child role and speak the frozen wire to it. This is the runtime
+//! every child-driver shares — the subagent bridge (tabit-session)
+//! and the extension SDK's owned-session wrapper (the sharing ruling
+//! 2026-09; before this, the bridge hand-rolled its own). A future
+//! frontend that runs no tokio extracts a sync core here rather than
+//! growing a twin — the egui GUI's twin was deleted with it (2026-09)
+//! precisely because an off-base copy keeps drifting.
+//!
+//! **One mechanism, policies above it.** A node's child frames fan
+//! to local consumers and upstream relay through the shared
+//! Router's subscriptions, with the settle fold watching the same
+//! stream — the child-management pattern every driver shares. The
+//! drivers differ only in the policy they register: core's bridge
+//! (learn + relay always on, the fold takes the terminal) and the
+//! SDK's wrapper (registered handlers, relay opt-in).
+//!
+//! What lives here, precisely:
+//!
+//! - **The child-role knobs** ([`ChildSpec`]): the CLI flags that
+//!   shape a child (parent identity, model, tool allow/deny lists,
+//!   budget, preamble, extension root, ephemeral-vs-resume). The
+//!   flags are the wire-level contract of tabit-core's child role —
+//!   one builder so no driver drifts from the CLI it drives.
+//! - **The runtime** ([`ChildSpec::spawn`]): wrap-and-spawn with the
+//!   process cwd (the OS enforces the scope), the command writer
+//!   whose close is the stdin drop, the stderr ring, the bounded
+//!   boot (the child's report, then its first stamped announce),
+//!   and the frame pump — control frames resolve the boot and die
+//!   as diagnostics after it; stamped frames cross to the caller
+//!   **as-is** (forward, don't re-stamp).
+//! - **The handle** ([`ChildHandle`]): commands out, frames in, the
+//!   closing token, the exit machinery. The drive fold — mapping a
+//!   child's run to the driver's own terminal vocabulary — is the
+//!   consumer's policy and stays with it.
+//!
+//! Session machinery is deliberately absent: the lane mount
+//! ([`ChildSpec::on_node`]) is the one seam a driver hangs anything
+//! on — the bridge and the SDK's owned children both ride it alone.
+
+use std::collections::VecDeque;
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+
+use tabit_log::lock::lock;
+use tabit_protocol::{
+    EventFrame, ModelSelection, PROTOCOL_VERSION, ServerControlFrame, ServerFrame, SessionCommand,
+    SessionEvent, StreamId,
+};
+use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio_util::sync::CancellationToken;
+
+use crate::node::{Channel, Inbound, Node};
+use crate::process::{
+    BOOT_TIMEOUT, crash_tail, kill_now, reap_with_grace, spawn_line_writer, spawn_stderr_ring,
+    wrap_command,
+};
+
+/// Shape one subprocess child before the spawn: the child-role CLI
+/// knobs as builder methods. Everything omitted inherits the default
+/// (ephemeral, the given cwd).
+pub struct ChildSpec {
+    exe: PathBuf,
+    cwd: PathBuf,
+    parent: Option<String>,
+    parent_call: Option<String>,
+    model: Option<ModelSelection>,
+    tools: Option<Vec<String>>,
+    without: Option<Vec<String>>,
+    ephemeral: bool,
+    session: Option<PathBuf>,
+    extensions: Option<PathBuf>,
+    max_turns: Option<usize>,
+    /// The child's preamble — replaces the default base text while
+    /// the environment block, AGENTS.md files, and skills catalog
+    /// append as usual. The child's preamble belongs to its spawner.
+    preamble: Option<String>,
+    /// The node mount (see [`ChildSpec::on_node`]) — the lane, the
+    /// stamped-arrival intake, and the exit sweep, all owned by the
+    /// pump so no caller can race them.
+    node: Option<Arc<Node>>,
+}
+
+impl ChildSpec {
+    /// Begin a child of the given executable, running in `cwd` (the
+    /// process cwd — the OS enforces the scope every tool and path
+    /// inside resolves against).
+    pub fn new(exe: PathBuf, cwd: PathBuf) -> Self {
+        Self {
+            exe,
+            cwd,
+            parent: None,
+            parent_call: None,
+            model: None,
+            tools: None,
+            without: None,
+            ephemeral: true,
+            session: None,
+            extensions: None,
+            max_turns: None,
+            preamble: None,
+            node: None,
+        }
+    }
+
+    /// The child's working directory — the process cwd; every tool
+    /// and path inside resolves against it by OS fact.
+    pub fn cwd(mut self, cwd: PathBuf) -> Self {
+        self.cwd = cwd;
+        self
+    }
+
+    /// The child's parent session id — crosses as `--parent` so the
+    /// child announces its lineage at the source of truth. Absent for
+    /// spawners that are not sessions (an extension's owned child).
+    pub fn parent(mut self, id: String) -> Self {
+        self.parent = Some(id);
+        self
+    }
+
+    /// The spawning tool call's correlation id — crosses as
+    /// `--parent-call` so the child's `session_opened` announce pairs
+    /// with the `ToolCall` event the frontend already holds.
+    pub fn parent_call(mut self, id: String) -> Self {
+        self.parent_call = Some(id);
+        self
+    }
+
+    /// The child's model selection (`provider/model` crosses as the
+    /// `--model` ref; the thinking level is the child config's).
+    pub fn model(mut self, selection: ModelSelection) -> Self {
+        self.model = Some(selection);
+        self
+    }
+
+    /// Restrict the child's toolset to these names —
+    /// include-if-it-exists child-side: a name the child does not
+    /// offer simply matches nothing (forwarded lists legitimately
+    /// carry such names), and a list matching nothing is a tool-less
+    /// child, a legal shape.
+    pub fn tools(mut self, names: Vec<String>) -> Self {
+        self.tools = Some(names);
+        self
+    }
+
+    /// Tools the child must NOT run — the deny twin of
+    /// [`ChildSpec::tools`], crossing as `--without` and applied
+    /// child-side over the full toolset (core and extension proxies
+    /// alike).
+    pub fn without(mut self, names: Vec<String>) -> Self {
+        self.without = Some(names);
+        self
+    }
+
+    /// A persisted child: an ordinary session file under the child's
+    /// cwd, resumable through `--session` like any other. The default
+    /// (and this flag's opposite) is ephemeral.
+    pub fn ephemeral(mut self, ephemeral: bool) -> Self {
+        self.ephemeral = ephemeral;
+        self
+    }
+
+    /// Resume the stored session at `path` instead of starting fresh
+    /// (implies persisted; [`ChildSpec::ephemeral`] is ignored).
+    pub fn session(mut self, path: PathBuf) -> Self {
+        self.session = Some(path);
+        self
+    }
+
+    /// The child's extension root, crossing as `--extensions` — the
+    /// child boots its own host against it.
+    pub fn extensions(mut self, path: PathBuf) -> Self {
+        self.extensions = Some(path);
+        self
+    }
+
+    /// The per-child model-call budget.
+    pub fn max_turns(mut self, max_turns: usize) -> Self {
+        self.max_turns = Some(max_turns);
+        self
+    }
+
+    /// The child's preamble — crosses as `--preamble` and replaces
+    /// the default base (identity and standing body). The spawner
+    /// owns the child's voice; tabit still owns the truthful context.
+    pub fn preamble(mut self, text: String) -> Self {
+        self.preamble = Some(text);
+        self
+    }
+
+    /// Mount the child on a node — THE lane mount, one home for every
+    /// driver (the bridge, the SDK's owned children): the child's
+    /// lane (a channel over its own writer, owned by the handshake's
+    /// id) is constructed inside the frame pump at the handshake's
+    /// resolution — before any later frame can be read, so nothing
+    /// can beat it (the caller-assembled mount this replaces dropped
+    /// a child's first frames whenever they shared the pipe read with
+    /// the ack). Every stamped arrival intakes through the lane (the
+    /// fan, the learning table, the ask route home); the child's exit
+    /// retracts the lane (learned routes and transit asks sweep with
+    /// it, every stranded card settling announced).
+    pub fn on_node(mut self, node: Arc<Node>) -> Self {
+        self.node = Some(node);
+        self
+    }
+
+    /// The child-role command line this spec spawns: `--json` plus
+    /// every knob that is set (a `--session` suppresses the
+    /// `--ephemeral` default — a named file wins). Pure — the argv is
+    /// the child-role CLI contract, pinned by test.
+    fn command_line(&self) -> Vec<String> {
+        let mut args: Vec<String> = vec!["--json".to_string()];
+        if let Some(id) = &self.parent {
+            args.push("--parent".to_string());
+            args.push(id.clone());
+        }
+        if let Some(id) = &self.parent_call {
+            args.push("--parent-call".to_string());
+            args.push(id.clone());
+        }
+        if let Some(selection) = &self.model {
+            args.push("--model".to_string());
+            args.push(format!("{}/{}", selection.provider, selection.model));
+        }
+        if let Some(max_turns) = self.max_turns {
+            args.push("--max-turns".to_string());
+            args.push(max_turns.to_string());
+        }
+        if let Some(tools) = &self.tools {
+            args.push("--tools".to_string());
+            args.push(tools.join(","));
+        }
+        if let Some(without) = &self.without {
+            args.push("--without".to_string());
+            args.push(without.join(","));
+        }
+        if let Some(text) = &self.preamble {
+            args.push("--preamble".to_string());
+            args.push(text.clone());
+        }
+        if let Some(path) = &self.extensions {
+            args.push("--extensions".to_string());
+            args.push(path.display().to_string());
+        }
+        if let Some(path) = &self.session {
+            args.push("--session".to_string());
+            args.push(path.display().to_string());
+        } else if self.ephemeral {
+            args.push("--ephemeral".to_string());
+        }
+        args
+    }
+
+    /// Run the child: spawn, handshake, reaper. Errors are display
+    /// strings — the caller (a tool body, an SDK wrapper) turns them
+    /// into its failure report.
+    pub async fn spawn(self) -> Result<ChildHandle, String> {
+        let args = self.command_line();
+        let Self {
+            exe,
+            cwd,
+            node: mount,
+            ..
+        } = self;
+
+        let mut process = wrap_command(&exe, &args, &cwd)
+            .spawn()
+            .map_err(|error| format!("cannot spawn the child `{}`: {error}", exe.display()))?;
+        let stdin = process
+            .stdin()
+            .take()
+            .ok_or("the child process opened no stdin")?;
+        let stdout = process
+            .stdout()
+            .take()
+            .ok_or("the child process opened no stdout")?;
+        let stderr = process
+            .stderr()
+            .take()
+            .ok_or("the child process opened no stderr")?;
+
+        // The closing token: the child's shutdown signal, shared by the
+        // stdin writer (the pipe drop) and the reaper (the grace
+        // timer). Cancelling it IS the close.
+        let closing = CancellationToken::new();
+
+        // The command writer: lines in, stdin out — the shared pipe
+        // contract: the closing token IS the stdin close (the driver
+        // holds a sender clone, so dropping senders cannot be the
+        // mechanism); on close, everything already queued (the abort
+        // line crossed first) is written, then the pipe drops — EOF,
+        // the child's death contract.
+        let (command_tx, command_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        spawn_line_writer(stdin, command_rx, Some(closing.clone()));
+
+        // The stderr ring — the crash report's tail.
+        let ring = spawn_stderr_ring(stderr);
+
+        // The frame pump, a report-first machine (the report model:
+        // the child's first line IS its report). AWAITING-REPORT
+        // resolves on the report — mounting the lane in the pump's
+        // own order, before any event frame is read; REPORTED
+        // resolves the boot at the first stamped frame, whose stream
+        // names the boot session; STREAMING intakes every stamped
+        // arrival through the lane and mirrors everything to the
+        // drive fold's channel. One resolution, one consumer: the
+        // spawn's bounded wait.
+        let (frame_tx, frame_rx) = tokio::sync::mpsc::unbounded_channel::<EventFrame>();
+        let (boot_tx, boot_rx) = tokio::sync::oneshot::channel::<Result<String, String>>();
+        let lane_name = next_lane_name();
+        let lane_for_pump = lane_name.clone();
+        let lane_writer = command_tx.clone();
+        let pump_mount = mount.clone();
+        tokio::spawn(async move {
+            let mut lines = BufReader::new(stdout).lines();
+            let mut boot_tx = Some(boot_tx);
+            let mut reported: Option<u32> = None;
+            let mut lane: Option<Channel> = None;
+            while let Ok(Some(line)) = lines.next_line().await {
+                let Ok(frame) = serde_json::from_str::<ServerFrame>(&line) else {
+                    // The child's stdout is the protocol pipe; a
+                    // non-frame line is misbehavior, named — never
+                    // silently eaten. (Head only: the line may be
+                    // debug junk of any size.)
+                    let head: String = line.chars().take(200).collect();
+                    tracing::warn!(
+                        line = %head,
+                        "the child wrote a non-frame line to its stdout; dropped"
+                    );
+                    continue;
+                };
+                match frame {
+                    ServerFrame::Control(control) => {
+                        if reported.is_none() {
+                            match control {
+                                ServerControlFrame::Report { protocol_version } => {
+                                    // The spawner is the version
+                                    // check (owner ruling 2026-09-25)
+                                    // and the check fires the moment
+                                    // the fact exists — at the report,
+                                    // never held for the announce. A
+                                    // mismatched child's frames never
+                                    // cross the net: the lane arms
+                                    // only on a match, so the window
+                                    // between the Err and the kill
+                                    // drains instead of intakes.
+                                    if protocol_version == PROTOCOL_VERSION {
+                                        // The lane mount: armed here, in
+                                        // the pump's own order — at the
+                                        // report, before any event frame
+                                        // is read. The name is the
+                                        // spawner's mint (the child's
+                                        // session id is not learnable yet).
+                                        if pump_mount.is_some() {
+                                            let writer = lane_writer.clone();
+                                            lane = Some(Channel::line(
+                                                &lane_for_pump,
+                                                move |line: &str| {
+                                                    let _ = writer.send(line.to_string());
+                                                },
+                                            ));
+                                        }
+                                    } else if let Some(tx) = boot_tx.take() {
+                                        let _ = tx.send(Err(format!(
+                                            "the child process reported protocol version \
+                                             {protocol_version} — this build speaks \
+                                             {PROTOCOL_VERSION}"
+                                        )));
+                                    }
+                                    reported = Some(protocol_version);
+                                }
+                                other => {
+                                    if let Some(tx) = boot_tx.take() {
+                                        let _ = tx.send(Err(format!(
+                                            "the child's first control frame was `{other:?}` — \
+                                             expected its report"
+                                        )));
+                                    }
+                                }
+                            }
+                        } else {
+                            // Post-report control frames from a child (its
+                            // protocol errors) are its own diagnostics —
+                            // consumed here, never forwarded, but named.
+                            tracing::warn!(
+                                frame = ?control,
+                                "a post-report control frame from the child was consumed, \
+                                 not forwarded"
+                            );
+                        }
+                    }
+                    ServerFrame::Event(frame) => {
+                        // The boot resolves at the first stamped
+                        // frame: its stream names the boot session
+                        // (the boot's `session_opened`).
+                        if reported.is_some()
+                            && let Some(stream) = &frame.stream
+                            && let Some(tx) = boot_tx.take()
+                        {
+                            let _ = tx.send(Ok(stream.as_str().to_string()));
+                        }
+                        // Only stamped frames cross into the
+                        // node (owner ruling 2026-09-25): the
+                        // child's unstamped emissions — its
+                        // backend-level errors — reach the drive
+                        // fold's channel alone and stay out of the
+                        // net until a real need comes up.
+                        if let (Some(node), Some(lane)) = (&pump_mount, &lane)
+                            && frame.stream.is_some()
+                        {
+                            node.intake(lane, Inbound::Event(frame.clone()));
+                        }
+                        let _ = frame_tx.send(frame);
+                    }
+                }
+            }
+            // The pipe's end sweeps the mounted lane: learned routes
+            // and transit asks go, every stranded card settling
+            // announced. (The reaper's exit path sweeps too — this is
+            // the stdout-closed shape, that one the process shape;
+            // the sweep is idempotent.)
+            if let Some(node) = &pump_mount {
+                node.retract(&lane_for_pump, "the child pipe closed");
+            }
+        });
+
+        // The boot (owner ruling 2026-09-25, the report model): the
+        // child speaks first — its report, then its first stamped
+        // announce naming the boot session — under ONE bound. The
+        // version check fires at the report (the pump's own arm, the
+        // moment the fact exists); every session fact arrives by
+        // event (the boot's `session_opened` first).
+        let child_id = tokio::select! {
+            boot = boot_rx => match boot {
+                Ok(Ok(id)) => id,
+                Ok(Err(reason)) => {
+                    kill_now(&mut process, &closing).await;
+                    return Err(reason);
+                }
+                Err(_) => {
+                    kill_now(&mut process, &closing).await;
+                    return Err(
+                        "the child process closed before its boot".to_string()
+                    );
+                }
+            },
+            _ = tokio::time::sleep(BOOT_TIMEOUT) => {
+                kill_now(&mut process, &closing).await;
+                return Err(
+                    "the child process did not report and announce in time".to_string()
+                );
+            }
+        };
+
+        // The reaper that bounds the child's lifetime (Drop of the
+        // handle closes it): a natural exit reaps itself; the close
+        // path gets the grace-then-tree-kill.
+        let closing_for_reaper = closing.clone();
+        let exit = Arc::new(Mutex::new(None::<String>));
+        let exit_for_reaper = exit.clone();
+        let sweep_mount = mount.clone();
+        let sweep_lane = lane_name;
+        let join = tokio::spawn(async move {
+            let status = tokio::select! {
+                status = process.wait() => Some(status),
+                _ = closing_for_reaper.cancelled() => None,
+            };
+            let status: Option<std::process::ExitStatus> = match status {
+                Some(result) => result.ok(),
+                None => reap_with_grace(&mut process).await,
+            };
+            if let Some(status) = status {
+                *lock(&exit_for_reaper) =
+                    Some(format!("exit code {}", status.code().unwrap_or(-1)));
+            }
+            // The mounted lane sweeps with the process (the pump's
+            // own sweep covers the stdout-EOF shape; this one covers
+            // a grandchild holding the pipe open past the exit).
+            if let Some(node) = &sweep_mount {
+                node.retract(&sweep_lane, "the child exited");
+            }
+        });
+
+        Ok(ChildHandle {
+            id: child_id.clone(),
+            stream: StreamId::new(child_id),
+            commands: command_tx,
+            frames: frame_rx,
+            closing,
+            reaper: join,
+            exit,
+            stderr_ring: ring,
+        })
+    }
+}
+
+/// The lane's identity, minted by the spawner: the lane arms at the
+/// child's report (owner ruling 2026-09-25 — the report is the first
+/// line), which precedes the child's first stamped frame, so the
+/// child's session id is not yet learnable when the lane must exist.
+/// Learned routes and transit asks sweep by this owner at the exit.
+fn next_lane_name() -> String {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    format!("lane-{}-{n}", std::process::id())
+}
+
+/// One live subprocess child: the driver's surface. Commands go out
+/// as wire lines; stamped frames arrive on the channel; dropping the
+/// handle closes the child (stdin EOF, bounded by the reaper's tree
+/// kill). The drive fold is the driver's — this type carries the
+/// machinery, not the policy.
+pub struct ChildHandle {
+    id: String,
+    stream: StreamId,
+    commands: tokio::sync::mpsc::UnboundedSender<String>,
+    frames: tokio::sync::mpsc::UnboundedReceiver<EventFrame>,
+    closing: CancellationToken,
+    reaper: tokio::task::JoinHandle<()>,
+    exit: Arc<Mutex<Option<String>>>,
+    stderr_ring: Arc<Mutex<VecDeque<String>>>,
+}
+
+impl ChildHandle {
+    /// The child session's id — its stream stamp and (where a router
+    /// exists) its routing address.
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    /// The child's stream stamp (its session id).
+    pub fn stream(&self) -> &StreamId {
+        &self.stream
+    }
+
+    /// One wire line out (a serialized command).
+    fn send_line(&self, line: String) {
+        let _ = self.commands.send(line);
+    }
+
+    /// Begin the child's shutdown (idempotent): stdin closes, the
+    /// reaper's grace timer arms.
+    pub fn close(&self) {
+        self.closing.cancel();
+    }
+
+    /// The crash report: the exit status and the stderr tail.
+    pub fn crash_report(&self) -> String {
+        let exit = lock(&self.exit)
+            .clone()
+            .unwrap_or_else(|| "no exit recorded".to_string());
+        let tail = crash_tail(&self.stderr_ring);
+        if tail.is_empty() {
+            format!("the child process died unexpectedly ({exit})")
+        } else {
+            format!("the child process died unexpectedly ({exit}); stderr tail:\n{tail}")
+        }
+    }
+
+    /// Wait for the reaper to finish (tests and callers that want the
+    /// process fully reclaimed).
+    pub async fn wait_exit(&mut self) {
+        let _ = (&mut self.reaper).await;
+    }
+
+    /// Wait, bounded by [`crate::process::EXIT_GRACE`], for the
+    /// reaper to record the child's exit status — the crash
+    /// synthesis's beat, so the report carries the exit code instead
+    /// of "no exit recorded". Polls the shared exit cell rather than
+    /// the JoinHandle: the handle is single-shot, and [`Self::wait_exit`]
+    /// still owns it.
+    async fn await_exit_recorded(&self) {
+        let deadline = tokio::time::Instant::now() + crate::process::EXIT_GRACE;
+        while lock(&self.exit).is_none() && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    }
+
+    /// Run one task to the child's terminal — THE drive recipe every
+    /// driver shares (the session's subagent tool, the extension
+    /// SDK's owned children): the task crosses as the first message,
+    /// the shared settle fold drives to the terminal under the abort
+    /// leash, and the frames are already fanning on their own
+    /// stamps. Mapping the settlement to the driver's vocabulary is
+    /// the caller's policy.
+    pub async fn run(&mut self, task: String, token: Option<CancellationToken>) -> Settlement {
+        self.prompt(task);
+        self.settle(token).await
+    }
+
+    /// Submit the child's task (one user message) — the first half of
+    /// [`Self::settle`]'s recipe, split so a driver can steer between
+    /// them.
+    pub fn prompt(&self, task: String) {
+        self.send_line(tabit_protocol::to_wire_line(&SessionCommand::Message {
+            session: self.id.clone(),
+            text: task,
+        }));
+    }
+
+    /// Drive the child to its run terminal under the abort leash —
+    /// THE fold every driver shares (core's subagent tool and the
+    /// extension SDK's owned children alike; one implementation, the
+    /// Nth-fold law). The terminal scan over this child's stream
+    /// (grandchildren's frames skip — their owners forward them), the
+    /// crash synthesis, and the abort courtesy-with-deadline all live
+    /// here; mapping the settlement to the driver's own vocabulary is
+    /// the caller's policy. The completed terminal closes the child —
+    /// the one-shot disposition ([`Self::settle_open`] is the
+    /// keep-open one over the same fold).
+    pub async fn settle(&mut self, token: Option<CancellationToken>) -> Settlement {
+        self.settle_inner(token, false).await
+    }
+
+    /// The keep-open disposition of the same fold, for drivers whose
+    /// child outlives the task (the session's subagent pool): the
+    /// completed terminal returns WITHOUT closing stdin — the child
+    /// keeps serving, ready for the next prompt. Abort and failure
+    /// close as usual (a kept child dies by its owner — the pool's
+    /// collection or drop — never mid-task).
+    pub async fn settle_open(&mut self, token: Option<CancellationToken>) -> Settlement {
+        self.settle_inner(token, true).await
+    }
+
+    /// The fold both dispositions share; `keep_open` skips the close
+    /// on the completed terminal alone.
+    async fn settle_inner(
+        &mut self,
+        token: Option<CancellationToken>,
+        keep_open: bool,
+    ) -> Settlement {
+        let mut events: Vec<SessionEvent> = Vec::new();
+        let started_at_ms = unix_ms();
+        loop {
+            let cancelled = async {
+                match &token {
+                    Some(token) => token.cancelled().await,
+                    None => std::future::pending().await,
+                }
+            };
+            tokio::select! {
+                _ = cancelled => {
+                    // Abort is a courtesy with a deadline: forward the
+                    // abort, close stdin (the child aborts, flushes,
+                    // exits — or the reaper kills the tree at the
+                    // grace), and report Aborted now. The driver never
+                    // waits on the child's cooperation.
+                    self.send_line(tabit_protocol::to_wire_line(&SessionCommand::Abort {
+                        session: self.id.clone(),
+                    }));
+                    self.close();
+                    return Settlement::Aborted {
+                        output: String::new(),
+                        events,
+                    };
+                }
+                frame = self.frames.recv() => {
+                    let Some(frame) = frame else {
+                        // The stream ended without a terminal: the child
+                        // process died. Give the reaper a beat to record
+                        // the death — the report's exit status and stderr
+                        // tail land with it — then shape the crash report
+                        // as the run-failed event the drivers already
+                        // keep.
+                        self.await_exit_recorded().await;
+                        events.push(SessionEvent::RunFailed {
+                            message: self.crash_report(),
+                            kind: tabit_protocol::RunFailedKind::ENGINE.to_string(),
+                            started_at_ms,
+                            completed_at_ms: unix_ms(),
+                        });
+                        return Settlement::Crashed { events };
+                    };
+                    if frame.stream.as_ref() != Some(&self.stream) {
+                        continue; // A grandchild's frame — already forwarded.
+                    }
+                    let event = frame.event;
+                    let terminal = match &event {
+                        SessionEvent::RunFinished { output, .. } => {
+                            Some((Terminal::Completed, output.clone()))
+                        }
+                        SessionEvent::RunAborted { output, .. } => {
+                            Some((Terminal::Aborted, output.clone()))
+                        }
+                        SessionEvent::RunFailed { message, .. } => {
+                            Some((Terminal::Failed, message.clone()))
+                        }
+                        _ => None,
+                    };
+                    events.push(event);
+                    if let Some((terminal, text)) = terminal {
+                        if !(keep_open && matches!(terminal, Terminal::Completed)) {
+                            self.close();
+                        }
+                        return match terminal {
+                            Terminal::Completed => Settlement::Completed {
+                                output: text,
+                                events,
+                            },
+                            Terminal::Aborted => Settlement::Aborted {
+                                output: text,
+                                events,
+                            },
+                            Terminal::Failed => Settlement::FailedWith {
+                                message: text,
+                                events,
+                            },
+                        };
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Which terminal the driven child's run reached — the fold's
+/// private discriminator.
+enum Terminal {
+    Completed,
+    Aborted,
+    Failed,
+}
+
+/// How a driven child's run ended — the wire-level settlement the
+/// drivers map to their own vocabularies.
+#[derive(Debug, Clone)]
+pub enum Settlement {
+    /// The run finished; `output` is the final answer.
+    Completed {
+        output: String,
+        events: Vec<SessionEvent>,
+    },
+    /// The run aborted (the leash fired, or the child aborted
+    /// itself); `output` is whatever partial text it produced.
+    Aborted {
+        output: String,
+        events: Vec<SessionEvent>,
+    },
+    /// The run failed; `message` is the failure.
+    FailedWith {
+        message: String,
+        events: Vec<SessionEvent>,
+    },
+    /// The child process died without a terminal (a run-failed event
+    /// with the crash report heads `events`).
+    Crashed { events: Vec<SessionEvent> },
+}
+
+fn unix_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or_default()
+}
+
+impl Drop for ChildHandle {
+    fn drop(&mut self) {
+        // The commands sender drops with the struct; the closing token
+        // arms the reaper either way. Nothing async here — the reaper
+        // owns the wait.
+        self.close();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_command_line_is_the_child_role_cli() {
+        let base = ChildSpec::new(PathBuf::from("core.exe"), PathBuf::from("C:/w"));
+        // Ephemeral is the default: a bare child is unnamed.
+        assert_eq!(base.command_line(), vec!["--json", "--ephemeral"]);
+        assert_eq!(base.ephemeral(false).command_line(), vec!["--json"]);
+
+        let full = ChildSpec::new(PathBuf::from("core.exe"), PathBuf::from("C:/w"))
+            .parent("parent-id".to_string())
+            .parent_call("call-7".to_string())
+            .model(ModelSelection::new("p", "m"))
+            .max_turns(4)
+            .tools(vec!["read".to_string(), "bash".to_string()])
+            .without(vec!["edit".to_string()])
+            .preamble("be brief".to_string())
+            .extensions(PathBuf::from("C:/ext"))
+            // A named session suppresses the ephemeral flag even when
+            // it is left on.
+            .session(PathBuf::from("C:/s.jsonl"));
+        assert_eq!(
+            full.command_line(),
+            vec![
+                "--json",
+                "--parent",
+                "parent-id",
+                "--parent-call",
+                "call-7",
+                "--model",
+                "p/m",
+                "--max-turns",
+                "4",
+                "--tools",
+                "read,bash",
+                "--without",
+                "edit",
+                "--preamble",
+                "be brief",
+                "--extensions",
+                "C:/ext",
+                "--session",
+                "C:/s.jsonl",
+            ]
+        );
+    }
+}

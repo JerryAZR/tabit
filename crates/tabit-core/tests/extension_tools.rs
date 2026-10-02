@@ -26,8 +26,7 @@ use std::time::Duration;
 use httpmock::MockServer;
 use serde_json::json;
 use tabit_protocol::{
-    ClientFrame, PROTOCOL_VERSION, ServerControlFrame, ServerFrame, SessionCommand, SessionEvent,
-    to_wire_line,
+    EventFrame, ServerControlFrame, ServerFrame, SessionCommand, SessionEvent, to_wire_line,
 };
 
 /// The line-read bound: real processes, real pipes — generous for a
@@ -123,6 +122,9 @@ struct Backend {
     child: Child,
     stdin: std::process::ChildStdin,
     lines: Receiver<String>,
+    /// Every frame ever read, in order — a later scan (the grammar
+    /// e2e's `until`) can find a frame an earlier helper consumed.
+    seen: Vec<ServerFrame>,
 }
 
 fn spawn_backend(stage: &Stage, extra_env: &[(&str, String)]) -> Backend {
@@ -184,6 +186,7 @@ fn finish_spawn(mut command: Command) -> Backend {
         child,
         stdin,
         lines: rx,
+        seen: Vec::new(),
     }
 }
 
@@ -201,8 +204,10 @@ impl Backend {
             Err(RecvTimeoutError::Timeout) => panic!("no frame within the bound"),
             Err(RecvTimeoutError::Disconnected) => panic!("the backend closed its stdout"),
         };
-        serde_json::from_str(&line)
-            .unwrap_or_else(|error| panic!("unparseable frame {line}: {error}"))
+        let frame: ServerFrame = serde_json::from_str(&line)
+            .unwrap_or_else(|error| panic!("unparseable frame {line}: {error}"));
+        self.seen.push(frame.clone());
+        frame
     }
 }
 
@@ -313,16 +318,18 @@ fn handshake(
     tabit_protocol::ExtensionsCatalog,
     Option<Vec<tabit_protocol::AvailableSkill>>,
 ) {
-    backend.send(&to_wire_line(&ClientFrame::Initialize {
-        protocol_version: PROTOCOL_VERSION,
-        replay: false,
-    }));
     let mut session_id = None;
     let mut catalog = None;
     let mut skills = None;
     loop {
         match backend.next_frame() {
-            ServerFrame::Control(ServerControlFrame::InitializeAck { session_id: id, .. }) => {
+            ServerFrame::Control(ServerControlFrame::Report { .. }) => {}
+            ServerFrame::Event(EventFrame {
+                stream: _,
+                origin: _,
+                ttl: _,
+                event: SessionEvent::SessionOpened { id, .. },
+            }) => {
                 session_id = Some(id);
             }
             ServerFrame::Event(frame) => match frame.event {
@@ -420,6 +427,61 @@ fn a_core_name_conflict_is_reported_on_the_channel() {
     assert_eq!(conflict.tool, "read");
 }
 
+/// The manifest's `disables` list joins the deny list
+/// (`--without`'s storage): `disables: ["subagent"]` removes the
+/// built-in tool. The model-facing proof is behavioral — the
+/// completion-request mock only matches bodies NOT naming
+/// `subagent`, so a request still offering the tool would miss the
+/// mock and fail the run instead of finishing.
+#[test]
+fn a_manifest_disable_removes_the_core_tool_from_the_models_vocabulary() {
+    let stage = stage("disable", &[]);
+    let package = stage.extensions.join("roles");
+    std::fs::create_dir_all(&package).expect("package dir");
+    let manifest = json!({
+        "name": "roles",
+        "version": "0.1.0",
+        "entry": [workspace_bin("ext-double").display().to_string(), "tools-echo"],
+        "disables": ["subagent"],
+    });
+    std::fs::write(
+        package.join("tabit.json"),
+        serde_json::to_string(&manifest).expect("manifest"),
+    )
+    .expect("manifest");
+
+    let mut backend = spawn_backend(&stage, &[]);
+    let (session, _catalog, _skills) = handshake(&mut backend);
+
+    stage.server.mock(|when, then| {
+        when.method(httpmock::Method::POST)
+            .path("/v1/chat/completions")
+            .body_excludes("name\":\"subagent".to_string());
+        then.status(200)
+            .header("Content-Type", "text/event-stream")
+            .body(sse_text("vocabulary checked"));
+    });
+    backend.send(&to_wire_line(&SessionCommand::Message {
+        session,
+        text: "describe what you can do".to_string(),
+    }));
+    loop {
+        match backend.next_frame() {
+            ServerFrame::Event(frame) => match frame.event {
+                SessionEvent::RunFinished { output, .. } => {
+                    assert_eq!(output, "vocabulary checked");
+                    return;
+                }
+                SessionEvent::RunFailed { message, .. } => {
+                    panic!("the run failed (a request naming the disabled tool would): {message}")
+                }
+                _ => {}
+            },
+            ServerFrame::Control(control) => panic!("unexpected control frame: {control:?}"),
+        }
+    }
+}
+
 // ── task 4: enablement, skills mounts, providers fragments ─────────
 
 /// A disabled package is the user's setting, not a failure: it boots
@@ -435,14 +497,16 @@ fn a_package_on_the_disable_list_mounts_nowhere() {
     );
 
     let mut backend = spawn_backend(&stage, &[]);
-    backend.send(&to_wire_line(&ClientFrame::Initialize {
-        protocol_version: PROTOCOL_VERSION,
-        replay: false,
-    }));
     let mut session = None;
     loop {
         match backend.next_frame() {
-            ServerFrame::Control(ServerControlFrame::InitializeAck { session_id: id, .. }) => {
+            ServerFrame::Control(ServerControlFrame::Report { .. }) => {}
+            ServerFrame::Event(EventFrame {
+                stream: _,
+                origin: _,
+                ttl: _,
+                event: SessionEvent::SessionOpened { id, .. },
+            }) => {
                 session = Some(id);
             }
             ServerFrame::Event(frame) => match frame.event {
@@ -651,6 +715,7 @@ fn spawn_raw(work: &Path, extensions_root: &Path, config: &Path, home: &Path) ->
 /// into an empty user config (the fragment is the only provider), the
 /// model call rides the relay, and the relay translates to LM Studio's
 /// native REST API — four processes: backend, relay, native mock.
+
 #[test]
 fn a_providers_fragment_relays_a_model_call_over_the_native_api() {
     let stage = stage("relay", &[]);
@@ -747,7 +812,7 @@ fn a_providers_fragment_relays_a_model_call_over_the_native_api() {
                     }));
                 }
                 SessionEvent::RunFailed { message, .. } => {
-                    assert!(failure_beat_sent, "beat 1 must succeed first");
+                    assert!(failure_beat_sent, "beat 1 must succeed first: {message}");
                     assert!(message.contains("LM Studio answered"), "{message}");
                     return;
                 }
@@ -916,17 +981,17 @@ fn a_model_prompt_round_trips_through_the_session() {
 
 /// The empty-stage handshake: `extensions_available` never announces
 /// with nothing installed, so `handshake` would wait out its bound —
-/// the ack alone carries the boot session id.
+/// the boot's `session_opened` alone carries the session id.
 fn handshake_bare(backend: &mut Backend) -> String {
-    backend.send(&to_wire_line(&ClientFrame::Initialize {
-        protocol_version: PROTOCOL_VERSION,
-        replay: false,
-    }));
     loop {
         match backend.next_frame() {
-            ServerFrame::Control(ServerControlFrame::InitializeAck { session_id, .. }) => {
-                return session_id;
-            }
+            ServerFrame::Control(ServerControlFrame::Report { .. }) => {}
+            ServerFrame::Event(EventFrame {
+                stream: _,
+                origin: _,
+                ttl: _,
+                event: SessionEvent::SessionOpened { id, .. },
+            }) => return id,
             ServerFrame::Control(other) => panic!("unexpected control frame: {other:?}"),
             ServerFrame::Event(_) => {}
         }
@@ -971,7 +1036,7 @@ fn the_builtin_gate_asks_on_a_risky_bash_and_a_block_skips() {
                         "the card shows the checked command: {payload}"
                     );
                     backend.send(&to_wire_line(&SessionCommand::InteractionResponse {
-                        session: session.clone(),
+                        session: Some(session.clone()),
                         id,
                         payload: json!({
                             "selected": ["Block"], "text": "not today",
@@ -1052,4 +1117,95 @@ fn a_disabled_gate_mounts_nowhere() {
             ServerFrame::Control(control) => panic!("unexpected control frame: {control:?}"),
         }
     }
+}
+
+/// The routing generalization over the real json edge: the grammar
+/// double's emissions surface origin-stamped at the frontend, the
+/// watched boot announcement mirrors onto its pipe (it echoes the
+/// line back out), and the frontend's answer routes to the extension
+/// by id — with the settlement announced and the routed response
+/// crossing back down the pipe (mirrored out again by the double).
+#[test]
+fn the_shared_grammar_crosses_the_json_edge_end_to_end() {
+    let stage = stage("grammar-e2e", &[("grammar-ext", "grammar")]);
+    let mut backend = spawn_backend(&stage, &[]);
+    let (session, _catalog, _skills) = handshake(&mut backend);
+
+    // Frames until a predicate holds, bounded — the emissions race
+    // the handshake, so scan rather than assume order.
+    fn until<F: Fn(&EventFrame) -> bool>(backend: &mut Backend, want: &str, pred: F) -> EventFrame {
+        // Already-read frames first: the double's chatty speech can
+        // land inside the handshake's own scan, and must not be lost
+        // to the helper that happened to read it.
+        if let Some(frame) = backend.seen.iter().rev().find_map(|frame| match frame {
+            ServerFrame::Event(frame) if pred(frame) => Some(frame.clone()),
+            _ => None,
+        }) {
+            return frame;
+        }
+        let deadline = std::time::Instant::now() + BOUND;
+        while std::time::Instant::now() < deadline {
+            let frame = match backend.next_frame() {
+                ServerFrame::Event(frame) => frame,
+                other => panic!("unexpected frame while waiting for {want}: {other:?}"),
+            };
+            if pred(&frame) {
+                return frame;
+            }
+        }
+        panic!("no {want} within the bound");
+    }
+
+    // The ask surfaced: backend-level (no stream), origin-stamped.
+    let ask = until(
+        &mut backend,
+        "origin-stamped interaction_request",
+        |frame| {
+            matches!(
+                &frame.event,
+                SessionEvent::InteractionRequest { id, .. } if id == "g-1"
+            ) && frame.stream.is_none()
+                && frame.origin.as_deref() == Some("grammar-ext")
+        },
+    );
+    assert!(ask.origin.as_deref() == Some("grammar-ext"));
+
+    // The watch mirror round-tripped: the double watched
+    // `session_opened`, the forwarder mirrored the boot's
+    // announcement, and the double echoed the line back out as an
+    // origin-stamped error event.
+    until(
+        &mut backend,
+        "the mirrored session_opened echoed back",
+        |frame| {
+            matches!(&frame.event, SessionEvent::Error { message, .. } if message
+                .contains("session_opened"))
+                && frame.origin.as_deref() == Some("grammar-ext")
+        },
+    );
+
+    // The answer routes by id — the session it names is irrelevant
+    // (id-first dispatch), the settlement is announced, and the
+    // routed response crosses back down the pipe (the double mirrors
+    // it out).
+    backend.send(&to_wire_line(&SessionCommand::InteractionResponse {
+        session: Some(session),
+        id: "g-1".to_string(),
+        payload: json!({"selected": [], "text": "go ahead from the frontend"}),
+    }));
+    until(
+        &mut backend,
+        "the settlement announced",
+        |frame| matches!(&frame.event, SessionEvent::InteractionSettled { id } if id == "g-1"),
+    );
+    until(
+        &mut backend,
+        "the routed answer echoed back from the extension",
+        |frame| {
+            matches!(&frame.event, SessionEvent::Error { message, .. } if message
+                .contains("interaction_response")
+                && message.contains("go ahead from the frontend"))
+                && frame.origin.as_deref() == Some("grammar-ext")
+        },
+    );
 }

@@ -14,7 +14,7 @@
 //! end-of-options marker (`--`), and dynamic args — tracked but still
 //! participating in positional counting.
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::BTreeSet;
 
 use crate::config::RuleConfig;
 
@@ -54,11 +54,7 @@ impl ParsedArgs {
 ///
 /// Pure function: no side effects, no permission checking. It only
 /// decides which tokens are flags, options, or positionals.
-pub fn parse_args(
-    args: &[String],
-    cmd_config: Option<&RuleConfig>,
-    _dynamic_indices: &HashSet<usize>, // In the TS signature; never consulted (the checker skips dynamic indices itself).
-) -> ParsedArgs {
+pub fn parse_args(args: &[String], cmd_config: Option<&RuleConfig>) -> ParsedArgs {
     let mut result = ParsedArgs::default();
 
     let declared_flags: BTreeSet<String> = cmd_config
@@ -231,18 +227,10 @@ mod tests {
         }
     }
 
-    fn no_indices(_len: usize) -> HashSet<usize> {
-        HashSet::new()
-    }
-
     #[test]
     fn classifies_flags_options_and_positionals() {
         let config = config_with(&["-f"], &["-o"]);
-        let parsed = parse_args(
-            &args(&["-f", "-o", "value", "file"]),
-            Some(&config),
-            &no_indices(4),
-        );
+        let parsed = parse_args(&args(&["-f", "-o", "value", "file"]), Some(&config));
         assert_eq!(parsed.flags, BTreeSet::from(["-f".to_string()]));
         // The consumed value's own index is recorded (index 2).
         assert_eq!(
@@ -261,11 +249,7 @@ mod tests {
     #[test]
     fn equals_form_and_unknown_long_options() {
         let config = config_with(&[], &["--target"]);
-        let parsed = parse_args(
-            &args(&["--target=/etc", "--unknown"]),
-            Some(&config),
-            &no_indices(2),
-        );
+        let parsed = parse_args(&args(&["--target=/etc", "--unknown"]), Some(&config));
         assert_eq!(
             parsed.options,
             vec![(
@@ -282,14 +266,14 @@ mod tests {
     #[test]
     fn combined_shorts_decompose_and_options_consume_next() {
         let config = config_with(&["-r", "-x"], &["-f"]);
-        let parsed = parse_args(&args(&["-rx"]), Some(&config), &no_indices(1));
+        let parsed = parse_args(&args(&["-rx"]), Some(&config));
         assert_eq!(
             parsed.flags,
             BTreeSet::from(["-r".to_string(), "-x".to_string()])
         );
 
         // Option last in the combined token consumes the next argument.
-        let parsed = parse_args(&args(&["-rf", "val"]), Some(&config), &no_indices(2));
+        let parsed = parse_args(&args(&["-rf", "val"]), Some(&config));
         assert_eq!(parsed.flags, BTreeSet::from(["-r".to_string()]));
         assert_eq!(
             parsed.options,
@@ -306,7 +290,7 @@ mod tests {
     #[test]
     fn end_of_options_marker_makes_everything_positional() {
         let config = config_with(&["-f"], &[]);
-        let parsed = parse_args(&args(&["--", "-f", "file"]), Some(&config), &no_indices(3));
+        let parsed = parse_args(&args(&["--", "-f", "file"]), Some(&config));
         assert!(parsed.flags.is_empty());
         assert_eq!(
             parsed.positionals,

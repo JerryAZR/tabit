@@ -1,53 +1,62 @@
-//! The session host: the backend half of the frontend protocol. One
-//! host connection serves many sessions — a resident loop routes
-//! commands to per-session workers, each worker the classic resident
-//! owner (one task owns its [`Session`] exclusively and forever; idle
-//! is the wait, running is the pump — no handoff window to patch).
-//! Runs in different sessions proceed concurrently; every worker
-//! stamps its events with its session id, and all events ride one
-//! channel (PROTOCOL.md v3).
+//! The session host: the backend half of the frontend protocol — a
+//! functional layer mounted on its [`Node`] (the ruled architecture:
+//! one routing layer, the node; the host is policy). One host
+//! connection serves many sessions: a resident worker per session,
+//! each worker the classic resident owner (one task owns its
+//! [`Session`] exclusively and forever; idle is the wait, running is
+//! the pump — no handoff window to patch). Runs in different
+//! sessions proceed concurrently; every worker stamps its events
+//! with its session id and emits through its channel — which IS how
+//! the node's learning table knows where a session lives (law 1:
+//! stamped emissions teach).
 //!
 //! The host, not the workers, owns session lifecycle: `new_session`
 //! builds a session through the injected wiring (the binary's assembly
 //! knowledge — config, tools, preamble — kept out of this crate),
 //! `open_session` loads a stored one, and the startup catalog
 //! (`sessions_available`) is a header-only listing so lazy loading
-//! holds: only the boot session is resident at startup.
+//! holds: only the boot session is resident at startup. Lifecycle
+//! rides the node's by-type dispatch (law 3); session-addressed
+//! commands ride the learning table (law 2) into the worker's
+//! channel — the handler at the command dequeue point.
 //!
 //! The command path (ruled 2026-08): **the router only routes** —
-//! the host loop resolves a session address and forwards into that
+//! the node resolves a session address and forwards into that
 //! session's handler, a black box to the router; routing failures
 //! (an unknown session) are its only errors. The handler
 //! ([`Worker::deliver`], module code running synchronously at the
 //! dequeue point) owns every command's semantics: the mailbox
 //! (messages — consumed mid-run by the engine as steers, at the beat
-//! by the worker as batches), the cancel token, the interaction hub,
-//! a pending-checkout slot, a replay-request flag — the conversation
-//! intent — plus the shared model register (a state write at receive,
-//! never parked: the worker's next run open derives from it, and
-//! every pass announces it). The worker task owns the session itself
-//! and serves its beat — passes, a parked checkout (the rewind), a
-//! parked manual compaction (all three in `serve_parked`'s one
-//! order), then message batches, then the idle compaction door — so
-//! routing never blocks on a run.
+//! by the worker as batches), the cancel token, a pending-checkout
+//! slot, a replay-request flag — the conversation intent — plus the
+//! shared model register (a state write at receive, never parked:
+//! the worker's next run open derives from it, and every pass
+//! announces it). The worker task owns the session itself and serves
+//! its beat — passes, a parked checkout (the rewind), a parked
+//! manual compaction (all three in `serve_parked`'s one order), then
+//! message batches, then the idle compaction door — so routing never
+//! blocks on a run.
 //!
 //! Termination (ruled 2026-08 — the core dies with the frontend):
 //!
 //! - [`SessionHost::close_commands`] is the **polite** close: every
-//!   worker finishes its in-flight run, commands already routed are
-//!   honored (close is not a barrier), closing stats are captured, and
-//!   the event stream ends. In-process consumers that stay alive to
-//!   read the stream (print mode) use this.
+//!   worker finishes its in-flight run, everything already delivered
+//!   is honored (delivery is synchronous — there is no queue to
+//!   drain), closing stats are captured, and the event stream ends.
+//!   In-process consumers that stay alive to read the stream (print
+//!   mode) use this.
 //! - **Frontend death** — the event receiver is gone, whatever the
 //!   reason — aborts every in-flight run and winds every worker down
 //!   immediately, regardless of state: a parked permission card or a
 //!   half-finished turn must never outlive the user. Interrupted
 //!   results synthesize on the next open exactly like a crash; the
-//!   log stays durable.
+//!   log stays durable. The door is the frontend-death watcher over
+//!   the node's frontend channel (the receiver's drop, detected
+//!   directly).
 
 use crate::interaction::InteractionHub;
 use crate::lock::lock;
-use crate::notice::NoticeSink;
+use crate::notice::{HostSink, NoticeSink, NoticeSlot};
 use crate::session::{AbortHandle, MailboxHandle, Session};
 use crate::stats::SessionStats;
 use crate::store::SessionStore;
@@ -55,8 +64,10 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use tabit_protocol::{
-    AvailableSession, EventFrame, ModelSelection, SessionCommand, SessionEvent, StreamId,
+    AvailableSession, AvailableSkill, EventFrame, ModelSelection, SessionCommand, SessionEvent,
+    StreamId, command_tags,
 };
+use tabit_wire::node::{Channel, Inbound, Locality, Node};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -90,22 +101,22 @@ pub type SessionSource = Arc<dyn Fn() -> Result<(Session, Vec<String>), String> 
 pub type OpenSessionSource =
     Arc<dyn Fn(&str) -> Result<(Session, Vec<String>), String> + Send + Sync>;
 
-/// Everything the host needs beyond the boot session: the store (the
-/// startup catalog), the two session builders, the child router
-/// (routing's second table — see [`crate::routing`]), and the boot
-/// announcement's `parent` (a `--parent` child process names its
-/// spawner; `None` for every user-facing host).
+/// The host's STRUCTURE — everything mountable before any data
+/// exists (owner ruling 2026-09, the prepared-supervisor model): the
+/// node (the routing layer this host mounts on — the assembly creates
+/// it once, so the subprocess bridge's children register their lanes
+/// on the same net), the store, and the boot announcement's lineage.
+/// Mounting the structure first is what lets chatty participants
+/// speak from their handshake onward: any node may send anything a
+/// frontend can (`new_session` at least), so the command surface —
+/// the by-type handlers — must exist before the first child boots.
+#[derive(Clone)]
 pub struct SessionHostWiring {
+    /// The node this host and its children share — one net per
+    /// process.
+    pub node: Arc<Node>,
     /// The sessions directory the catalog lists.
     pub store: SessionStore,
-    /// Build a fresh session (`new_session`).
-    pub create: SessionSource,
-    /// Load a stored session by id (`open_session`).
-    pub open: OpenSessionSource,
-    /// The child registry: session addresses the workers don't own
-    /// resolve here (route-all — the router delivers, the target
-    /// consumes).
-    pub children: Arc<crate::routing::ChildRouter>,
     /// The `parent` field on the boot session's announcement — the
     /// child-role flag speaking at the source of truth.
     pub boot_parent: Option<String>,
@@ -113,22 +124,23 @@ pub struct SessionHostWiring {
     /// the spawning tool call's correlation id, crossing the same
     /// way `boot_parent` does. Present only in a child-role boot.
     pub boot_parent_call: Option<String>,
-    /// The skills catalog's wire snapshot, announced once at startup
-    /// after the session catalog (empty = no announcement)
-    pub skills: Vec<tabit_protocol::AvailableSkill>,
+}
+
+/// The host's DATA — the parts that only exist once the boot's
+/// gathering is done (the extension handshakes resolved, the tools
+/// mounted): the two session builders and the startup catalogs.
+/// Arrives with the boot session at [`SessionHostMount::attach`].
+#[derive(Clone)]
+pub struct SessionHostData {
+    /// Build a fresh session (`new_session`).
+    pub create: SessionSource,
+    /// Load a stored session by id (`open_session`).
+    pub open: OpenSessionSource,
     /// The extension catalog's wire snapshot, announced once at
     /// startup after the skills catalog (empty = no announcement) —
     /// the binary's boot-time assembly verdict: provenance, standing,
     /// and the load-time conflict reports.
     pub extensions: tabit_protocol::ExtensionsCatalog,
-}
-
-/// A command on its way to the host loop: a wire command, or a
-/// replay-pass request (the transport edge's way of asking after the
-/// handshake — not a wire command itself).
-enum HostCommand {
-    Command(SessionCommand),
-    Replay(String),
 }
 
 /// One session's delivery surface — the module's handler at the
@@ -140,18 +152,20 @@ enum HostCommand {
 /// manages: the beat serves the parked intent in `serve_parked`'s
 /// one order (a replay pass, a checkout, a manual compaction), then
 /// batches messages, then the idle compaction door.
+///
+/// Cheap to clone behind its `Arc` — the learning table's channel
+/// delivery holds one, and the lifecycle registry (the host's worker
+/// list) another.
 #[derive(Clone)]
 struct Worker {
     mailbox: MailboxHandle,
     abort_handle: AbortHandle,
-    interaction: InteractionHub,
     /// The notice sink for the handler's own emissions (checkout
-    /// errors, model answers) — a module talking to its frontend, not
-    /// the router's business. The discipline lives in
-    /// [`crate::notice`]: the delivery surface lives as long as the
-    /// host's routing table, and a dead channel simply means nobody is
-    /// left to tell.
-    notices: NoticeSink,
+    /// errors, model answers) — attached at spawn, once the session's
+    /// channel exists (a sink is the channel it emits from; the
+    /// channel is the worker's, so the two are minted together in
+    /// [`spawn_worker`]).
+    notices: Arc<NoticeSlot>,
     /// The read-only entry-id probe — checkout verification at receive
     /// (see [`crate::session::SharedConversation`]).
     entry_probe: crate::session::SharedConversation,
@@ -187,7 +201,7 @@ struct Worker {
 impl Worker {
     /// Abort is drop-all-pending-intent — one semantic at every door:
     /// the command, [`SessionHost::abort_all`], the frontend-death
-    /// watcher, and checkout (which aborts its way to its own pause
+    /// door, and checkout (which aborts its way to its own pause
     /// point). The parked checkout goes first — silently (no
     /// `checked_out` follows; the abort is the marker, FRONTEND.md §7)
     /// and before the cancel, so a worker woken by the abort can never
@@ -196,37 +210,43 @@ impl Worker {
     /// already done — abort has nothing to say about them.
     /// The cancel itself (the run's abort plus its immediate
     /// `messages_discarded` notice) lives in the handle.
-    /// Abort consumption also **broadcasts to this session's
-    /// registered children** (the tree rule): stop all work in the
-    /// subtree, never destroy the instances. In-run children are
-    /// already leash-cancelled by the token; this walk reaches them
-    /// again (idempotently) and anything else registered under this
-    /// session.
+    /// Abort carries no routing machinery (the routing ruling): the
+    /// run token is every tool body's leash, so the abort cascades
+    /// through the active tool calls — a subagent tool kills its own
+    /// child — and children with no active call survive naturally.
     fn abort(&self) {
         lock(&self.checkout_slot).take();
         lock(&self.compact_slot).take();
         self.abort_handle.abort();
     }
 
+    /// The handler's emission: a notice stamped with the session's
+    /// stream, if the worker's sink is attached (a module talking to
+    /// its frontend, not the router's business).
+    fn notice(&self, event: SessionEvent) {
+        if let Some(notices) = self.notices.get() {
+            notices.emit(event);
+        }
+    }
+
     /// Deliver a session-scoped command — the handler at the dequeue
-    /// point. Everything from here down is this module's semantics.
+    /// point (the learning table forwarded into the session's
+    /// channel). Everything from here down is this module's
+    /// semantics. Interaction responses never arrive here: they are
+    /// response-type, claimed by the node's ask table before session
+    /// routing is ever consulted (law 5).
     #[allow(clippy::unreachable)]
     fn deliver(&self, command: SessionCommand) {
         match command {
             SessionCommand::Message { text, .. } => self.mailbox.submit(text),
             SessionCommand::Abort { .. } => self.abort(),
             SessionCommand::Continue { .. } => self.mailbox.continue_run(),
-            SessionCommand::InteractionResponse { id, payload, .. } => {
-                // Total: an unknown or dead id logs and drops inside
-                // the hub; the payload is the asker's to parse.
-                self.interaction.respond(&id, payload);
-            }
             SessionCommand::Checkout { entry_id, .. } => {
                 // Validate against this module's own id truth, here at
                 // receive: a bad target errors immediately — even
                 // mid-run — and nothing else happens.
                 if !self.entry_probe.contains(&entry_id) {
-                    self.notices.emit(SessionEvent::error_checkout(format!(
+                    self.notice(SessionEvent::error_checkout(format!(
                         "no entry `{entry_id}` in this session"
                     )));
                     return;
@@ -261,7 +281,7 @@ impl Worker {
                     thinking_level,
                 };
                 if let Err(message) = (self.model_probe)(&selection) {
-                    self.notices.emit(SessionEvent::error_model(message));
+                    self.notice(SessionEvent::error_model(message));
                     return;
                 }
                 // A state write, not pending intent: one register write
@@ -271,7 +291,7 @@ impl Worker {
                 // question: the next run open derives the agent, and
                 // every pass announces the cell.
                 self.model_register.write(selection.clone());
-                self.notices.emit(SessionEvent::model_changed(
+                self.notice(SessionEvent::model_changed(
                     &selection,
                     self.model_register.facts(&selection),
                 ));
@@ -287,10 +307,13 @@ impl Worker {
                 *lock(&self.compact_slot) = Some(directives);
                 self.mailbox.work_signal().notify_one();
             }
-            // Lifecycle is not session-scoped — the router forwards
-            // those to the lifecycle handler. Unreachable by
-            // construction; sanctioned crash: see the error doctrine
-            // in AGENTS.md.
+            // Response-type commands are claimed at the ask table
+            // before routing; lifecycle is by-type. Both are
+            // unreachable by construction; sanctioned crash: see the
+            // error doctrine in AGENTS.md.
+            SessionCommand::InteractionResponse { .. } => {
+                unreachable!("interaction responses are claimed by the ask table")
+            }
             SessionCommand::NewSession | SessionCommand::OpenSession { .. } => {
                 unreachable!("lifecycle commands are routed to the lifecycle handler")
             }
@@ -302,7 +325,7 @@ impl Worker {
     /// queue batches them), and the beat serves the pass ahead of the
     /// next batch — the pass reflects the chain as of the beat, and a
     /// message that has not drained by then renders live after the
-    /// bracket (PROTOCOL.md v3 stage 2).
+    /// bracket (FRONTEND.md §7).
     fn deliver_replay(&self) {
         self.replay_due
             .store(true, std::sync::atomic::Ordering::Release);
@@ -316,43 +339,312 @@ impl Worker {
 pub struct SessionHost {
     info: SessionInfo,
     events: Option<mpsc::UnboundedReceiver<EventFrame>>,
-    shutdown: CancellationToken,
-    commands: mpsc::UnboundedSender<HostCommand>,
-    workers: Arc<Mutex<HashMap<String, Worker>>>,
+    node: Arc<Node>,
+    host_channel: Channel,
+    /// The lifecycle registry — the workers by session id, for the
+    /// doors that need the worker itself (open_session's already-open
+    /// check, the replay request, the abort sweep). Routing is NOT
+    /// this map's business: session-addressed commands route by the
+    /// node's learning table (law 2), taught by each worker's own
+    /// stamped emissions.
+    workers: Arc<Mutex<HashMap<String, Arc<Worker>>>>,
     closing_stats: Arc<Mutex<HashMap<String, SessionStats>>>,
+    /// The workers' wind-down: pulled by the polite close, the
+    /// frontend-death door, and the facade's own drop (the stdio
+    /// edge's explicit death). The wind-down task awaits every join
+    /// and then ends the event stream.
+    worker_shutdown: CancellationToken,
+    /// Fires once every worker has wound down and its last event has
+    /// landed — the event stream's end.
+    stream_end: CancellationToken,
+}
+
+impl Drop for SessionHost {
+    fn drop(&mut self) {
+        // The edge's death door: dropping the host IS the frontend's
+        // death (the edge aborts first, explicitly). The death door
+        // in the frontend channel's delivery covers the in-process
+        // consumer that drops its receiver instead.
+        self.worker_shutdown.cancel();
+    }
 }
 
 /// A cheap clone for threads that only submit commands (a transport
-/// edge's reader). Commands route through the host loop to the named
-/// session; sends after the host has wound down are no-ops.
+/// edge's reader). Commands enter through the node's intake — one
+/// door, the same laws as any arrival; sends after the host has wound
+/// down simply find no worker listening.
 #[derive(Clone)]
 pub struct SessionCommandLink {
-    commands: mpsc::UnboundedSender<HostCommand>,
+    node: Arc<Node>,
+    host_channel: Channel,
 }
 
 impl SessionCommandLink {
-    /// Submit a command. Fire-and-forget: outcomes arrive as events.
-    /// Sends after the host has wound down are no-ops.
+    /// Submit a command. Fire-and-forget: outcomes arrive as events
+    /// (routing by the node's laws — session-addressed by the
+    /// learning table, lifecycle by type, responses by ask-table
+    /// claim). The replay request rides this too — under the report
+    /// model, replay is the door's idempotent path (`open_session` of
+    /// an already-open session) plus the automatic pass a resumed
+    /// boot serves at attach.
     pub fn send(&self, command: SessionCommand) {
-        let _ = self.commands.send(HostCommand::Command(command));
-    }
-
-    /// Request a session's replay pass — the transport edge's way in
-    /// (the bridge asks right after the handshake, when the
-    /// `initialize` frame said `replay: true`).
-    pub fn replay(&self, session: &str) {
-        let _ = self.commands.send(HostCommand::Replay(session.to_string()));
+        self.node
+            .intake(&self.host_channel, Inbound::Command(command));
     }
 }
 
+/// The frontend's event stream, mounted on the node — constructible
+/// **before any functional layer exists**: the structure-first mount
+/// (the boot's routing is ready before any data is gathered — the
+/// extensions boot next, the session host last, and every frame any
+/// of them emits from its first line crosses through this stream in
+/// arrival order). Participants are peers, not subordinates: any
+/// node may speak from its handshake onward (a co-frontend
+/// extension's `new_session`, a child's steer), so the net's
+/// structure — this stream, the tables, the by-type handlers — is
+/// complete before the first child boots, and no buffering exists
+/// anywhere: the boot's own announcements land behind whatever
+/// crossed earlier, in arrival order.
+pub struct FrontendStream {
+    events: mpsc::UnboundedReceiver<EventFrame>,
+    /// The sender the death-watch awaits (dropped receivers close
+    /// it); held here so the host — which spawns inside a runtime —
+    /// owns the watcher task.
+    events_tx: mpsc::UnboundedSender<EventFrame>,
+    /// Fires when the stream's receiver drops — the frontend-death
+    /// signal; the host (whenever it spawns) owns the door it opens.
+    gone: CancellationToken,
+}
+
+/// Mount the frontend stream on the node: the facade channel
+/// (subscribed to every event, its delivery feeding the stream), and
+/// the receiver-drop watcher that fires `gone`.
+pub fn mount_frontend(node: &Arc<Node>) -> FrontendStream {
+    let (event_tx, event_rx) = mpsc::unbounded_channel::<EventFrame>();
+    let send_events = event_tx.clone();
+    let frontend = Channel::local(
+        "frontend",
+        move |frame: &EventFrame| {
+            let _ = send_events.send(frame.clone());
+        },
+        |_| {},
+    );
+    node.subscribe_channel_all(Locality::Both, &frontend);
+    FrontendStream {
+        events: event_rx,
+        events_tx: event_tx,
+        gone: CancellationToken::new(),
+    }
+}
+
+/// The mounted-but-unattached host: the structure is up (the
+/// frontend stream, the host's channel and sink, the by-type
+/// lifecycle handlers, the death doors), the boot session and the
+/// boot's data are not. Chatty participants that spoke before the
+/// attach — any node may, from its handshake onward — had their
+/// lifecycle commands parked; [`SessionHostMount::attach`] serves
+/// them in arrival order, behind the boot's announcements.
+pub struct SessionHostMount {
+    wiring: SessionHostWiring,
+    events: mpsc::UnboundedReceiver<EventFrame>,
+    workers: Arc<Mutex<HashMap<String, Arc<Worker>>>>,
+    joins: Arc<Mutex<Vec<JoinHandle<()>>>>,
+    closing_stats: Arc<Mutex<HashMap<String, SessionStats>>>,
+    worker_shutdown: CancellationToken,
+    stream_end: CancellationToken,
+    sink: HostSink,
+    host_channel: Channel,
+    door: Arc<Lifecycle>,
+}
+
 impl SessionHost {
-    /// Hand the boot `session` to the host and get the frontend handle
-    /// back. Must be called inside a tokio runtime (the host loop and
-    /// the boot worker spawn here). The startup notes (model-preference
-    /// degradations from selection) and the session catalog are the
-    /// host's first emissions — they land right after the transport's
-    /// handshake ack, ahead of anything a worker can produce.
-    pub fn spawn(boot: Session, startup_notes: Vec<String>, wiring: SessionHostWiring) -> Self {
+    /// Mount the host's STRUCTURE — callable (and called) before any
+    /// data exists and before any child process boots: the frontend
+    /// stream, the host's channel and sink, the worker tables, the
+    /// death doors, the wind-down, and the by-type lifecycle handlers
+    /// on the node's command table. From this moment the net accepts
+    /// every participant's speech: session-addressed commands route
+    /// by the learning table (a miss is the uniform error — sessions
+    /// do not exist yet, and that is a routed outcome, not a drop),
+    /// and lifecycle commands park until [`SessionHostMount::attach`]
+    /// arms their builders. Must run inside a tokio runtime (the
+    /// watchers and the wind-down spawn here).
+    pub fn mount(wiring: SessionHostWiring, frontend: FrontendStream) -> SessionHostMount {
+        let node = wiring.node.clone();
+        let event_rx = frontend.events;
+        let frontend_events_tx = frontend.events_tx;
+        let frontend_gone = frontend.gone;
+
+        let workers: Arc<Mutex<HashMap<String, Arc<Worker>>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        let closing_stats: Arc<Mutex<HashMap<String, SessionStats>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        let worker_shutdown = CancellationToken::new();
+        let stream_end = CancellationToken::new();
+        let joins: Arc<Mutex<Vec<JoinHandle<()>>>> = Arc::new(Mutex::new(Vec::new()));
+
+        let death: Arc<dyn Fn() + Send + Sync> = {
+            let workers = workers.clone();
+            let worker_shutdown = worker_shutdown.clone();
+            let fired = std::sync::atomic::AtomicBool::new(false);
+            Arc::new(move || {
+                if !fired.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                    for worker in lock(&workers).values() {
+                        worker.abort();
+                    }
+                    worker_shutdown.cancel();
+                }
+            })
+        };
+        // The frontend-death watchers (the receiver's drop IS the
+        // frontend's death, whatever the reason — detected directly
+        // via the sender's `closed`, not on the next failed emission:
+        // a worker parked on a card emits nothing, and must still
+        // wind down). The door the drop opens aborts every in-flight
+        // run and pulls the wind-down token.
+        {
+            let watch_tx = frontend_events_tx.clone();
+            let gone = frontend_gone.clone();
+            tokio::spawn(async move {
+                watch_tx.closed().await;
+                gone.cancel();
+            });
+        }
+        {
+            let death = death.clone();
+            let gone = frontend_gone.clone();
+            tokio::spawn(async move {
+                gone.cancelled().await;
+                death();
+            });
+        }
+
+        // The host's own channel: backend-level emissions (catalog,
+        // lifecycle errors) and the link's way in.
+        let host_channel = Channel::local("host", |_| {}, |_| {});
+        let sink = HostSink::new(&node, &host_channel);
+
+        // The lifecycle door — the by-type handlers, live from here.
+        // Until attach arms the builders, arrivals park (the drain is
+        // the attach's last act).
+        let door = Arc::new(Lifecycle {
+            node: node.clone(),
+            sink: sink.clone(),
+            workers: workers.clone(),
+            joins: joins.clone(),
+            stats: closing_stats.clone(),
+            worker_shutdown: worker_shutdown.clone(),
+            door: Mutex::new(DoorState {
+                armed: None,
+                parked: Vec::new(),
+            }),
+        });
+        {
+            let created = door.clone();
+            node.handle(
+                command_tags::NEW_SESSION,
+                move |command: &SessionCommand| {
+                    if matches!(command, SessionCommand::NewSession) {
+                        created.new_session();
+                    }
+                },
+            );
+            let opened = door.clone();
+            node.handle(
+                command_tags::OPEN_SESSION,
+                move |command: &SessionCommand| {
+                    if let SessionCommand::OpenSession { id } = command {
+                        opened.open_session(id);
+                    }
+                },
+            );
+        }
+
+        // The wind-down task: once the shutdown token is pulled, await
+        // every worker join (each captures its last event) and then
+        // end the stream.
+        {
+            let worker_shutdown = worker_shutdown.clone();
+            let joins = joins.clone();
+            let stream_end = stream_end.clone();
+            tokio::spawn(async move {
+                worker_shutdown.cancelled().await;
+                loop {
+                    let join = {
+                        let mut held = lock(&joins);
+                        if held.is_empty() {
+                            break;
+                        }
+                        held.remove(0)
+                    };
+                    let _ = join.await;
+                }
+                stream_end.cancel();
+            });
+        }
+
+        SessionHostMount {
+            wiring,
+            events: event_rx,
+            workers,
+            joins,
+            closing_stats,
+            worker_shutdown,
+            stream_end,
+            sink,
+            host_channel,
+            door,
+        }
+    }
+
+    /// The fused boot for callers with everything at hand (print
+    /// mode, tests): mount the structure, attach the boot at once.
+    pub fn spawn(
+        boot: Session,
+        startup_notes: Vec<String>,
+        wiring: SessionHostWiring,
+        data: SessionHostData,
+    ) -> Self {
+        let frontend = mount_frontend(&wiring.node);
+        Self::spawn_with_frontend(boot, startup_notes, wiring, data, frontend)
+    }
+
+    /// [`SessionHost::spawn`] over a pre-mounted frontend stream.
+    pub fn spawn_with_frontend(
+        boot: Session,
+        startup_notes: Vec<String>,
+        wiring: SessionHostWiring,
+        data: SessionHostData,
+        frontend: FrontendStream,
+    ) -> Self {
+        Self::mount(wiring, frontend).attach(boot, startup_notes, data)
+    }
+}
+
+impl SessionHostMount {
+    /// Attach the boot: spawn the boot worker, emit the pinned
+    /// startup announcements (the session, its notes, the catalogs),
+    /// arm the lifecycle door's data, and serve whatever parked
+    /// during the gathering — in arrival order, behind the
+    /// announcements.
+    pub fn attach(
+        self,
+        boot: Session,
+        startup_notes: Vec<String>,
+        data: SessionHostData,
+    ) -> SessionHost {
+        let SessionHostMount {
+            wiring,
+            events: event_rx,
+            workers,
+            joins,
+            closing_stats,
+            worker_shutdown,
+            stream_end,
+            sink,
+            host_channel,
+            door,
+        } = self;
         let info = SessionInfo {
             session_id: boot.id().to_string(),
             session_path: boot.wire_path(),
@@ -362,29 +654,31 @@ impl SessionHost {
         };
         let boot_id = info.session_id.clone();
         let boot_stream = StreamId::new(boot_id.clone());
-        let (event_tx, event_rx) = mpsc::unbounded_channel::<EventFrame>();
-        let (command_tx, mut command_rx) = mpsc::unbounded_channel::<HostCommand>();
-        let shutdown = CancellationToken::new();
-        // The workers' token is the host's to pull, and only after the
-        // host has routed everything queued ahead of the close: a
-        // worker sharing the command-side token could observe
-        // `cancelled` and exit before its queued messages were routed
-        // — breaking "close is not a barrier" by one hop.
-        let worker_shutdown = CancellationToken::new();
-        let workers = Arc::new(Mutex::new(HashMap::new()));
-        let closing_stats = Arc::new(Mutex::new(HashMap::new()));
+        let node = wiring.node.clone();
+
+        // The boot worker first: the startup announcements emit from
+        // its channel, which is what teaches the learning table where
+        // the boot session lives (the worker itself emits nothing at
+        // spawn — it waits).
+        let boot_skills = boot.skills_available();
+        let (boot_worker, boot_channel, boot_join) =
+            spawn_worker(boot, &node, worker_shutdown.clone(), closing_stats.clone());
+        lock(&workers).insert(boot_id.clone(), boot_worker.clone());
+        lock(&joins).push(boot_join);
+        let boot_sink = NoticeSink::new(&node, &boot_channel, boot_stream.clone());
 
         // The host's synchronous startup emissions, ordered ahead of
-        // any worker frame by construction (one sender, sent before
-        // the worker task exists): the boot session's "became
-        // visible" announcement (the same shape every other session
-        // gets — the boot is not a special case), then its selection
-        // degradations, then the catalog. A listing failure is the
-        // carrier in place of the announcement — no catalog follows
-        // (ruled: external errors ride the channel; PROTOCOL.md v3).
-        let _ = event_tx.send(EventFrame {
-            stream: Some(boot_stream.clone()),
-            event: SessionEvent::SessionOpened {
+        // any worker frame by construction (emitted here, before any
+        // command can have reached a worker): the boot session's
+        // "became visible" announcement (the same shape every other
+        // session gets — the boot is not a special case), then its
+        // selection degradations, then the catalog. A listing failure
+        // is the carrier in place of the announcement — no catalog
+        // follows (ruled: external errors ride the channel —
+        // FRONTEND.md §6).
+        announce_session(
+            &boot_sink,
+            SessionEvent::SessionOpened {
                 id: info.session_id.clone(),
                 path: info.session_path.clone(),
                 cwd: info.session_cwd.clone(),
@@ -393,13 +687,9 @@ impl SessionHost {
                 parent: wiring.boot_parent.clone(),
                 parent_call: wiring.boot_parent_call.clone(),
             },
-        });
-        for note in startup_notes {
-            let _ = event_tx.send(EventFrame {
-                stream: Some(boot_stream.clone()),
-                event: SessionEvent::error_model(note),
-            });
-        }
+            startup_notes,
+            boot_skills,
+        );
         match wiring.store.list() {
             Ok(summaries) => {
                 // Backend-level: no session produced this (the optional-
@@ -414,9 +704,9 @@ impl SessionHost {
                     .and_then(Path::parent)
                     .map(|dir| dir.display().to_string())
                     .unwrap_or_default();
-                let _ = event_tx.send(EventFrame {
-                    stream: None,
-                    event: SessionEvent::SessionsAvailable {
+                sink.emit(
+                    None,
+                    SessionEvent::SessionsAvailable {
                         sessions: summaries
                             .into_iter()
                             .map(|summary| AvailableSession {
@@ -428,124 +718,59 @@ impl SessionHost {
                             })
                             .collect(),
                     },
-                });
+                );
             }
             Err(error) => {
-                let _ = event_tx.send(EventFrame {
-                    stream: None,
-                    event: SessionEvent::error_session(format!("could not list sessions: {error}")),
-                });
+                sink.emit(
+                    None,
+                    SessionEvent::error_session(format!("could not list sessions: {error}")),
+                );
             }
         }
-        // The skills catalog rides right after the session catalog —
-        // backend-level for the same reason (one process, one cwd,
-        // one skill set). Only when discovery found something: an
-        // empty announcement is noise with no state to clear.
-        if !wiring.skills.is_empty() {
-            let _ = event_tx.send(EventFrame {
-                stream: None,
-                event: SessionEvent::SkillsAvailable {
-                    skills: wiring.skills.clone(),
-                },
-            });
-        }
-        // The extension catalog rides right after the skills catalog —
+        // The extension catalog rides right after the session catalog —
         // same backend-level reasons (one process, one extension
         // host), and the conflict reports are load-time facts: they
         // belong to the boot that produced them.
-        if !wiring.extensions.extensions.is_empty() {
-            let _ = event_tx.send(EventFrame {
-                stream: None,
-                event: SessionEvent::ExtensionsAvailable {
-                    extensions: wiring.extensions.extensions.clone(),
-                    conflicts: wiring.extensions.conflicts.clone(),
+        if !data.extensions.extensions.is_empty() {
+            sink.emit(
+                None,
+                SessionEvent::ExtensionsAvailable {
+                    extensions: data.extensions.extensions.clone(),
+                    conflicts: data.extensions.conflicts.clone(),
                 },
-            });
+            );
         }
 
-        let (boot_worker, boot_join) = spawn_worker(
-            boot,
-            event_tx.clone(),
-            worker_shutdown.clone(),
-            closing_stats.clone(),
-        );
-        lock(&workers).insert(boot_id.clone(), boot_worker);
-
-        // The death watcher: frontend death (the event receiver is
-        // gone) aborts every in-flight run so the workers can wind
-        // down immediately, regardless of state (the ruling). The
-        // workers cannot see death while pumping — the watcher is
-        // their eyes. It exits on either signal and drops its sender
-        // clone, so the polite path's stream still ends when the
-        // workers do.
-        {
-            let watcher_shutdown = worker_shutdown.clone();
-            let watcher_workers = workers.clone();
-            let watcher_events = event_tx.clone();
-            tokio::spawn(async move {
-                tokio::select! {
-                    biased;
-                    _ = watcher_shutdown.cancelled() => {}
-                    _ = watcher_events.closed() => {
-                        // The death path's abort site — the same
-                        // drop-all-pending-intent as the command's: a
-                        // parked checkout must not outlive the user
-                        // (its rewind is durable). Preemption plus the
-                        // one clear live inside the handle (flag 6) —
-                        // the runs' conclusions flush the discard
-                        // notices on the way out.
-                        for worker in lock(&watcher_workers).values() {
-                            worker.abort();
-                        }
-                    }
-                }
-            });
+        // A resumed boot replays automatically (owner ruling
+        // 2026-09-25): the resident chain re-emits right after the
+        // announcements — a `--continue`/`--session` connect needs no
+        // request. A fresh boot (or an absorbed `--continue` miss)
+        // has nothing to replay. On request, the door's idempotent
+        // path serves: `open_session` of an already-open session
+        // re-replays it, any time.
+        if info.resumed {
+            boot_worker.deliver_replay();
         }
 
-        // The resident host loop: routing only — it never awaits a
-        // run, so command latency does not exist.
-        let mut loop_state = HostLoop {
-            workers: workers.clone(),
-            wiring,
-            event_tx,
-            stats: closing_stats.clone(),
-            worker_shutdown,
-            joins: vec![boot_join],
-        };
-        let host_shutdown = shutdown.clone();
-        tokio::spawn(async move {
-            loop {
-                tokio::select! {
-                    biased;
-                    _ = host_shutdown.cancelled() => break,
-                    received = command_rx.recv() => match received {
-                        None => break,
-                        Some(command) => loop_state.handle(command),
-                    }
-                }
-            }
-            // Close is not a barrier: commands already queued when the
-            // break fired are routed before any worker is cancelled.
-            while let Ok(command) = command_rx.try_recv() {
-                loop_state.handle(command);
-            }
-            loop_state.worker_shutdown.cancel();
-            for join in loop_state.joins.drain(..) {
-                let _ = join.await;
-            }
-            // The last `event_tx` drops here: the stream ends.
-        });
+        // The lifecycle door arms (its handlers have been live since
+        // the mount) and whatever parked during the gathering serves
+        // now, in arrival order, behind the announcements.
+        door.arm(data);
 
-        Self {
+        SessionHost {
             info,
             events: Some(event_rx),
-            shutdown,
-            commands: command_tx,
+            node,
+            host_channel,
             workers,
             closing_stats,
+            worker_shutdown,
+            stream_end,
         }
     }
+}
 
+impl SessionHost {
     /// The boot session's facts, captured when the host took over.
     pub fn info(&self) -> &SessionInfo {
         &self.info
@@ -554,34 +779,28 @@ impl SessionHost {
     /// Submit a user message to a session: steers the run in flight or
     /// starts one.
     pub fn message(&self, session: &str, text: impl Into<String>) {
-        let _ = self
-            .commands
-            .send(HostCommand::Command(SessionCommand::Message {
-                session: session.to_string(),
-                text: text.into(),
-            }));
+        self.command_link().send(SessionCommand::Message {
+            session: session.to_string(),
+            text: text.into(),
+        });
     }
 
     /// Stop a session: abort the run in flight and discard any queued
     /// messages. Aborting while idle is a no-op (including on anything
     /// queued — the queue is discarded with it).
     pub fn abort(&self, session: &str) {
-        let _ = self
-            .commands
-            .send(HostCommand::Command(SessionCommand::Abort {
-                session: session.to_string(),
-            }));
+        self.command_link().send(SessionCommand::Abort {
+            session: session.to_string(),
+        });
     }
 
     /// Start a run over the session's existing conversation with no
     /// new message (retry / continue). A no-op on an empty
     /// conversation.
     pub fn continue_run(&self, session: &str) {
-        let _ = self
-            .commands
-            .send(HostCommand::Command(SessionCommand::Continue {
-                session: session.to_string(),
-            }));
+        self.command_link().send(SessionCommand::Continue {
+            session: session.to_string(),
+        });
     }
 
     /// Move a session's active chain to an entry (checkout — any entry
@@ -591,12 +810,10 @@ impl SessionHost {
     /// Outcomes arrive as events (`checked_out` + a replay pass, or
     /// `error { kind: checkout }`).
     pub fn checkout(&self, session: &str, entry_id: impl Into<String>) {
-        let _ = self
-            .commands
-            .send(HostCommand::Command(SessionCommand::Checkout {
-                session: session.to_string(),
-                entry_id: entry_id.into(),
-            }));
+        self.command_link().send(SessionCommand::Checkout {
+            session: session.to_string(),
+            entry_id: entry_id.into(),
+        });
     }
 
     /// Switch a session's model — the register write, immediate: the
@@ -607,14 +824,12 @@ impl SessionHost {
     /// agent at run open); the next run derives the new agent. Abort
     /// is irrelevant — a state write is not conversation intent.
     pub fn model(&self, session: &str, selection: ModelSelection) {
-        let _ = self
-            .commands
-            .send(HostCommand::Command(SessionCommand::Model {
-                session: session.to_string(),
-                provider: selection.provider,
-                model: selection.model,
-                thinking_level: selection.thinking_level,
-            }));
+        self.command_link().send(SessionCommand::Model {
+            session: session.to_string(),
+            provider: selection.provider,
+            model: selection.model,
+            thinking_level: selection.thinking_level,
+        });
     }
 
     /// Abort every session — discard every queue and every parked
@@ -630,33 +845,34 @@ impl SessionHost {
 
     /// Request a session's replay pass: the resident chain re-emitted
     /// onto the event stream as finalized live events, bracketed by
-    /// `replay_started`/`replay_done`. Fire-and-forget like a command
+    /// `replay_begin`/`replay_end`. Fire-and-forget like a command
     /// — the pass itself is the acknowledgment. Answered at the
     /// session's next idle beat; requests during a run wait for it.
     pub fn replay(&self, session: &str) {
-        let _ = self.commands.send(HostCommand::Replay(session.to_string()));
+        if let Some(worker) = lock(&self.workers).get(session).cloned() {
+            worker.deliver_replay();
+        }
     }
 
     /// A cloneable submitter for threads that only send commands.
     pub fn command_link(&self) -> SessionCommandLink {
         SessionCommandLink {
-            commands: self.commands.clone(),
+            node: self.node.clone(),
+            host_channel: self.host_channel.clone(),
         }
     }
 
     /// Close the host's command side (the polite door — in-process
     /// consumers that stay to read the stream, like print mode). Every
-    /// worker finishes any in-flight run, then — close is not a
-    /// barrier — runs everything already queued, captures
-    /// [`SessionHost::closing_stats`], and the event stream ends.
-    /// Sends that raced the wind-down land in one of two places:
-    /// before the host's post-break drain, they run; after it, the
-    /// channel is closed and they are silent no-ops (the window is a
-    /// few instructions wide; the stdio edge never uses this door —
-    /// it drops the host, the death door, so nothing unattended
-    /// runs).
+    /// worker finishes any in-flight run, then — delivery is
+    /// synchronous, so everything already submitted has landed —
+    /// closing stats are captured, and the event stream ends.
+    /// Submissions that race the wind-down find workers already
+    /// winding down: silent no-ops, the same few-instruction window
+    /// the queue once had (the stdio edge never uses this door — it
+    /// drops the host, the death door, so nothing unattended runs).
     pub fn close_commands(&mut self) {
-        self.shutdown.cancel();
+        self.worker_shutdown.cancel();
     }
 
     /// Take the whole event stream for a long-lived consumer (a
@@ -667,9 +883,26 @@ impl SessionHost {
     }
 
     /// The next stamped event, or `None` once the host has wound down
-    /// (or the stream was taken).
+    /// (or the stream was taken). The stream ends only after every
+    /// worker's last event has landed (the wind-down awaits the joins
+    /// before ending it).
     pub async fn next_event(&mut self) -> Option<EventFrame> {
-        self.events.as_mut()?.recv().await
+        let events = self.events.as_mut()?;
+        tokio::select! {
+            frame = events.recv() => frame,
+            _ = self.stream_end.cancelled() => {
+                // Every worker has wound down; hand over what landed,
+                // then the end.
+                events.try_recv().ok()
+            }
+        }
+    }
+
+    /// The stream's end signal — the transport forwarder's way to
+    /// stop when the host winds down (fired after every worker's last
+    /// event has landed).
+    pub(crate) fn stream_end_signal(&self) -> CancellationToken {
+        self.stream_end.clone()
     }
 
     /// The boot session's totals captured at worker wind-down, for
@@ -682,219 +915,314 @@ impl SessionHost {
     }
 }
 
-/// The session a session-scoped command names (v3's always-explicit
-/// addressing — lifecycle commands are the exception and never reach
-/// this helper).
-#[allow(clippy::unreachable)]
-fn session_address(command: &SessionCommand) -> &str {
-    match command {
-        SessionCommand::Message { session, .. }
-        | SessionCommand::Abort { session }
-        | SessionCommand::Continue { session }
-        | SessionCommand::InteractionResponse { session, .. }
-        | SessionCommand::Checkout { session, .. }
-        | SessionCommand::Model { session, .. }
-        | SessionCommand::Compact { session, .. } => session,
-        // Matched before the session-scoped arm in `handle`;
-        // unreachable by construction. Sanctioned crash: see the
-        // error doctrine in AGENTS.md.
-        SessionCommand::NewSession | SessionCommand::OpenSession { .. } => {
-            unreachable!("lifecycle commands carry no session address")
-        }
-    }
-}
-
-/// The host loop's own state: what routing needs, plus the worker
-/// joins it owns to the end (awaiting them is what orders the stream's
-/// end after every worker's last event) and the workers' shutdown
-/// token, pulled only after the pre-close queue has been routed.
-struct HostLoop {
-    workers: Arc<Mutex<HashMap<String, Worker>>>,
-    wiring: SessionHostWiring,
-    event_tx: mpsc::UnboundedSender<EventFrame>,
+/// The host's lifecycle door (by-type on the node's handler table,
+/// live from the MOUNT — the prepared-supervisor law: any node may
+/// speak from its handshake onward, so the command surface exists
+/// before the first child boots). `new_session` builds through the
+/// data, `open_session` loads or re-replays, and every spawned
+/// worker's channel is registered into the learning table by its own
+/// announcement (the emit teaches). The builders are the boot's DATA
+/// — they arrive at attach; an arrival before that parks, and is
+/// served in arrival order once armed.
+struct Lifecycle {
+    node: Arc<Node>,
+    sink: HostSink,
+    workers: Arc<Mutex<HashMap<String, Arc<Worker>>>>,
+    joins: Arc<Mutex<Vec<JoinHandle<()>>>>,
     stats: Arc<Mutex<HashMap<String, SessionStats>>>,
     worker_shutdown: CancellationToken,
-    joins: Vec<JoinHandle<()>>,
+    /// The door's one state: the armed builders (once the boot's
+    /// gathering is done) and the commands that arrived before them,
+    /// under ONE lock — the park decision and the arm-and-take are
+    /// each a single atomic act, so a command that races the attach
+    /// either parks into the set arm takes or serves through the
+    /// builders arm holds; nothing is lost between them.
+    door: Mutex<DoorState>,
 }
 
-impl HostLoop {
-    /// Route one command. The router only routes: lifecycle is the
-    /// host's own module (the v3 ruling — session lifecycle never
-    /// waits on a session); everything else is session-scoped, so
-    /// resolve the address and forward into the session's handler —
-    /// a black box to this loop. The only errors born here are
-    /// routing failures (an unknown session).
-    fn handle(&mut self, command: HostCommand) {
-        match command {
-            HostCommand::Command(SessionCommand::NewSession) => self.new_session(),
-            HostCommand::Command(SessionCommand::OpenSession { id }) => self.open_session(&id),
-            HostCommand::Replay(session) => {
-                if let Some(worker) = lock(&self.workers).get(&session).cloned() {
-                    worker.deliver_replay();
-                }
+struct DoorState {
+    armed: Option<LifecycleCore>,
+    parked: Vec<ParkedLifecycle>,
+}
+
+/// The lifecycle door's data half: what only exists after the boot's
+/// gathering resolved.
+#[derive(Clone)]
+struct LifecycleCore {
+    create: SessionSource,
+    open: OpenSessionSource,
+}
+
+/// One lifecycle command that arrived before the data did.
+enum ParkedLifecycle {
+    NewSession,
+    OpenSession { id: String },
+}
+
+impl Lifecycle {
+    /// Arm the door (the attach act): the builders exist, and
+    /// whatever parked during the gathering serves now, in arrival
+    /// order, behind the boot's announcements. Arming and taking the
+    /// parked set is ONE lock claim — a concurrent arrival either
+    /// parks into the set being taken or serves through the builders
+    /// being armed; there is no window between them.
+    fn arm(&self, data: SessionHostData) {
+        let parked = {
+            let mut door = lock(&self.door);
+            door.armed = Some(LifecycleCore {
+                create: data.create,
+                open: data.open,
+            });
+            std::mem::take(&mut door.parked)
+        };
+        let Some(core) = self.armed() else {
+            return;
+        };
+        self.drain(parked, core);
+    }
+
+    fn armed(&self) -> Option<LifecycleCore> {
+        lock(&self.door).armed.clone()
+    }
+
+    fn drain(&self, parked: Vec<ParkedLifecycle>, core: LifecycleCore) {
+        for parked in parked {
+            // The drain serves with the armed core in hand — the
+            // unarmed case is unrepresentable (the core is a
+            // parameter), so no silent drop exists anywhere.
+            let core = core.clone();
+            match parked {
+                ParkedLifecycle::NewSession => self.serve_new_session(core),
+                ParkedLifecycle::OpenSession { id } => self.serve_open_session(core, &id),
             }
-            HostCommand::Command(command) => {
-                let address = session_address(&command).to_string();
-                // Route-all (owner ruling): the workers own their
-                // sessions; every other address is a child's — the
-                // router delivers, the target consumes. Neither table
-                // knowing the address is the routing failure.
-                if let Some(worker) = lock(&self.workers).get(&address).cloned() {
-                    worker.deliver(command);
-                } else if self.wiring.children.deliver(&address, command) {
-                    // The child's consumption is its own report.
-                } else {
-                    let _ = self.event_tx.send(EventFrame {
-                        stream: None,
-                        event: SessionEvent::error_session(format!(
-                            "unknown session `{address}` — not open in this backend \
-                             (open_session loads it; sessions_available lists the stored ones)"
-                        )),
-                    });
-                }
+        }
+    }
+
+    fn new_session(&self) {
+        if let Some(core) = self.enter(ParkedLifecycle::NewSession) {
+            self.serve_new_session(core);
+        }
+    }
+
+    fn open_session(&self, id: &str) {
+        if let Some(core) = self.enter(ParkedLifecycle::OpenSession { id: id.to_string() }) {
+            self.serve_open_session(core, id);
+        }
+    }
+
+    /// One arrival through the door: park it (the builders are not
+    /// gathered yet) or hand it the armed builders — one lock claim
+    /// decides which.
+    fn enter(&self, parked: ParkedLifecycle) -> Option<LifecycleCore> {
+        let mut door = lock(&self.door);
+        match door.armed.clone() {
+            Some(core) => Some(core),
+            None => {
+                door.parked.push(parked);
+                None
             }
         }
     }
 
     /// `new_session`: announce, then spawn. The creation frame and its
-    /// notes land ahead of anything the worker can emit (one sender,
-    /// sent first).
-    fn new_session(&mut self) {
-        let (session, notes) = match (self.wiring.create)() {
+    /// notes land ahead of anything the worker can emit (emitted
+    /// here, before any command can have reached it).
+    fn serve_new_session(&self, core: LifecycleCore) {
+        let (session, notes) = match (core.create)() {
             Ok(built) => built,
             Err(message) => {
-                let _ = self.event_tx.send(EventFrame {
-                    stream: None,
-                    event: SessionEvent::error_session(format!(
+                self.sink.emit(
+                    None,
+                    SessionEvent::error_session(format!(
                         "could not build a new session: {message}"
                     )),
-                });
+                );
                 return;
             }
         };
         let id = session.id().to_string();
         let stream = StreamId::new(id.clone());
+        let (path, cwd, model, resumed) = (
+            session.wire_path(),
+            session.cwd().display().to_string(),
+            session.selection(),
+            session.resumed(),
+        );
+        let skills = session.skills_available();
+        let (worker, channel, join) = spawn_worker(
+            session,
+            &self.node,
+            self.worker_shutdown.clone(),
+            self.stats.clone(),
+        );
         // One announcement shape for every path (v10): the stamped
         // `session_opened` carries `resumed: false` for a fresh
         // session — the selection rides the frame because nothing
         // else on the wire will say so (the session is empty; no
-        // `model_changed` replays). Selection notes follow on the
-        // same stream, the same order `open_session` uses.
-        let _ = self.event_tx.send(EventFrame {
-            stream: Some(stream.clone()),
-            event: SessionEvent::SessionOpened {
+        // `model_changed` replays). The emission from the session's
+        // channel is what teaches the learning table its route.
+        let opened = NoticeSink::new(&self.node, &channel, stream.clone());
+        announce_session(
+            &opened,
+            SessionEvent::SessionOpened {
                 id: id.clone(),
-                path: session.wire_path(),
-                cwd: session.cwd().display().to_string(),
-                model: session.selection(),
-                resumed: session.resumed(),
+                path,
+                cwd,
+                model,
+                resumed,
                 parent: None,
                 parent_call: None,
             },
-        });
-        for note in notes {
-            let _ = self.event_tx.send(EventFrame {
-                stream: Some(stream.clone()),
-                event: SessionEvent::error_model(note),
-            });
-        }
-        self.add_worker(id, session);
+            notes,
+            skills,
+        );
+        lock(&self.workers).insert(id, worker);
+        lock(&self.joins).push(join);
     }
 
     /// `open_session`: already open means re-replay (idempotent);
     /// otherwise load, surface the notes, spawn, and answer with the
     /// pass — the pass itself is the acknowledgment.
-    fn open_session(&mut self, id: &str) {
+    fn serve_open_session(&self, core: LifecycleCore, id: &str) {
         if let Some(worker) = lock(&self.workers).get(id).cloned() {
             worker.deliver_replay();
             return;
         }
-        let (session, notes) = match (self.wiring.open)(id) {
+        let (session, notes) = match (core.open)(id) {
             Ok(loaded) => loaded,
             Err(message) => {
-                let _ = self.event_tx.send(EventFrame {
-                    stream: None,
-                    event: SessionEvent::error_session(format!(
+                self.sink.emit(
+                    None,
+                    SessionEvent::error_session(format!(
                         "could not open session `{id}`: {message}"
                     )),
-                });
+                );
                 return;
             }
         };
         let stream = StreamId::new(id.to_string());
-        let _ = self.event_tx.send(EventFrame {
-            stream: Some(stream.clone()),
-            event: SessionEvent::SessionOpened {
-                id: id.to_string(),
-                path: session.wire_path(),
-                cwd: session.cwd().display().to_string(),
-                model: session.selection(),
-                resumed: session.resumed(),
-                parent: None,
-                parent_call: None,
-            },
-        });
-        for note in notes {
-            let _ = self.event_tx.send(EventFrame {
-                stream: Some(stream.clone()),
-                event: SessionEvent::error_model(note),
-            });
-        }
-        let worker = self.add_worker(id.to_string(), session);
-        worker.deliver_replay();
-    }
-
-    /// Spawn a session's worker and register it. Returns the routing
-    /// leaves for immediate use.
-    fn add_worker(&mut self, id: String, session: Session) -> Worker {
-        let (worker, join) = spawn_worker(
+        let (path, cwd, model, resumed) = (
+            session.wire_path(),
+            session.cwd().display().to_string(),
+            session.selection(),
+            session.resumed(),
+        );
+        let skills = session.skills_available();
+        let (worker, channel, join) = spawn_worker(
             session,
-            self.event_tx.clone(),
+            &self.node,
             self.worker_shutdown.clone(),
             self.stats.clone(),
         );
-        lock(&self.workers).insert(id, worker.clone());
-        self.joins.push(join);
-        worker
+        let opened = NoticeSink::new(&self.node, &channel, stream);
+        announce_session(
+            &opened,
+            SessionEvent::SessionOpened {
+                id: id.to_string(),
+                path,
+                cwd,
+                model,
+                resumed,
+                parent: None,
+                parent_call: None,
+            },
+            notes,
+            skills,
+        );
+        lock(&self.workers).insert(id.to_string(), worker.clone());
+        lock(&self.joins).push(join);
+        worker.deliver_replay();
+    }
+}
+
+/// The "session became visible" announcement every path emits in
+/// one shape and order (the boot attach, `new_session`,
+/// `open_session`): the stamped `session_opened`, then the
+/// selection's startup notes as `error_model`s, then the session's
+/// own skills catalog — only when discovery found something
+/// (session-level ruling: stamped with the session's stream, so a
+/// session opened from another directory announces its own catalog,
+/// and absence is unambiguous under per-stream folding). One home,
+/// so a fourth path cannot drift.
+fn announce_session(
+    sink: &NoticeSink,
+    opened: SessionEvent,
+    notes: impl IntoIterator<Item = String>,
+    skills: Vec<AvailableSkill>,
+) {
+    sink.emit(opened);
+    for note in notes {
+        sink.emit(SessionEvent::error_model(note));
+    }
+    if !skills.is_empty() {
+        sink.emit(SessionEvent::SkillsAvailable { skills });
     }
 }
 
 /// Spawn one session's resident worker: the classic loop — ownership
 /// never moves (idle is the wait below, running is the pump call),
 /// with the session's id as its stream stamp. Returns the routing
-/// leaves and the task handle.
+/// leaves (the handler surface), the session's channel (the
+/// learning-table entry its emissions teach), and the task handle.
 fn spawn_worker(
     mut session: Session,
-    event_tx: mpsc::UnboundedSender<EventFrame>,
+    node: &Arc<Node>,
     shutdown: CancellationToken,
     stats: Arc<Mutex<HashMap<String, SessionStats>>>,
-) -> (Worker, JoinHandle<()>) {
+) -> (Arc<Worker>, Channel, JoinHandle<()>) {
     let id = session.id().to_string();
     let stream = StreamId::new(id.clone());
     let mailbox = session.mailbox_handle();
     let abort_handle = session.abort_handle();
-    let interaction = InteractionHub::new(event_tx.clone(), stream.clone());
+    let interaction = InteractionHub::new(node.clone(), stream.clone());
     let checkout_slot = Arc::new(Mutex::new(None::<String>));
     let replay_due = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let compact_slot = Arc::new(Mutex::new(None::<Option<String>>));
-    let worker_notices = NoticeSink::new(&event_tx, stream.clone());
     let entry_probe = session.entry_id_probe();
     let model_probe = session.model_probe();
     let model_register = session.model_register();
-    let worker_slot = checkout_slot.clone();
-    let worker_replay_due = replay_due.clone();
-    let worker_compact_slot = compact_slot.clone();
-    let worker_mailbox = mailbox.clone();
-    let task_interaction = interaction.clone();
-    let stats_id = id.clone();
+    // The worker's emission sink attaches after the channel exists (a
+    // sink is the channel it emits from).
+    let notices: Arc<NoticeSlot> = Arc::new(std::sync::OnceLock::new());
+    let worker = Arc::new(Worker {
+        mailbox: mailbox.clone(),
+        abort_handle,
+        notices: notices.clone(),
+        entry_probe,
+        checkout_slot: checkout_slot.clone(),
+        model_register,
+        model_probe,
+        replay_due: replay_due.clone(),
+        compact_slot: compact_slot.clone(),
+    });
+    // The session's channel: session-addressed commands arrive here
+    // (the learning table's entry — taught by the very emissions this
+    // channel makes), and `deliver` is what runs when they do.
+    let delivering = worker.clone();
+    let channel = Channel::local(
+        &id,
+        |_| {},
+        move |command: &SessionCommand| {
+            delivering.deliver(command.clone());
+        },
+    );
+    let sink = NoticeSink::new(node, &channel, stream.clone());
+    let _ = notices.set(sink.clone());
+
+    let worker_slot = checkout_slot;
+    let worker_compact_slot = compact_slot;
+    let worker_replay_due = replay_due;
+    let worker_mailbox = mailbox;
+    let stats_id = id;
+    // The attaches run at spawn, before the task: the sink exists (it
+    // is the channel above), and delivery is synchronous — a command
+    // can arrive (and want to emit) before the task has ever been
+    // polled. Attach-once, deterministic, no scheduler race.
+    session.attach_interaction(interaction);
+    session.attach_mailbox_notices(sink.clone());
+    session.attach_persist_notices(sink.clone());
+    session.attach_event_tap(sink.clone());
     let join = tokio::spawn(async move {
-        // The hub and the mailbox's submit-time notices both reach the
-        // event channel, so both exist only here - attach them before
-        // the first pump can run.
-        session.attach_interaction(task_interaction);
-        session.attach_mailbox_notices(&event_tx, stream.clone());
-        session.attach_persist_notices(&event_tx, stream.clone());
-        session.attach_event_tap(&event_tx);
         // The resident worker. Ownership never moves: idle is the wait
         // below, running is the pump call - two positions of one loop,
         // not two tasks. One wake (the work signal) serves every
@@ -910,10 +1238,9 @@ fn spawn_worker(
             // passes announce it live.)
             serve_parked(
                 &mut session,
-                &event_tx,
-                &stream,
-                &replay_due,
-                &checkout_slot,
+                &sink,
+                &worker_replay_due,
+                &worker_slot,
                 &worker_compact_slot,
             )
             .await;
@@ -927,10 +1254,7 @@ fn spawn_worker(
                         // The receiver is gone only when the
                         // frontend is; there is no one left to
                         // tell.
-                        let _ = event_tx.send(EventFrame {
-                            stream: Some(stream.clone()),
-                            event,
-                        });
+                        sink.emit(event);
                     })
                     .await;
                 continue;
@@ -943,38 +1267,31 @@ fn spawn_worker(
             tokio::select! {
                 biased;
                 _ = shutdown.cancelled() => {
-                    // Close is not a barrier: pushes are synchronous,
-                    // so anything sent before closing is already
-                    // queued - run it before winding down. (Pushes
-                    // that race the wind-down simply run too; nothing
-                    // is lost.)
+                    // Close is not a barrier: delivery is
+                    // synchronous, so anything submitted before the
+                    // close is already queued - run it before winding
+                    // down. (Submissions that race the wind-down
+                    // simply run too; nothing is lost.)
                     if worker_mailbox.has_queued() {
                         continue;
                     }
                     // Serve what the handler parked ahead of the
                     // close (the order's one home: `serve_parked`),
                     // then wind down. (Register writes are already
-                    // durable — receive wrote them.)
+                    // durable — receive wrote them.) The death door
+                    // cleared any parked intent before pulling this
+                    // token (abort first, wind down second), so what
+                    // runs here is the polite close's residue only.
                     serve_parked(
                         &mut session,
-                        &event_tx,
-                        &stream,
-                        &replay_due,
-                        &checkout_slot,
+                        &sink,
+                        &worker_replay_due,
+                        &worker_slot,
                         &worker_compact_slot,
                     )
                     .await;
                     // The clean-exit flush attempt (flag 8): one more
                     // drain before the stream ends.
-                    session.flush_log();
-                    break;
-                }
-                // The frontend is gone; the death watcher has already
-                // aborted any in-flight run, so the pump has returned.
-                // The process may outlive this wind-down (an
-                // in-process consumer dropped the host), so the same
-                // clean-exit drain applies.
-                _ = event_tx.closed() => {
                     session.flush_log();
                     break;
                 }
@@ -985,24 +1302,8 @@ fn spawn_worker(
             }
         }
         lock(&stats).insert(stats_id, session.stats());
-        // The worker's `event_tx` drops here; the stream ends when the
-        // host's does too.
     });
-    (
-        Worker {
-            mailbox,
-            abort_handle,
-            interaction,
-            notices: worker_notices,
-            entry_probe,
-            checkout_slot: worker_slot,
-            model_register,
-            model_probe,
-            replay_due: worker_replay_due,
-            compact_slot,
-        },
-        join,
-    )
+    (worker, channel, join)
 }
 
 /// Serve the parked conversation intent in the ruled order: a parked
@@ -1014,17 +1315,16 @@ fn spawn_worker(
 /// list exactly once.
 async fn serve_parked(
     session: &mut Session,
-    event_tx: &mpsc::UnboundedSender<EventFrame>,
-    stream: &StreamId,
+    sink: &NoticeSink,
     replay_due: &std::sync::atomic::AtomicBool,
     checkout_slot: &Mutex<Option<String>>,
     compact_slot: &Mutex<Option<Option<String>>>,
 ) {
     if replay_due.swap(false, std::sync::atomic::Ordering::Acquire) {
-        emit_replay(session, event_tx, stream);
+        emit_replay(session, sink);
     }
     if let Some(entry_id) = lock(checkout_slot).take() {
-        execute_checkout(session, event_tx, stream, entry_id);
+        execute_checkout(session, sink, entry_id);
     }
     // The guard drops before the await (the lock contract — no
     // guard across an await).
@@ -1040,32 +1340,26 @@ async fn serve_parked(
 /// apply - is the command's error event and a no-op (verification
 /// caught the common failure at receive; these are the environmental
 /// ones: persist trouble, the chain's model gone from config).
-fn execute_checkout(
-    session: &mut Session,
-    event_tx: &mpsc::UnboundedSender<EventFrame>,
-    stream: &StreamId,
-    entry_id: String,
-) {
-    let res = session.rewind_to_entry(&entry_id);
-    if let Err(error) = res {
-        let _ = event_tx.send(EventFrame {
-            stream: Some(stream.clone()),
-            event: SessionEvent::error_checkout(error.to_string()),
-        });
-        return;
-    }
-    let _ = event_tx.send(EventFrame {
-        stream: Some(stream.clone()),
-        event: SessionEvent::CheckedOut {
-            entry_id,
-            // Full re-render (the suffix mode's reserved seam).
-            base_id: None,
-        },
+fn execute_checkout(session: &mut Session, sink: &NoticeSink, entry_id: String) {
+    let summary = match session.rewind_to_entry(&entry_id) {
+        Ok(summary) => summary,
+        Err(error) => {
+            sink.emit(SessionEvent::error_checkout(error.to_string()));
+            return;
+        }
+    };
+    sink.emit(SessionEvent::CheckedOut {
+        // The landing, not the ask: a mid-roundtrip target resolves
+        // forward to the batch's last tool result (FRONTEND.md §7), so
+        // the event names where the chain actually ends.
+        entry_id: summary.to_entry.clone(),
+        // Full re-render (the suffix mode's reserved seam).
+        base_id: None,
     });
-    emit_replay(session, event_tx, stream);
+    emit_replay(session, sink);
 }
 
-/// The replay pass (PROTOCOL.md v2): the resident chain projected
+/// The replay pass (FRONTEND.md §7): the resident chain projected
 /// into finalized live events, bracketed. One emission path for its
 /// askers — the transport's replay request, checkout's re-render, and
 /// the open_session boot pass — each led by the register announcement
@@ -1075,28 +1369,19 @@ fn execute_checkout(
 /// by construction — a pass never moves the register, so the value
 /// repeats; replayed history itself never carries `model_changed` (the
 /// register ruling: state is announced live, not reconstructed).
-fn emit_replay(session: &Session, event_tx: &mpsc::UnboundedSender<EventFrame>, stream: &StreamId) {
+fn emit_replay(session: &Session, sink: &NoticeSink) {
     let selection = session.selection();
-    let _ = event_tx.send(EventFrame {
-        stream: Some(stream.clone()),
-        event: SessionEvent::model_changed(&selection, session.model_facts(&selection)),
-    });
+    sink.emit(SessionEvent::model_changed(
+        &selection,
+        session.model_facts(&selection),
+    ));
     let events = session.replay_events();
     let total = events.len() as u64;
-    let _ = event_tx.send(EventFrame {
-        stream: Some(stream.clone()),
-        event: SessionEvent::ReplayStarted { total },
-    });
+    sink.emit(SessionEvent::ReplayBegin { total });
     for event in events {
-        let _ = event_tx.send(EventFrame {
-            stream: Some(stream.clone()),
-            event,
-        });
+        sink.emit(event);
     }
-    let _ = event_tx.send(EventFrame {
-        stream: Some(stream.clone()),
-        event: SessionEvent::ReplayDone,
-    });
+    sink.emit(SessionEvent::ReplayEnd);
 }
 
 #[cfg(test)]

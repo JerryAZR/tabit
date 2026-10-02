@@ -12,17 +12,17 @@
 //! model). Falls back to `TabitConfig::load_default()` when no path is
 //! given.
 
-use rig_core::client::CompletionClient;
-use rig_core::completion::{CompletionModel, CompletionResponse};
-use rig_core::providers::{anthropic, openai};
 use tabit_config::{AuthConfig, TabitConfig, WireApi};
+use tabit_providers::client::CompletionClient;
+use tabit_providers::completion::{CompletionModel, CompletionResponse};
+use tabit_providers::providers::{anthropic, openai};
 
 fn show(tag: &str, response: &CompletionResponse) {
     let text: String = response
         .choice
         .iter()
         .filter_map(|c| match c {
-            rig_core::message::AssistantContent::Text(t) => Some(t.text.as_str()),
+            tabit_providers::message::AssistantContent::Text(t) => Some(t.text.as_str()),
             _ => None,
         })
         .collect();

@@ -5,10 +5,10 @@
 resolver = "3"
 members = ["crates/*"]
 default-members = [
-    "crates/rig-core",
-    "crates/rig-agent",
-    "crates/rig-derive",
-    "crates/rig",
+    "crates/tabit-providers",
+    "crates/tabit-engine",
+    "crates/tabit-derive",
+    "crates/tabit-rig",
     "crates/tabit-config",
     "crates/tabit-ext",
     "crates/tabit-ext-install",
@@ -17,15 +17,19 @@ default-members = [
     "crates/tabit-protocol",
     "crates/tabit-session",
     "crates/tabit-gate",
-    "crates/tabit-gui",
     "crates/tabit-tools",
+    "crates/tabit-wire",
+    "crates/tabit-app",
     "crates/tabit-core",
 ]
 exclude = []
 
 [workspace.package]
-version = "0.41.0"
+version = "0.1.0"
 edition = "2024"
+license = "MIT"
+repository = "https://github.com/JerryAZR/tabit"
+homepage = "https://github.com/JerryAZR/tabit"
 
 [workspace.lints.clippy]
 dbg_macro = "forbid"
@@ -77,11 +81,10 @@ httpmock = "0.8.3"
 indexmap = "2.14.0"
 mime = "0.3.17"
 mime_guess = "2.0.5"
-ordered-float = "5.0.0"
+petname = { version = "3.2", default-features = false, features = ["default-words", "default-rng"] }
 pin-project-lite = "0.2.16"
 proc-macro2 = "1.0.95"
 quote = "1.0.40"
-rayon = "1.10.0"
 reqwest = { version = "0.13", default-features = false }
 reqwest-middleware = { version = "0.5.2", default-features = false }
 reqwest-retry = "0.9"

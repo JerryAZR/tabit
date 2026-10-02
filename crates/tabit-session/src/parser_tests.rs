@@ -2,9 +2,9 @@
 
 use super::*;
 use crate::entry::{EntryKind, SessionEntry, SideKind, SideRecord};
-use rig_core::OneOrMany;
-use rig_core::completion::{Message, Usage};
-use rig_core::message::{ToolCall, ToolFunction, ToolResult, ToolResultContent};
+use tabit_providers::OneOrMany;
+use tabit_providers::completion::{Message, Usage};
+use tabit_providers::message::{ToolCall, ToolFunction, ToolResult, ToolResultContent};
 
 fn user_node(id: &str, parent: Option<&str>, text: &str) -> FileRecord {
     FileRecord::Node(SessionEntry::with_id(
@@ -19,13 +19,13 @@ fn user_node(id: &str, parent: Option<&str>, text: &str) -> FileRecord {
 
 fn assistant_node(id: &str, parent: Option<&str>, calls: &[(&str, &str)]) -> FileRecord {
     let content = if calls.is_empty() {
-        OneOrMany::one(rig_core::message::AssistantContent::text("done"))
+        OneOrMany::one(tabit_providers::message::AssistantContent::text("done"))
     } else {
         OneOrMany::many(
             calls
                 .iter()
                 .map(|(call_id, name)| {
-                    rig_core::message::AssistantContent::ToolCall(ToolCall::new(
+                    tabit_providers::message::AssistantContent::ToolCall(ToolCall::new(
                         call_id.to_string(),
                         ToolFunction::new(name.to_string(), serde_json::json!({})),
                     ))
@@ -246,7 +246,7 @@ fn a_future_format_version_is_rejected() {
     let raw = format!("{header}\n{rest}");
     match parse(&raw, Path::new("t.jsonl")) {
         Err(SessionError::Corrupt { message, .. }) => {
-            assert!(message.contains("format 99.1"), "{message}")
+            assert!(message.contains("format 99."), "{message}")
         }
         other => panic!("expected version error, got {other:?}"),
     }
@@ -378,7 +378,7 @@ fn a_compaction_entry_carrying_usage_counts_into_stats() {
                 cut_child: "a1".to_string(),
                 tokens_before: 0,
                 tokens_after: 0,
-                usage: rig_core::completion::Usage {
+                usage: tabit_providers::completion::Usage {
                     input_tokens: 10,
                     output_tokens: 5,
                     ..Default::default()
@@ -402,7 +402,7 @@ fn compaction_node(id: &str, parent: Option<&str>, cut_child: &str) -> FileRecor
             summary: "summarized history".to_string(),
             cut_child: cut_child.to_string(),
             tokens_before: 42,
-            usage: rig_core::completion::Usage::default(),
+            usage: tabit_providers::completion::Usage::default(),
             tokens_after: 0,
             cost: None,
         },

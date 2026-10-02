@@ -1,7 +1,7 @@
 # ENGINE.md
 
 The design record for the agent engine — the backend counterpart to
-PROTOCOL.md's frontend contract. Two layers, kept strictly separate:
+FRONTEND.md's contract. Two layers, kept strictly separate:
 
 1. the **outer loop** — run lifecycle: when a run starts, what it is
    entered with, what it emits, how it is preempted — with the inner
@@ -16,7 +16,7 @@ this document; changes to the loop change this document.
 first and amend it before touching code. New flow behavior gets new
 phases (or new edges) — never conditionals grown inside existing
 phases, and never control flow outside the loop.
-(PROTOCOL.md keeps the frontend/event view of the same loop; the
+(FRONTEND.md keeps the frontend/event view of the same loop; the
 session actor implements the outer layer.)
 
 ## Layer 1 — the outer loop (the inner loop is a black box)
@@ -159,8 +159,9 @@ command path that serves this (owner-ruled through design review):
 Reads never hold writes: messages keep flowing while a pass is
 parked.
 
-**The compaction doors (ruled 2026-09; the policy record is ROADMAP
-item 6 — this section records only the flow facts).** Compaction is
+**The compaction doors (ruled 2026-09; the policy record is ROADMAP's
+design record: compaction — final form — and this section records only the
+flow facts).** Compaction is
 its own system, a black box in tabit-session with three doors; the
 engine has zero compaction knowledge.
 
@@ -369,7 +370,7 @@ bound unattended loops.
 **The classification is one exposed path (ruled 2026-09).** The
 response questions — does it carry tool calls? broken ones? stopped at
 the length cap? — are answered through
-`rig_agent::agent::turn` ([`AttemptOutcome`]), which drives the same
+`tabit_engine::agent::turn` ([`AttemptOutcome`]), which drives the same
 sans-io assembler the loop's MODEL phase uses; the loop's own
 classification consumes the same predicates (`carries_tools`, the
 malformed-call defect, the finish reason). Consumers outside the loop
@@ -498,7 +499,7 @@ Recorded where the code had to pick; revisit on review:
   the steer opens the next run at the work signal (ruled 2026-08: one
   less thing to check, identical behavior).
 - **Empty finals fold nothing and record nothing** — one decision
-  site (the loop), which closes PROTOCOL.md flag 29 by deletion.
+  site (the loop).
 - **Usage facts ride the commits** (the 2026-08 deferral closed by the
   2026-09 usage discussion): every assistant commit — the FINAL fold
   and the roundtrip fold — carries the turn's provider-reported usage
@@ -593,10 +594,13 @@ receiver: log and drop — total semantics, like abort-while-idle).
 Two sites share the one primitive: the gate (a permission hook
 constructed with the hub handle — deny maps to `Skip`) and the body
 (`ToolContext` capability). Questions die with their chains — drop
-is the cancellation — and run terminals clear the pending map; the
-frontend closes cards on run terminals (no close event exists or is
-needed: every unanswered question's death coincides with a run
-terminal, structurally). Interaction requests never persist or
+is the cancellation — and run terminals clear the pending map. Every
+settle site (the first answer — racing duplicates find a gone id —
+the terminal retraction, the dead-channel dismissal at registration)
+emits `interaction_settled { id }` fire-and-forget: one frontend
+could close cards on terminals alone, but more channels than one can
+answer means a card can die long before any terminal, and the other
+holders must learn it. Interaction requests never persist or
 replay; the durable record is the tool result (the answer or denial
 the model saw).
 

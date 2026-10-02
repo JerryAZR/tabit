@@ -8,11 +8,11 @@ use crate::model::validate_selection;
 use crate::registry::ModelRegistry;
 use crate::store::SessionStore;
 use crate::writer::SessionWriter;
-use rig_agent::agent::ModelHandle;
-use rig_agent::tool::DynamicTool;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tabit_config::{AuthConfig, TabitConfig};
+use tabit_engine::agent::ModelHandle;
+use tabit_engine::tool::DynamicTool;
 use tabit_protocol::ModelSelection;
 
 /// Builds a [`Session`], either fresh or resumed from a log.
@@ -24,7 +24,7 @@ pub struct SessionBuilder {
     pub(super) tools: Vec<DynamicTool>,
     pub(super) max_turns: usize,
     pub(super) model_factory: ModelFactory,
-    pub(super) run_hooks: Option<rig_agent::agent::HookStack>,
+    pub(super) run_hooks: Option<tabit_engine::agent::HookStack>,
     pub(super) subagent_parts: Option<Arc<crate::subagent::SubagentParts>>,
     pub(super) skills: Option<Arc<crate::skills::Skills>>,
 }
@@ -54,7 +54,7 @@ impl SessionBuilder {
     /// single-session callers. Hosts serving many sessions pass one
     /// shared factory ([`ModelRegistry::factory`]) instead: providers
     /// are user config, process-wide, and so are their connection
-    /// pools (owner ruling, PROTOCOL.md v3).
+    /// pools (owner ruling: providers are user config).
     pub fn new(
         store: SessionStore,
         config: Arc<TabitConfig>,
@@ -116,7 +116,7 @@ impl SessionBuilder {
     /// dev-time/extension policy — the permission gate). The stack is
     /// a value: build it once, closures capture their own
     /// session-scoped state, and it clones into each run.
-    pub fn hooks(mut self, stack: rig_agent::agent::HookStack) -> Self {
+    pub fn hooks(mut self, stack: tabit_engine::agent::HookStack) -> Self {
         self.run_hooks = Some(stack);
         self
     }
@@ -136,12 +136,8 @@ impl SessionBuilder {
     /// the opening model selection recorded right after the header)
     /// materializes at the first user message, so a session that never
     /// runs leaves nothing behind — not a header-only orphan.
-    /// Create a fresh session. Nothing touches the disk: the file (with
-    /// the opening model selection recorded right after the header)
-    /// materializes at the first user message, so a session that never
-    /// runs leaves nothing behind — not a header-only orphan.
     pub fn create(self, cwd: &str) -> Result<Session, SessionError> {
-        let writer = self.store.create(cwd);
+        let writer = self.store.create();
         let selection = self.selection.clone();
         let id = writer.session_id().to_string();
         let path = writer.path().to_path_buf();
@@ -185,14 +181,17 @@ impl SessionBuilder {
     /// Resume the session stored at `path`: parse it once (the tree, the
     /// head, the selection register, the context, the cumulative stats),
     /// adopt the result as the resident state, and continue with the
-    /// builder's selection. Callers resolve that selection through
-    /// [`ModelRegistry::default_selection`] (explicit choice > the log's
-    /// last model > configured preference); when it differs from the
-    /// file's last recorded model the switch is recorded as a
-    /// `model_change` side record. The register is file-scoped (the
+    /// builder's selection. The session's world is `cwd`, the caller's —
+    /// the process cwd at assembly (owner ruling 2026-09-27: the header
+    /// records no cwd; a resumed session adopts the caller's world, so a
+    /// moved project resumes where it now lives). Callers resolve the
+    /// selection through [`ModelRegistry::default_selection`] (explicit
+    /// choice > the log's last model > configured preference); when it
+    /// differs from the file's last recorded model the switch is recorded
+    /// as a `model_change` side record. The register is file-scoped (the
     /// owner ruling): the last model_change in append order wins,
     /// whichever branch the conversation is on.
-    pub fn resume(self, path: &Path) -> Result<(Session, ResumeReport), SessionError> {
+    pub fn resume(self, path: &Path, cwd: &str) -> Result<(Session, ResumeReport), SessionError> {
         let parsed = self.store.open_path(path)?;
         let report = ResumeReport {
             resumed_model: parsed.register.clone(),
@@ -201,7 +200,7 @@ impl SessionBuilder {
         let id = parsed.header.id.clone();
         let file_path = parsed.path.clone();
         let writer = SessionWriter::append_to(&parsed.path, id.clone(), parsed.file_len)?;
-        let cwd = PathBuf::from(parsed.header.cwd.clone());
+        let cwd = PathBuf::from(cwd);
         let mut session = Session::assemble(
             self,
             std::sync::Arc::new(std::sync::Mutex::new(writer)),

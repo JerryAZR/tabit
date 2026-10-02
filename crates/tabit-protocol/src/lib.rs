@@ -11,8 +11,7 @@
     )
 )]
 //! The tabit frontend protocol: the one vocabulary every frontend and
-//! transport shares (FRONTEND.md is the contract; PROTOCOL.md the
-//! design record).
+//! transport shares (FRONTEND.md is the contract).
 //!
 //! Commands are fire-and-forget with total semantics — outcomes arrive
 //! as events, never as responses. Events are stamped with the stream
@@ -22,25 +21,28 @@
 //! churn the wire silently (the reason this vocabulary left
 //! tabit-session).
 //!
-//! Consumers: tabit-session (the backend mints and emits), the `tabit`
-//! binary's stdio bridge (serialization edge), and frontends (the egui
-//! GUI and any future transport client) — all against these types, no
+//! Consumers: tabit-session (the backend mints and emits), the
+//! backend's JSON stdio edge (serialization), and frontends (transport
+//! clients over the frozen wire) — all against these types, no
 //! codegen, no persistence internals.
 
 mod events;
 mod model;
+pub mod points;
 mod protocol;
 pub mod templates;
 mod usage;
 
+pub use events::tags;
 pub use events::{
     AvailableExtension, AvailableExtensionTool, AvailableSession, AvailableSkill, DiscardedMessage,
     ErrorKind, ExtensionConflict, ExtensionConflictKind, ExtensionsCatalog, RunFailedKind,
     SessionEvent, ToolResultStatus,
 };
 pub use model::{Cost, ModelFacts, ModelSelection};
+pub use protocol::command_tags;
 pub use protocol::{
-    ClientFrame, EventFrame, PROTOCOL_VERSION, ServerControlFrame, ServerFrame, SessionCommand,
-    StreamId, to_wire_line,
+    EventFrame, PROTOCOL_VERSION, ServerControlFrame, ServerFrame, SessionCommand, StreamId,
+    to_wire_line,
 };
 pub use usage::Usage;

@@ -1,0 +1,11 @@
+[package]
+name = "tabit-derive-facade-renamed-fixture"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+rig_facade = { package = "tabit-rig", path = "../../../../tabit-rig", default-features = false, features = ["agent"] }
+rig_macros = { package = "tabit-derive", path = "../../.." }

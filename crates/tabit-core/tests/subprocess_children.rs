@@ -23,15 +23,15 @@
 
 use httpmock::MockServer;
 use httpmock::prelude::*;
-use rig_agent::agent::ModelHandle;
-use rig_agent::test_utils::{MockCompletionModel, MockStreamEvent};
 use serde_json::json;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
+use tabit_engine::agent::ModelHandle;
+use tabit_engine::test_utils::{MockCompletionModel, MockStreamEvent};
 use tabit_protocol::SessionEvent;
 use tabit_session::{
-    ChildRouter, ModelSelection, Session, SessionBuilder, SessionHost, SessionHostWiring,
-    SessionStore, subagent,
+    ModelSelection, Node, Session, SessionBuilder, SessionHost, SessionHostWiring, SessionStore,
+    subagent,
 };
 
 /// Env mutation is process-wide — serialize the tests that point
@@ -109,7 +109,7 @@ fn stage_child_config(tag: &str, server: &MockServer) -> PathBuf {
 fn subprocess_parent(
     store: &SessionStore,
     cwd: &Path,
-    router: Arc<ChildRouter>,
+    node: Arc<Node>,
     task: &str,
     overrides: bool,
 ) -> Session {
@@ -130,9 +130,10 @@ id = "m"
     );
     let auth = Arc::new(tabit_config::AuthConfig::default());
     let parts = Arc::new(subagent::SubagentParts {
-        tools: Vec::new(),
+        tool_allow: None,
+        tool_deny: Vec::new(),
         max_turns: 8,
-        router,
+        node,
         exe: PathBuf::from(env!("CARGO_BIN_EXE_tabit-core")),
         // Children boot their own hosts — pin an empty root so the
         // suite stays hermetic against the machine's real installs.
@@ -176,19 +177,20 @@ id = "m"
         .expect("parent session")
 }
 
-/// A host over a plain store, sharing the router with the parts.
-fn host(store: &SessionStore, router: Arc<ChildRouter>, session: Session) -> SessionHost {
+/// A host over a plain store, sharing the node with the parts.
+fn host(store: &SessionStore, node: Arc<Node>, session: Session) -> SessionHost {
     let wiring = SessionHostWiring {
-        children: router,
+        node,
         boot_parent: None,
         boot_parent_call: None,
-        skills: Vec::new(),
-        extensions: Default::default(),
         store: store.clone(),
+    };
+    let data = tabit_session::SessionHostData {
         create: Arc::new(|| Err("not driven".to_string())),
         open: Arc::new(|_| Err("not driven".to_string())),
+        extensions: Default::default(),
     };
-    SessionHost::spawn(session, Vec::new(), wiring)
+    SessionHost::spawn(session, Vec::new(), wiring, data)
 }
 
 #[tokio::test]
@@ -216,9 +218,9 @@ async fn a_subprocess_child_announces_streams_and_answers_over_the_real_binary()
 
     let parent_cwd = test_dir("happy-parent");
     let store = SessionStore::new(test_dir("happy-store"));
-    let router = ChildRouter::shared();
-    let parent = subprocess_parent(&store, &parent_cwd, router.clone(), "say the words", true);
-    let mut handle = host(&store, router, parent);
+    let node = Arc::new(Node::new("test"));
+    let parent = subprocess_parent(&store, &parent_cwd, node.clone(), "say the words", true);
+    let mut handle = host(&store, node, parent);
     let parent_id = handle.info().session_id.clone();
 
     handle.message(&parent_id, "go");
@@ -372,15 +374,15 @@ async fn aborting_the_parent_returns_promptly_and_the_child_flushes_its_terminal
 
     let parent_cwd = test_dir("abort-parent");
     let store = SessionStore::new(test_dir("abort-store"));
-    let router = ChildRouter::shared();
+    let node = Arc::new(Node::new("test"));
     let parent = subprocess_parent(
         &store,
         &parent_cwd,
-        router.clone(),
+        node.clone(),
         "park on the model",
         false,
     );
-    let mut handle = host(&store, router, parent);
+    let mut handle = host(&store, node, parent);
     let parent_id = handle.info().session_id.clone();
 
     handle.message(&parent_id, "go");
@@ -506,16 +508,17 @@ async fn a_preamble_override_replaces_the_preamble_and_appends_the_context() {
     let child_cwd = test_dir("preamble-child");
     let ctx = subagent::SpawnContext::new(
         Arc::new(subagent::SubagentParts {
-            tools: Vec::new(),
+            tool_allow: None,
+            tool_deny: Vec::new(),
             max_turns: 8,
-            router: ChildRouter::shared(),
+            node: Arc::new(Node::new("test")),
             exe: PathBuf::from(env!("CARGO_BIN_EXE_tabit-core")),
             extensions: child_cwd.join(".tabit/no-extensions"),
         }),
+        Arc::new(tabit_session::subagent_pool::SubagentPool::new()),
         "preamble-test-parent".to_string(),
         ModelSelection::new("p", "m"),
         child_cwd.clone(),
-        None,
     );
     let mut child = ctx
         .spawn_subprocess()
@@ -533,7 +536,7 @@ async fn a_preamble_override_replaces_the_preamble_and_appends_the_context() {
     let summary = ctx
         .drive_subprocess(
             &mut child,
-            rig_agent::completion::Message::user("report"),
+            tabit_engine::completion::Message::user("report"),
             None,
         )
         .await;
@@ -558,6 +561,101 @@ async fn a_preamble_override_replaces_the_preamble_and_appends_the_context() {
         default_mock.calls(),
         0,
         "the default prompt was replaced, not extended"
+    );
+
+    #[allow(unsafe_code, clippy::missing_safety_doc)]
+    unsafe {
+        std::env::remove_var("TABIT_CONFIG");
+    }
+}
+
+/// The tool policy crossing (owner ruling 2026-09-27): the parent
+/// forwards lists, never tools — the spawn preset crosses the
+/// assembly's deny-list (extended with `subagent`/`followup`, the
+/// recursion guard) as `--without`, and the child filters its own
+/// toolset in its own assembly. The mock is the assertion: it only
+/// answers a request still carrying `read` but neither `bash`
+/// (denied by the parent) nor `subagent`/`followup` (denied by the
+/// preset) — a leak matches only the catch-all and the test fails.
+#[tokio::test]
+async fn the_forwarded_blacklist_shapes_the_childs_toolset() {
+    let _guard = env_lock().lock().await;
+    let server = MockServer::start();
+    let filtered = server.mock(|when, then| {
+        when.method(POST)
+            .path("/v1/chat/completions")
+            .body_includes("\"name\":\"read\"")
+            .body_excludes("\"name\":\"bash\"")
+            .body_excludes("\"name\":\"subagent\"")
+            .body_excludes("\"name\":\"followup\"");
+        then.status(200)
+            .header("content-type", "text/event-stream")
+            .body(sse_answer("filtered"));
+    });
+    let catch_all = server.mock(|when, then| {
+        when.method(POST).path("/v1/chat/completions");
+        then.status(200)
+            .header("content-type", "text/event-stream")
+            .body(sse_answer("leaked"));
+    });
+    let config_path = stage_child_config("tool-deny", &server);
+    #[allow(unsafe_code, clippy::missing_safety_doc)]
+    unsafe {
+        std::env::set_var("TABIT_CONFIG", &config_path);
+    }
+
+    let child_cwd = test_dir("tool-deny-child");
+    let ctx = subagent::SpawnContext::new(
+        Arc::new(subagent::SubagentParts {
+            tool_allow: None,
+            tool_deny: vec!["bash".to_string()],
+            max_turns: 8,
+            node: Arc::new(Node::new("test")),
+            exe: PathBuf::from(env!("CARGO_BIN_EXE_tabit-core")),
+            extensions: child_cwd.join(".tabit/no-extensions"),
+        }),
+        Arc::new(tabit_session::subagent_pool::SubagentPool::new()),
+        "tool-deny-test-parent".to_string(),
+        ModelSelection::new("p", "m"),
+        child_cwd.clone(),
+    );
+    let mut child = ctx
+        .spawn_subprocess()
+        .cwd(child_cwd.clone())
+        .model(ModelSelection::new("p", "m"))
+        .max_turns(8)
+        .ephemeral(true)
+        .spawn()
+        .await
+        .expect("the child spawns");
+    let summary = ctx
+        .drive_subprocess(
+            &mut child,
+            tabit_engine::completion::Message::user("report"),
+            None,
+        )
+        .await;
+    child.wait_exit().await;
+
+    assert_eq!(
+        summary.outcome,
+        tabit_session::RunOutcome::Completed,
+        "the child completed ({:?})",
+        summary.output
+    );
+    assert_eq!(
+        summary.output, "filtered",
+        "the child's request matched the filtered-toolset mock"
+    );
+    assert_eq!(
+        filtered.calls(),
+        1,
+        "exactly one request, its toolset denied-shaped"
+    );
+    assert_eq!(
+        catch_all.calls(),
+        0,
+        "no request carried the denied or delegation tools"
     );
 
     #[allow(unsafe_code, clippy::missing_safety_doc)]
@@ -669,7 +767,7 @@ async fn a_subprocess_child_boots_its_own_extension_host_and_serves_its_tools() 
 
     let parent_cwd = test_dir("child-ext-parent");
     let store = SessionStore::new(test_dir("child-ext-store"));
-    let router = ChildRouter::shared();
+    let node = Arc::new(Node::new("test"));
     let config = Arc::new(
         tabit_config::TabitConfig::from_toml_str(
             r#"
@@ -687,9 +785,10 @@ id = "m"
     );
     let auth = Arc::new(tabit_config::AuthConfig::default());
     let parts = Arc::new(subagent::SubagentParts {
-        tools: Vec::new(),
+        tool_allow: None,
+        tool_deny: Vec::new(),
         max_turns: 8,
-        router: router.clone(),
+        node: node.clone(),
         exe: PathBuf::from(env!("CARGO_BIN_EXE_tabit-core")),
         extensions: ext_root.clone(),
     });
@@ -720,7 +819,7 @@ id = "m"
         .dynamic_tool(subagent::subagent_tool())
         .create(&parent_cwd.display().to_string())
         .expect("parent session");
-    let mut handle = host(&store, router, parent);
+    let mut handle = host(&store, node.clone(), parent);
     let parent_id = handle.info().session_id.clone();
     handle.message(&parent_id, "go");
 
@@ -764,16 +863,17 @@ id = "m"
     // plain-answer arm serves it.
     let deny_ctx = subagent::SpawnContext::new(
         Arc::new(subagent::SubagentParts {
-            tools: Vec::new(),
+            tool_allow: None,
+            tool_deny: Vec::new(),
             max_turns: 8,
-            router: ChildRouter::shared(),
+            node: Arc::new(Node::new("test")),
             exe: PathBuf::from(env!("CARGO_BIN_EXE_tabit-core")),
             extensions: ext_root,
         }),
+        Arc::new(tabit_session::subagent_pool::SubagentPool::new()),
         parent_id.clone(),
         ModelSelection::new("p", "m"),
         parent_cwd.clone(),
-        None,
     );
     let mut denied = deny_ctx
         .spawn_subprocess()
@@ -788,7 +888,7 @@ id = "m"
     let denied_summary = deny_ctx
         .drive_subprocess(
             &mut denied,
-            rig_agent::completion::Message::user("denied-task-8d21"),
+            tabit_engine::completion::Message::user("denied-task-8d21"),
             None,
         )
         .await;
@@ -804,6 +904,458 @@ id = "m"
         "the denied child's request carried no echo tool to call"
     );
 
+    #[allow(unsafe_code, clippy::missing_safety_doc)]
+    unsafe {
+        std::env::remove_var("TABIT_CONFIG");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The follow-up surface (owner ruling 2026-09-26): completed subagents
+// park in the session's pool under friendly ids, the `followup` tool
+// addresses them, and the pool ages them out at the parent's turn
+// boundary. Both tests ride the real binary end to end.
+// ---------------------------------------------------------------------------
+
+/// One scripted parent turn: plain text (a text turn is terminal —
+/// each such turn is its own run).
+fn text_turn(text: &str) -> Vec<MockStreamEvent> {
+    vec![
+        MockStreamEvent::text(text.to_string()),
+        MockStreamEvent::final_response_with_default_usage(),
+    ]
+}
+
+/// One scripted parent turn that calls one tool.
+fn tool_turn(id: &str, name: &str, arguments: serde_json::Value) -> Vec<MockStreamEvent> {
+    vec![
+        MockStreamEvent::ToolCall {
+            id: id.to_string(),
+            name: name.to_string(),
+            arguments,
+            call_id: None,
+        },
+        MockStreamEvent::final_response_with_default_usage(),
+    ]
+}
+
+/// A parent session whose scripted model is held OUTSIDE the factory
+/// (clones share state): later runs' turns are pushed at runtime —
+/// `push_stream_turn` — so a script can address runtime-minted ids.
+/// The parent mounts both subagent tools; its own provider is offline
+/// (the factory is the script; the child's is the mock server).
+fn pooled_parent(
+    store: &SessionStore,
+    cwd: &Path,
+    node: Arc<Node>,
+    first_turns: Vec<Vec<MockStreamEvent>>,
+) -> (Session, tabit_engine::test_utils::MockCompletionModel) {
+    let config = Arc::new(
+        tabit_config::TabitConfig::from_toml_str(
+            r#"
+[providers.p]
+base_url = "http://127.0.0.1:1/v1"
+api = "openai-completions"
+keyless = true
+
+[[providers.p.models]]
+id = "m"
+"#,
+            Path::new("providers.toml"),
+        )
+        .expect("parent config"),
+    );
+    let auth = Arc::new(tabit_config::AuthConfig::default());
+    let parts = Arc::new(subagent::SubagentParts {
+        tool_allow: None,
+        tool_deny: Vec::new(),
+        max_turns: 8,
+        node,
+        exe: PathBuf::from(env!("CARGO_BIN_EXE_tabit-core")),
+        extensions: cwd.join(".tabit/no-extensions"),
+    });
+    let model = tabit_engine::test_utils::MockCompletionModel::from_stream_turns(first_turns);
+    let scripted = model.clone();
+    let session = SessionBuilder::new(store.clone(), config, auth, ModelSelection::new("p", "m"))
+        .expect("builder")
+        .preamble("test parent".to_string())
+        .model_factory(Arc::new(move |_, _, _| {
+            Ok(ModelHandle::new(scripted.clone()))
+        }))
+        .subagents(parts)
+        .dynamic_tool(subagent::subagent_tool())
+        .dynamic_tool(subagent::followup_tool())
+        .create(&cwd.display().to_string())
+        .expect("parent session");
+    (session, model)
+}
+
+/// Drive the parent's next run to its terminal, collecting every
+/// frame (the parent's and its children's alike).
+async fn run_parent(handle: &mut SessionHost, parent_id: &str) -> Vec<tabit_protocol::EventFrame> {
+    let mut frames = Vec::new();
+    loop {
+        let frame = tokio::time::timeout(std::time::Duration::from_secs(60), handle.next_event())
+            .await
+            .expect("frames keep coming")
+            .expect("the stream stays open");
+        let done = matches!(&frame.event,
+            SessionEvent::RunFinished { .. }
+            if frame.stream.as_ref().map(|s| s.as_str()) == Some(parent_id));
+        frames.push(frame);
+        if done {
+            return frames;
+        }
+    }
+}
+
+/// A named tool result's (content, details) from a frame batch.
+fn result_of(
+    frames: &[tabit_protocol::EventFrame],
+    name: &str,
+) -> Option<(String, serde_json::Value)> {
+    frames.iter().find_map(|frame| match &frame.event {
+        SessionEvent::ToolResult {
+            name: tool,
+            content,
+            details,
+            ..
+        } if tool == name => Some((content.clone(), details.clone().unwrap_or_default())),
+        _ => None,
+    })
+}
+
+/// The follow-up's continuity, end to end over the real binary: the
+/// `subagent` tool's completed child PARKS (its result names the
+/// friendly id), the `followup` tool reaches the SAME child session —
+/// the child's second completion request carries the first task's
+/// marker in history (the mock serving the second answer matches BOTH
+/// markers; a respawned child would miss it and fail), and the second
+/// result names the same ids.
+#[tokio::test]
+async fn a_followup_continues_the_same_child_session_across_runs() {
+    let _guard = env_lock().lock().await;
+    let server = MockServer::start();
+    let _first = server.mock(|when, then| {
+        when.method(POST)
+            .path("/v1/chat/completions")
+            .body_includes("TASK-MARKER-7f3a")
+            .body_excludes("FOLLOWUP-MARKER-7f3a");
+        then.status(200)
+            .header("content-type", "text/event-stream")
+            .body(sse_answer("child first answer"));
+    });
+    let second = server.mock(|when, then| {
+        when.method(POST)
+            .path("/v1/chat/completions")
+            .body_includes("TASK-MARKER-7f3a")
+            .body_includes("FOLLOWUP-MARKER-7f3a");
+        then.status(200)
+            .header("content-type", "text/event-stream")
+            .body(sse_answer("child second answer"));
+    });
+    let config_path = stage_child_config("followup", &server);
+    #[allow(unsafe_code, clippy::missing_safety_doc)]
+    unsafe {
+        std::env::set_var("TABIT_CONFIG", &config_path);
+    }
+
+    let parent_cwd = test_dir("followup-parent");
+    let store = SessionStore::new(test_dir("followup-store"));
+    let node = Arc::new(Node::new("test"));
+    let (parent, model) = pooled_parent(
+        &store,
+        &parent_cwd,
+        node.clone(),
+        vec![
+            tool_turn(
+                "c1",
+                "subagent",
+                json!({"task": "work on TASK-MARKER-7f3a"}),
+            ),
+            text_turn("parent wrap one"),
+        ],
+    );
+    let mut handle = host(&store, node, parent);
+    let parent_id = handle.info().session_id.clone();
+    handle.message(&parent_id, "go");
+    let run1 = run_parent(&mut handle, &parent_id).await;
+
+    // The parked result names the friendly id and the child session.
+    let (content, details) = result_of(&run1, "subagent").expect("the subagent result");
+    let id = details
+        .get("id")
+        .and_then(|v| v.as_str())
+        .expect("the result names the friendly id")
+        .to_string();
+    let child_id = details
+        .get("child_id")
+        .and_then(|v| v.as_str())
+        .expect("the result names the child session")
+        .to_string();
+    assert!(
+        content.contains("followup"),
+        "the parked result teaches the follow-up: {content}"
+    );
+
+    // Run two: the follow-up, scripted now that the runtime id is
+    // known (the model is held outside the factory; clones share
+    // state, so the push reaches the session's model).
+    model.push_stream_turn(tool_turn(
+        "c2",
+        "followup",
+        json!({"id": id, "message": "now FOLLOWUP-MARKER-7f3a please"}),
+    ));
+    model.push_stream_turn(text_turn("parent wrap two"));
+    handle.message(&parent_id, "again");
+    let run2 = run_parent(&mut handle, &parent_id).await;
+
+    let (follow_content, follow_details) =
+        result_of(&run2, "followup").expect("the followup result");
+    assert!(
+        follow_content.contains("child second answer"),
+        "the same child answered the follow-up: {follow_content}"
+    );
+    assert_eq!(
+        follow_details.get("id").and_then(|v| v.as_str()),
+        Some(id.as_str()),
+        "the follow-up result names the same friendly id"
+    );
+    assert_eq!(
+        follow_details.get("child_id").and_then(|v| v.as_str()),
+        Some(child_id.as_str()),
+        "the follow-up reached the same child session"
+    );
+    assert_eq!(
+        second.calls(),
+        1,
+        "one same-session follow-up request — the first task rode history"
+    );
+
+    handle.close_commands();
+    #[allow(unsafe_code, clippy::missing_safety_doc)]
+    unsafe {
+        std::env::remove_var("TABIT_CONFIG");
+    }
+}
+
+/// The aging boundary, end to end (the sweep rides the session's own
+/// TurnStarted): a child used in turn T is followable through turn
+/// T+5's tools — the success follow-up below is the sixth turn's
+/// first call — and collected at turn T+6's start, so the same call
+/// one idle cycle later is the expiry error. Aging turns are short
+/// runs (a text turn is terminal); the counter rides turn starts, not
+/// runs.
+#[tokio::test]
+async fn a_parked_subagent_lives_five_idle_turns_then_collects() {
+    let _guard = env_lock().lock().await;
+    let server = MockServer::start();
+    let _first = server.mock(|when, then| {
+        when.method(POST)
+            .path("/v1/chat/completions")
+            .body_includes("TASK-MARKER-91c4")
+            .body_excludes("FOLLOWUP-MARKER-91c4");
+        then.status(200)
+            .header("content-type", "text/event-stream")
+            .body(sse_answer("child first answer"));
+    });
+    let second = server.mock(|when, then| {
+        when.method(POST)
+            .path("/v1/chat/completions")
+            .body_includes("TASK-MARKER-91c4")
+            .body_includes("FOLLOWUP-MARKER-91c4");
+        then.status(200)
+            .header("content-type", "text/event-stream")
+            .body(sse_answer("child second answer"));
+    });
+    let config_path = stage_child_config("aging", &server);
+    #[allow(unsafe_code, clippy::missing_safety_doc)]
+    unsafe {
+        std::env::set_var("TABIT_CONFIG", &config_path);
+    }
+
+    let parent_cwd = test_dir("aging-parent");
+    let store = SessionStore::new(test_dir("aging-store"));
+    let node = Arc::new(Node::new("test"));
+    let (parent, model) = pooled_parent(
+        &store,
+        &parent_cwd,
+        node.clone(),
+        vec![
+            tool_turn(
+                "c1",
+                "subagent",
+                json!({"task": "work on TASK-MARKER-91c4"}),
+            ),
+            text_turn("parent wrap one"),
+        ],
+    );
+    let mut handle = host(&store, node, parent);
+    let parent_id = handle.info().session_id.clone();
+
+    // Turn 1: the subagent (used); turn 2: the wrap.
+    handle.message(&parent_id, "go");
+    let run1 = run_parent(&mut handle, &parent_id).await;
+    let (_, details) = result_of(&run1, "subagent").expect("the subagent result");
+    let id = details
+        .get("id")
+        .and_then(|v| v.as_str())
+        .expect("the friendly id")
+        .to_string();
+
+    // Turns 3-5: three idle one-turn runs.
+    for n in 0..3 {
+        model.push_stream_turn(text_turn(&format!("aging {n}")));
+        handle.message(&parent_id, "idle");
+        run_parent(&mut handle, &parent_id).await;
+    }
+
+    // Turn 6 — the FIFTH subsequent turn: still alive at its start,
+    // so its first tool call is the success follow-up (turn 7 wraps).
+    model.push_stream_turn(tool_turn(
+        "c2",
+        "followup",
+        json!({"id": id, "message": "now FOLLOWUP-MARKER-91c4 please"}),
+    ));
+    model.push_stream_turn(text_turn("parent wrap two"));
+    handle.message(&parent_id, "still within five");
+    let run2 = run_parent(&mut handle, &parent_id).await;
+    let (content, _) = result_of(&run2, "followup").expect("the followup result");
+    assert!(
+        content.contains("child second answer"),
+        "the fifth subsequent turn still reaches the child: {content}"
+    );
+
+    // Turns 8-13: six idle one-turn runs — the fifth subsequent turn
+    // passes unused, and turn 13's start collects.
+    for n in 0..6 {
+        model.push_stream_turn(text_turn(&format!("aging more {n}")));
+        handle.message(&parent_id, "idle");
+        run_parent(&mut handle, &parent_id).await;
+    }
+
+    // Turn 14: the same follow-up is now the expiry error (turn 15
+    // wraps; the error is a tool result, the run continues).
+    model.push_stream_turn(tool_turn(
+        "c3",
+        "followup",
+        json!({"id": id, "message": "are you still there"}),
+    ));
+    model.push_stream_turn(text_turn("parent wrap three"));
+    handle.message(&parent_id, "past five");
+    let run3 = run_parent(&mut handle, &parent_id).await;
+    let (content, _) = result_of(&run3, "followup").expect("the followup result");
+    assert!(
+        content.contains("no live subagent") && content.contains(&id),
+        "the collected child is the clear expiry error: {content}"
+    );
+    assert_eq!(
+        second.calls(),
+        1,
+        "the collected child served no request after collection"
+    );
+
+    handle.close_commands();
+    #[allow(unsafe_code, clippy::missing_safety_doc)]
+    unsafe {
+        std::env::remove_var("TABIT_CONFIG");
+    }
+}
+
+/// A follow-up whose child run FAILS reaps the entry (nothing is
+/// gained by parking a failed child — the ruling): the result is the
+/// failure, and the very next address of the same id is the expiry
+/// error, not a second chance.
+#[tokio::test]
+async fn a_failed_followup_reaps_the_child_and_the_next_address_is_the_expiry() {
+    let _guard = env_lock().lock().await;
+    let server = MockServer::start();
+    let _first = server.mock(|when, then| {
+        when.method(POST)
+            .path("/v1/chat/completions")
+            .body_includes("TASK-MARKER-4b8e")
+            .body_excludes("FOLLOWUP-MARKER-4b8e");
+        then.status(200)
+            .header("content-type", "text/event-stream")
+            .body(sse_answer("child first answer"));
+    });
+    let failing = server.mock(|when, then| {
+        when.method(POST)
+            .path("/v1/chat/completions")
+            .body_includes("TASK-MARKER-4b8e")
+            .body_includes("FOLLOWUP-MARKER-4b8e");
+        then.status(500).body("provider down");
+    });
+    let config_path = stage_child_config("failed-followup", &server);
+    #[allow(unsafe_code, clippy::missing_safety_doc)]
+    unsafe {
+        std::env::set_var("TABIT_CONFIG", &config_path);
+    }
+
+    let parent_cwd = test_dir("failed-followup-parent");
+    let store = SessionStore::new(test_dir("failed-followup-store"));
+    let node = Arc::new(Node::new("test"));
+    let (parent, model) = pooled_parent(
+        &store,
+        &parent_cwd,
+        node.clone(),
+        vec![
+            tool_turn(
+                "c1",
+                "subagent",
+                json!({"task": "work on TASK-MARKER-4b8e"}),
+            ),
+            text_turn("parent wrap one"),
+        ],
+    );
+    let mut handle = host(&store, node, parent);
+    let parent_id = handle.info().session_id.clone();
+    handle.message(&parent_id, "go");
+    let run1 = run_parent(&mut handle, &parent_id).await;
+    let (_, details) = result_of(&run1, "subagent").expect("the subagent result");
+    let id = details
+        .get("id")
+        .and_then(|v| v.as_str())
+        .expect("the friendly id")
+        .to_string();
+
+    // The failing follow-up: the child's provider 500s, the child's
+    // run fails, and the result is the failure.
+    model.push_stream_turn(tool_turn(
+        "c2",
+        "followup",
+        json!({"id": id, "message": "now FOLLOWUP-MARKER-4b8e please"}),
+    ));
+    model.push_stream_turn(text_turn("parent wrap two"));
+    handle.message(&parent_id, "follow up");
+    let run2 = run_parent(&mut handle, &parent_id).await;
+    let (content, _) = result_of(&run2, "followup").expect("the followup result");
+    assert!(
+        content.contains("the subagent failed"),
+        "the failed follow-up reports the child's failure: {content}"
+    );
+    assert!(
+        failing.calls() >= 1,
+        "the failing follow-up request was served ({} attempts, retries included)",
+        failing.calls()
+    );
+
+    // The entry is gone: the same id is now the expiry error.
+    model.push_stream_turn(tool_turn(
+        "c3",
+        "followup",
+        json!({"id": id, "message": "try again"}),
+    ));
+    model.push_stream_turn(text_turn("parent wrap three"));
+    handle.message(&parent_id, "retry");
+    let run3 = run_parent(&mut handle, &parent_id).await;
+    let (content, _) = result_of(&run3, "followup").expect("the followup result");
+    assert!(
+        content.contains("no live subagent") && content.contains(&id),
+        "the failed child left the pool: {content}"
+    );
+
+    handle.close_commands();
     #[allow(unsafe_code, clippy::missing_safety_doc)]
     unsafe {
         std::env::remove_var("TABIT_CONFIG");

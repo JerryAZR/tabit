@@ -50,13 +50,13 @@ mod tests;
 
 use crate::entry::{EntryKind, SessionEntry};
 use crate::lock::{read, write};
-use rig_agent::agent::{Agent, AttemptOutcome, PreRequestSource};
-use rig_core::completion::{CompletionError, Message, Usage};
-use rig_core::streaming::StreamedAssistantContent;
 use std::sync::Arc;
 use tabit_config::TabitConfig;
+use tabit_engine::agent::{Agent, AttemptOutcome, PreRequestSource};
 use tabit_log::ConversationCell;
 use tabit_protocol::{ModelSelection, SessionEvent};
+use tabit_providers::completion::{CompletionError, Message, Usage};
+use tabit_providers::streaming::StreamedAssistantContent;
 use tokio_util::sync::CancellationToken;
 
 /// The box's session-persistent state: what survives across doors.
@@ -617,7 +617,7 @@ Directives from the user for this compaction:
                 // information-incomplete: it could not fit what the
                 // prefix contained — treated exactly like a rejection
                 // (ruled).
-                if finish_reason == Some(rig_core::completion::FinishReason::Length) {
+                if finish_reason == Some(tabit_providers::completion::FinishReason::Length) {
                     match shorten(history, boundary) {
                         Some(shortened) => {
                             boundary = shortened;
@@ -652,8 +652,8 @@ Directives from the user for this compaction:
 /// The assembled turn's text (canonical order puts all text ahead of
 /// any trailing items; the concatenation covers non-canonical shapes
 /// too).
-fn assistant_text(turn: &rig_agent::agent::ModelTurn) -> String {
-    use rig_core::message::AssistantContent;
+fn assistant_text(turn: &tabit_engine::agent::ModelTurn) -> String {
+    use tabit_providers::message::AssistantContent;
     turn.choice
         .iter()
         .filter_map(|item| match item {
@@ -732,7 +732,7 @@ pub(crate) struct PreRequestDoor {
 }
 
 impl PreRequestSource for PreRequestDoor {
-    fn at_door(&self) -> rig_core::wasm_compat::WasmBoxedFuture<'_, ()> {
+    fn at_door(&self) -> tabit_providers::wasm_compat::WasmBoxedFuture<'_, ()> {
         Box::pin(async move {
             let notice = self.notice.clone();
             let mut emit = move |event: SessionEvent| {

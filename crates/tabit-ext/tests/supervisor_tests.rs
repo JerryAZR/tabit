@@ -20,9 +20,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use futures::future::BoxFuture;
-use rig_agent::tool::interaction::InteractionOutcome;
-use rig_agent::tool::services::{HostServices, ModelPromptOk, ModelPromptRequest, ServiceUsage};
-use tabit_ext::supervisor::{self, ExtensionEvent, HANDSHAKE_TIMEOUT, Status};
+use tabit_engine::tool::services::{HostServices, ModelPromptOk, ModelPromptRequest, ServiceUsage};
+use tabit_ext::supervisor::{self, BOOT_TIMEOUT, ExtensionEvent, Status};
 
 /// Generous bound for real-process roundtrips (spawn + handshake on a
 /// loaded CI box stays well under; the bound catches hangs, not
@@ -31,6 +30,30 @@ const BOUND: Duration = Duration::from_secs(15);
 
 /// A never-fired run token for call sites that test the steady
 /// state (cancellation has its own tests).
+/// The launch context tests serve: a bare node and placeholder host
+/// facts.
+fn test_host() -> tabit_ext::LaunchContext {
+    tabit_ext::LaunchContext {
+        node: std::sync::Arc::new(tabit_wire::node::Node::new("test")),
+        core_path: "tabit-core".to_string(),
+        cwd: ".".to_string(),
+    }
+}
+
+/// Answer one open ask by id through the node's table — the honest
+/// frontend shape (a response entering the net claims wherever the
+/// entry lives).
+fn answer(node: &tabit_wire::node::Node, id: &str, payload: serde_json::Value) {
+    node.intake(
+        &tabit_wire::node::Channel::local("test", |_| {}, |_| {}),
+        tabit_wire::node::Inbound::Command(tabit_protocol::SessionCommand::InteractionResponse {
+            session: None,
+            id: id.to_string(),
+            payload,
+        }),
+    );
+}
+
 fn run_token() -> tokio_util::sync::CancellationToken {
     tokio_util::sync::CancellationToken::new()
 }
@@ -105,7 +128,7 @@ fn dead_reason(status: &Status) -> &str {
 async fn a_healthy_extension_handshakes_alive() {
     let root = test_dir("alive");
     install(&root, "hello", "hello");
-    let (supervisor, mut events) = supervisor::launch_root(&root, HANDSHAKE_TIMEOUT);
+    let (supervisor, mut events) = supervisor::launch_root(&root, BOOT_TIMEOUT, test_host());
     let event = await_status(&mut events, "hello", |s| matches!(s, Status::Alive)).await;
     assert_eq!(event.name, "hello");
     let reports = supervisor.reports();
@@ -123,9 +146,9 @@ async fn a_healthy_extension_handshakes_alive() {
 async fn an_exit_before_the_ack_is_dead() {
     let root = test_dir("pre-ack");
     install(&root, "early", "die-pre-ack");
-    let (supervisor, mut events) = supervisor::launch_root(&root, HANDSHAKE_TIMEOUT);
+    let (supervisor, mut events) = supervisor::launch_root(&root, BOOT_TIMEOUT, test_host());
     let event = await_status(&mut events, "early", |s| matches!(s, Status::Dead { .. })).await;
-    assert!(dead_reason(&event.status).contains("before the handshake"));
+    assert!(dead_reason(&event.status).contains("before the report"));
     supervisor.shutdown().await;
 }
 
@@ -133,7 +156,7 @@ async fn an_exit_before_the_ack_is_dead() {
 async fn an_exit_after_the_ack_marks_dead() {
     let root = test_dir("post-ack");
     install(&root, "ghost", "die-post-ack");
-    let (supervisor, mut events) = supervisor::launch_root(&root, HANDSHAKE_TIMEOUT);
+    let (supervisor, mut events) = supervisor::launch_root(&root, BOOT_TIMEOUT, test_host());
     await_status(&mut events, "ghost", |s| matches!(s, Status::Alive)).await;
     let event = await_status(&mut events, "ghost", |s| matches!(s, Status::Dead { .. })).await;
     let reason = dead_reason(&event.status);
@@ -146,9 +169,10 @@ async fn an_exit_after_the_ack_marks_dead() {
 async fn a_silent_handshake_times_out() {
     let root = test_dir("mute");
     install(&root, "mute", "mute");
-    let (supervisor, mut events) = supervisor::launch_root(&root, Duration::from_millis(300));
+    let (supervisor, mut events) =
+        supervisor::launch_root(&root, Duration::from_millis(300), test_host());
     let event = await_status(&mut events, "mute", |s| matches!(s, Status::Dead { .. })).await;
-    assert!(dead_reason(&event.status).contains("no handshake"));
+    assert!(dead_reason(&event.status).contains("no report"));
     supervisor.shutdown().await;
 }
 
@@ -156,7 +180,7 @@ async fn a_silent_handshake_times_out() {
 async fn garbage_in_the_ack_is_refused() {
     let root = test_dir("bad-ack");
     install(&root, "bad", "bad-ack");
-    let (supervisor, mut events) = supervisor::launch_root(&root, HANDSHAKE_TIMEOUT);
+    let (supervisor, mut events) = supervisor::launch_root(&root, BOOT_TIMEOUT, test_host());
     let event = await_status(&mut events, "bad", |s| matches!(s, Status::Dead { .. })).await;
     assert!(dead_reason(&event.status).contains("unparseable"));
     supervisor.shutdown().await;
@@ -166,7 +190,7 @@ async fn garbage_in_the_ack_is_refused() {
 async fn a_version_mismatch_is_refused() {
     let root = test_dir("version");
     install(&root, "future", "wrong-version");
-    let (supervisor, mut events) = supervisor::launch_root(&root, HANDSHAKE_TIMEOUT);
+    let (supervisor, mut events) = supervisor::launch_root(&root, BOOT_TIMEOUT, test_host());
     let event = await_status(&mut events, "future", |s| matches!(s, Status::Dead { .. })).await;
     assert!(
         dead_reason(&event.status).contains("speaks extension protocol version 99"),
@@ -180,7 +204,7 @@ async fn a_version_mismatch_is_refused() {
 async fn garbage_after_the_ack_kills() {
     let root = test_dir("late");
     install(&root, "late", "late-garbage");
-    let (supervisor, mut events) = supervisor::launch_root(&root, HANDSHAKE_TIMEOUT);
+    let (supervisor, mut events) = supervisor::launch_root(&root, BOOT_TIMEOUT, test_host());
     await_status(&mut events, "late", |s| matches!(s, Status::Alive)).await;
     let event = await_status(&mut events, "late", |s| matches!(s, Status::Dead { .. })).await;
     assert!(dead_reason(&event.status).contains("unparseable"));
@@ -196,7 +220,7 @@ async fn a_well_formed_unknown_frame_type_is_the_same_death() {
     // that extension.
     let root = test_dir("late-unknown");
     install(&root, "future", "late-unknown");
-    let (supervisor, mut events) = supervisor::launch_root(&root, HANDSHAKE_TIMEOUT);
+    let (supervisor, mut events) = supervisor::launch_root(&root, BOOT_TIMEOUT, test_host());
     await_status(&mut events, "future", |s| matches!(s, Status::Alive)).await;
     let event = await_status(&mut events, "future", |s| matches!(s, Status::Dead { .. })).await;
     let reason = dead_reason(&event.status);
@@ -225,7 +249,7 @@ async fn scan_refusals_report_without_spawning() {
     .expect("manifest");
     std::fs::create_dir_all(root.join("plain")).expect("dir");
 
-    let (supervisor, mut events) = supervisor::launch_root(&root, HANDSHAKE_TIMEOUT);
+    let (supervisor, mut events) = supervisor::launch_root(&root, BOOT_TIMEOUT, test_host());
     let mut reported = Vec::new();
     for _ in 0..2 {
         let event = next_event(&mut events).await;
@@ -248,7 +272,7 @@ async fn scan_refusals_report_without_spawning() {
 #[tokio::test]
 async fn a_missing_root_is_an_empty_install() {
     let root = test_dir("absent").join("never-created");
-    let (supervisor, mut events) = supervisor::launch_root(&root, HANDSHAKE_TIMEOUT);
+    let (supervisor, mut events) = supervisor::launch_root(&root, BOOT_TIMEOUT, test_host());
     assert!(supervisor.reports().is_empty());
     assert!(events.try_recv().is_err());
     supervisor.shutdown().await;
@@ -268,7 +292,7 @@ async fn a_mute_sibling_does_not_delay_the_healthy() {
     // serialization; the fail-fast on Dead below keeps a real
     // timeout diagnosable instead of burning the bound.
     let timeout = Duration::from_secs(5);
-    let (supervisor, mut events) = supervisor::launch_root(&root, timeout);
+    let (supervisor, mut events) = supervisor::launch_root(&root, timeout, test_host());
     let start = std::time::Instant::now();
     loop {
         let event = next_event(&mut events).await;
@@ -281,8 +305,13 @@ async fn a_mute_sibling_does_not_delay_the_healthy() {
             Status::Starting => {}
         }
     }
+    // Maximal margin, same proof: a serialized handshake resolves
+    // only after the mute burns the whole timeout, so ANY elapsed
+    // under it proves concurrency — and the full gate's parallel
+    // load may lawfully eat seconds of wall clock first (the loose
+    // bound this comment always promised).
     assert!(
-        start.elapsed() < Duration::from_secs(4),
+        start.elapsed() < timeout,
         "the healthy extension must not wait for its mute sibling"
     );
     await_status(&mut events, "zzz-mute", |s| {
@@ -332,7 +361,7 @@ async fn shutdown_reclaims_the_extension_tree() {
     unsafe {
         std::env::set_var("EXT_DOUBLE_MARKER", &marker);
     }
-    let (supervisor, mut events) = supervisor::launch_root(&root, HANDSHAKE_TIMEOUT);
+    let (supervisor, mut events) = supervisor::launch_root(&root, BOOT_TIMEOUT, test_host());
     await_status(&mut events, "hello", |s| matches!(s, Status::Alive)).await;
     supervisor.shutdown().await;
     assert!(
@@ -344,30 +373,11 @@ async fn shutdown_reclaims_the_extension_tree() {
 /// A scripted host-service capability: records what crossed, answers
 /// asks (or dismisses) and model prompts on cue.
 struct FakeServices {
-    answer: Option<serde_json::Value>,
     prompt: Option<Result<String, String>>,
-    seen_ask: Arc<Mutex<Vec<(String, serde_json::Value)>>>,
     seen_prompt: Arc<Mutex<Vec<(String, String)>>>,
 }
 
 impl HostServices for FakeServices {
-    fn ask(
-        &self,
-        ui_type: &str,
-        payload: serde_json::Value,
-    ) -> BoxFuture<'static, InteractionOutcome> {
-        let ui_type = ui_type.to_string();
-        let answer = self.answer.clone();
-        let seen = self.seen_ask.clone();
-        Box::pin(async move {
-            seen.lock().expect("seen lock").push((ui_type, payload));
-            match answer {
-                Some(payload) => InteractionOutcome::Answered(payload),
-                None => InteractionOutcome::Dismissed,
-            }
-        })
-    }
-
     fn model_prompt(
         &self,
         caller: &str,
@@ -400,7 +410,7 @@ impl HostServices for FakeServices {
 async fn a_tool_call_round_trips_over_the_pipe() {
     let root = test_dir("call");
     install(&root, "echoer", "tools-echo");
-    let (supervisor, mut events) = supervisor::launch_root(&root, HANDSHAKE_TIMEOUT);
+    let (supervisor, mut events) = supervisor::launch_root(&root, BOOT_TIMEOUT, test_host());
     await_status(&mut events, "echoer", |s| matches!(s, Status::Alive)).await;
     let handle = supervisor.extension("echoer").expect("installed");
     let result = handle
@@ -417,7 +427,7 @@ async fn a_tool_call_round_trips_over_the_pipe() {
 async fn a_failing_tool_carries_its_error() {
     let root = test_dir("fail");
     install(&root, "boomer", "tools-fail");
-    let (supervisor, mut events) = supervisor::launch_root(&root, HANDSHAKE_TIMEOUT);
+    let (supervisor, mut events) = supervisor::launch_root(&root, BOOT_TIMEOUT, test_host());
     await_status(&mut events, "boomer", |s| matches!(s, Status::Alive)).await;
     let handle = supervisor.extension("boomer").expect("installed");
     let result = handle
@@ -433,57 +443,105 @@ async fn a_failing_tool_carries_its_error() {
 }
 
 #[tokio::test]
-async fn an_ask_lifts_through_the_interaction_capability() {
+async fn an_ask_routes_through_the_backend_registry() {
     let root = test_dir("ask");
     install(&root, "asker", "tools-ask");
-    let (supervisor, mut events) = supervisor::launch_root(&root, HANDSHAKE_TIMEOUT);
+    let recorded = Recorded::default();
+    let (supervisor, mut events) = supervisor::launch_root(&root, BOOT_TIMEOUT, recorded.host());
     await_status(&mut events, "asker", |s| matches!(s, Status::Alive)).await;
     let handle = supervisor.extension("asker").expect("installed");
-    let seen = Arc::new(Mutex::new(Vec::new()));
-    let services = FakeServices {
-        answer: Some(serde_json::json!({"text": "yes"})),
-        prompt: None,
-        seen_ask: seen.clone(),
-        seen_prompt: Arc::new(Mutex::new(Vec::new())),
-    };
-    let result = handle
-        .call(
-            "ask",
-            serde_json::json!({"text": "should we?"}),
-            Some(Arc::new(services)),
-            run_token(),
-        )
-        .await
-        .expect("the call resolves");
+
+    // The call parks on its ask; the answer arrives by id through the
+    // backend registry (the grammar flow — the envelope verb is gone).
+    let call = tokio::spawn(async move {
+        handle
+            .call(
+                "ask",
+                serde_json::json!({"text": "should we?"}),
+                None,
+                run_token(),
+            )
+            .await
+            .expect("the call resolves")
+    });
+    let asked = wait_for(|| {
+        recorded
+            .events()
+            .iter()
+            .any(|e| e.starts_with("asker|") && e.contains("interaction_request"))
+    })
+    .await;
+    assert!(asked, "the ask emission routed: {:?}", recorded.events());
+    let id = recorded
+        .events()
+        .iter()
+        .find(|e| e.contains("interaction_request"))
+        .and_then(|e| e.split("\"id\":\"").nth(1))
+        .and_then(|rest| rest.split('"').next().map(str::to_string))
+        .expect("the ask id");
+    answer(&recorded.net(), &id, serde_json::json!({"text": "yes"}));
+    let result = call.await.expect("joined");
     assert_eq!(result.error, None);
     assert_eq!(result.report, "answered: yes");
-    {
-        let seen = seen.lock().expect("seen lock");
-        let (ui_type, payload) = &seen[0];
-        assert_eq!(ui_type, "native:select_any");
-        assert_eq!(payload["body"], "the ask tool was called with should we?");
-    }
+    // Settlement is announced for every channel holding the card.
+    assert!(
+        wait_for(|| {
+            recorded
+                .events()
+                .iter()
+                .any(|e| e.contains("interaction_settled") && e.contains(&id))
+        })
+        .await
+    );
     supervisor.shutdown().await;
 }
 
 #[tokio::test]
-async fn an_ask_without_a_capability_fails_closed() {
+async fn an_ask_abandoned_by_cancellation_reports_dismissed() {
     let root = test_dir("no-ask");
     install(&root, "asker", "tools-ask");
-    let (supervisor, mut events) = supervisor::launch_root(&root, HANDSHAKE_TIMEOUT);
+    let recorded = Recorded::default();
+    let (supervisor, mut events) = supervisor::launch_root(&root, BOOT_TIMEOUT, recorded.host());
     await_status(&mut events, "asker", |s| matches!(s, Status::Alive)).await;
     let handle = supervisor.extension("asker").expect("installed");
-    let result = handle
-        .call(
-            "ask",
-            serde_json::json!({"text": "anyone?"}),
-            None,
-            run_token(),
-        )
-        .await
-        .expect("the call resolves");
-    assert_eq!(result.error, None);
-    assert_eq!(result.report, "dismissed");
+
+    // The grammar ask has no in-band dismissal: abandonment is the
+    // run's cancellation (the guest reads the cancel frame as its
+    // ask resolving dismissed).
+    let token = tokio_util::sync::CancellationToken::new();
+    let call_token = token.clone();
+    let call = tokio::spawn(async move {
+        handle
+            .call(
+                "ask",
+                serde_json::json!({"text": "anyone?"}),
+                None,
+                call_token,
+            )
+            .await
+    });
+    assert!(
+        wait_for(|| {
+            recorded
+                .events()
+                .iter()
+                .any(|e| e.starts_with("asker|") && e.contains("interaction_request"))
+        })
+        .await,
+        "the ask surfaced first: {:?}",
+        recorded.events()
+    );
+    token.cancel();
+    // Token-and-detach: the call fails cancelled (the model-visible
+    // failure); the guest's own dismissal handling is its cleanup,
+    // racing a pending entry that is already gone.
+    let outcome = call.await.expect("joined");
+    assert!(
+        outcome
+            .as_ref()
+            .is_err_and(|error| error.contains("cancelled")),
+        "the call fails cancelled: {outcome:?}"
+    );
     supervisor.shutdown().await;
 }
 
@@ -491,14 +549,12 @@ async fn an_ask_without_a_capability_fails_closed() {
 async fn a_model_prompt_dispatches_through_the_envelope() {
     let root = test_dir("model");
     install(&root, "modeler", "tools-model");
-    let (supervisor, mut events) = supervisor::launch_root(&root, HANDSHAKE_TIMEOUT);
+    let (supervisor, mut events) = supervisor::launch_root(&root, BOOT_TIMEOUT, test_host());
     await_status(&mut events, "modeler", |s| matches!(s, Status::Alive)).await;
     let handle = supervisor.extension("modeler").expect("installed");
     let seen_prompt = Arc::new(Mutex::new(Vec::new()));
     let services = FakeServices {
-        answer: None,
         prompt: Some(Ok("five words exactly right".to_string())),
-        seen_ask: Arc::new(Mutex::new(Vec::new())),
         seen_prompt: seen_prompt.clone(),
     };
     let result = handle
@@ -532,7 +588,7 @@ async fn a_model_prompt_dispatches_through_the_envelope() {
 async fn a_model_prompt_without_services_fails_with_the_verb_error() {
     let root = test_dir("model-bare");
     install(&root, "modeler", "tools-model");
-    let (supervisor, mut events) = supervisor::launch_root(&root, HANDSHAKE_TIMEOUT);
+    let (supervisor, mut events) = supervisor::launch_root(&root, BOOT_TIMEOUT, test_host());
     await_status(&mut events, "modeler", |s| matches!(s, Status::Alive)).await;
     let handle = supervisor.extension("modeler").expect("installed");
     let result = handle
@@ -553,7 +609,7 @@ async fn a_model_prompt_without_services_fails_with_the_verb_error() {
 async fn a_call_after_death_fails_fast() {
     let root = test_dir("late-call");
     install(&root, "echoer", "tools-echo");
-    let (supervisor, mut events) = supervisor::launch_root(&root, HANDSHAKE_TIMEOUT);
+    let (supervisor, mut events) = supervisor::launch_root(&root, BOOT_TIMEOUT, test_host());
     await_status(&mut events, "echoer", |s| matches!(s, Status::Alive)).await;
     let handle = supervisor.extension("echoer").expect("installed");
     // One healthy call, then the host closes (the supervisor drops:
@@ -595,7 +651,11 @@ async fn await_resolved_joins_every_handshake() {
     let root = test_dir("resolved");
     install(&root, "aaa-hello", "hello");
     install(&root, "zzz-mute", "mute");
-    let (supervisor, mut events) = supervisor::launch_root(&root, Duration::from_millis(300));
+    // The bound exists for the mute (it resolves only by timing out);
+    // the hello must ack well inside it even under a loaded gate run,
+    // or the Alive await below races a load-spiked handshake.
+    let (supervisor, mut events) =
+        supervisor::launch_root(&root, Duration::from_secs(2), test_host());
     supervisor.await_resolved().await;
     // Both verdicts stand — the join did not return on the first.
     let reports = supervisor.reports();
@@ -615,19 +675,18 @@ async fn await_resolved_joins_every_handshake() {
 async fn a_hook_round_trips_its_decision() {
     let root = test_dir("hook-allow");
     install(&root, "allower", "hooks-allow");
-    let (supervisor, mut events) = supervisor::launch_root(&root, HANDSHAKE_TIMEOUT);
+    let (supervisor, mut events) = supervisor::launch_root(&root, BOOT_TIMEOUT, test_host());
     await_status(&mut events, "allower", |s| matches!(s, Status::Alive)).await;
     let handle = supervisor.extension("allower").expect("installed");
     let decision = handle
-        .hook(
-            "tool_call",
+        .hook::<tabit_protocol::points::ToolCall>(
             serde_json::json!({"session": "s1", "tool": "bash", "args": "{\"command\":\"ls\"}"}),
             None,
             run_token(),
         )
         .await
         .expect("the hook resolves");
-    assert_eq!(decision, tabit_ext::protocol::HookDecision::Run);
+    assert_eq!(decision, tabit_protocol::points::CallVerdict::Run);
     supervisor.shutdown().await;
 }
 
@@ -635,12 +694,11 @@ async fn a_hook_round_trips_its_decision() {
 async fn a_hook_skip_carries_its_message() {
     let root = test_dir("hook-skip");
     install(&root, "denier", "hooks-skip");
-    let (supervisor, mut events) = supervisor::launch_root(&root, HANDSHAKE_TIMEOUT);
+    let (supervisor, mut events) = supervisor::launch_root(&root, BOOT_TIMEOUT, test_host());
     await_status(&mut events, "denier", |s| matches!(s, Status::Alive)).await;
     let handle = supervisor.extension("denier").expect("installed");
     let decision = handle
-        .hook(
-            "tool_call",
+        .hook::<tabit_protocol::points::ToolCall>(
             serde_json::json!({"tool": "bash"}),
             None,
             run_token(),
@@ -649,7 +707,7 @@ async fn a_hook_skip_carries_its_message() {
         .expect("the hook resolves");
     assert_eq!(
         decision,
-        tabit_ext::protocol::HookDecision::Skip {
+        tabit_protocol::points::CallVerdict::Skip {
             message: "the double denies".to_string()
         }
     );
@@ -657,53 +715,83 @@ async fn a_hook_skip_carries_its_message() {
 }
 
 #[tokio::test]
-async fn a_hook_ask_lifts_to_the_capability() {
+async fn a_hook_ask_decides_through_the_backend_registry() {
     let root = test_dir("hook-ask");
     install(&root, "asker", "hooks-ask");
-    let (supervisor, mut events) = supervisor::launch_root(&root, HANDSHAKE_TIMEOUT);
+    let recorded = Recorded::default();
+    let (supervisor, mut events) = supervisor::launch_root(&root, BOOT_TIMEOUT, recorded.host());
     await_status(&mut events, "asker", |s| matches!(s, Status::Alive)).await;
     let handle = supervisor.extension("asker").expect("installed");
-    let seen = Arc::new(Mutex::new(Vec::new()));
-    let services = FakeServices {
-        answer: Some(serde_json::json!({"selected": ["Allow"]})),
-        prompt: None,
-        seen_ask: seen.clone(),
-        seen_prompt: Arc::new(Mutex::new(Vec::new())),
-    };
-    let decision = handle
-        .hook(
-            "tool_call",
-            serde_json::json!({"tool": "bash"}),
-            Some(Arc::new(services)),
-            run_token(),
-        )
-        .await
-        .expect("the hook resolves");
-    assert_eq!(decision, tabit_ext::protocol::HookDecision::Run);
-    {
-        let seen = seen.lock().expect("seen lock");
-        assert_eq!(seen.len(), 1, "the hook asked exactly once");
-        assert_eq!(seen[0].0, "native:select_one");
-    }
-    // And the dismissed path denies.
-    let services = FakeServices {
-        answer: None,
-        prompt: None,
-        seen_ask: Arc::new(Mutex::new(Vec::new())),
-        seen_prompt: Arc::new(Mutex::new(Vec::new())),
-    };
-    let decision = handle
-        .hook(
-            "tool_call",
-            serde_json::json!({"tool": "bash"}),
-            Some(Arc::new(services)),
-            run_token(),
-        )
-        .await
-        .expect("the hook resolves");
+
+    // Allowed: the answer routes by id, the hook runs the call.
+    let hook = tokio::spawn(async move {
+        handle
+            .hook::<tabit_protocol::points::ToolCall>(
+                serde_json::json!({"tool": "bash"}),
+                None,
+                run_token(),
+            )
+            .await
+            .expect("the hook resolves")
+    });
+    assert!(
+        wait_for(|| {
+            recorded
+                .events()
+                .iter()
+                .any(|e| e.starts_with("asker|") && e.contains("interaction_request"))
+        })
+        .await,
+        "the hook's ask surfaced: {:?}",
+        recorded.events()
+    );
+    let id = recorded
+        .events()
+        .iter()
+        .find(|e| e.contains("interaction_request"))
+        .and_then(|e| e.split("\"id\":\"").nth(1))
+        .and_then(|rest| rest.split('"').next().map(str::to_string))
+        .expect("the ask id");
+    answer(
+        &recorded.net(),
+        &id,
+        serde_json::json!({"selected": ["Allow"]}),
+    );
+    let decision = hook.await.expect("joined");
+    assert_eq!(decision, tabit_protocol::points::CallVerdict::Run);
+
+    // Denied: the same flow, a Block answer skips with the reason.
+    let handle = supervisor.extension("asker").expect("installed");
+    let hook = tokio::spawn(async move {
+        handle
+            .hook::<tabit_protocol::points::ToolCall>(
+                serde_json::json!({"tool": "bash"}),
+                None,
+                run_token(),
+            )
+            .await
+            .expect("the hook resolves")
+    });
+    let baseline = recorded.events().len();
+    assert!(
+        wait_for(|| recorded.events().len() > baseline).await,
+        "the second ask surfaced"
+    );
+    let id = recorded.events()[baseline..]
+        .iter()
+        .find(|e| e.contains("interaction_request"))
+        .and_then(|e| e.split("\"id\":\"").nth(1))
+        .and_then(|rest| rest.split('"').next().map(str::to_string))
+        .expect("the second ask id");
+    answer(
+        &recorded.net(),
+        &id,
+        serde_json::json!({"selected": ["Deny"]}),
+    );
+    let decision = hook.await.expect("joined");
     assert!(matches!(
         decision,
-        tabit_ext::protocol::HookDecision::Skip { .. }
+        tabit_protocol::points::CallVerdict::Skip { .. }
     ));
     supervisor.shutdown().await;
 }
@@ -712,15 +800,14 @@ async fn a_hook_ask_lifts_to_the_capability() {
 async fn a_death_answers_pending_policy_with_the_fail_open_fallback() {
     let root = test_dir("hook-hang");
     install(&root, "wedge", "hooks-hang");
-    let (supervisor, mut events) = supervisor::launch_root(&root, HANDSHAKE_TIMEOUT);
+    let (supervisor, mut events) = supervisor::launch_root(&root, BOOT_TIMEOUT, test_host());
     await_status(&mut events, "wedge", |s| matches!(s, Status::Alive)).await;
     let handle = supervisor.extension("wedge").expect("installed");
     let pending = {
         let handle = handle.clone();
         tokio::spawn(async move {
             handle
-                .hook(
-                    "tool_call",
+                .hook::<tabit_protocol::points::ToolCall>(
                     serde_json::json!({"tool": "bash"}),
                     None,
                     run_token(),
@@ -738,7 +825,7 @@ async fn a_death_answers_pending_policy_with_the_fail_open_fallback() {
         .expect("the drain answers within the bound")
         .expect("the task lives")
         .expect("the hook resolves");
-    assert_eq!(decision, tabit_ext::protocol::HookDecision::Run);
+    assert_eq!(decision, tabit_protocol::points::CallVerdict::Run);
 }
 
 /// The cancellation contract (the sandboxed-bash consumer's gap):
@@ -750,7 +837,7 @@ async fn a_death_answers_pending_policy_with_the_fail_open_fallback() {
 async fn cancelling_the_run_token_cancels_the_call_across_the_pipe() {
     let root = test_dir("cancel");
     install(&root, "hanger", "tools-cancel");
-    let (supervisor, mut events) = supervisor::launch_root(&root, HANDSHAKE_TIMEOUT);
+    let (supervisor, mut events) = supervisor::launch_root(&root, BOOT_TIMEOUT, test_host());
     await_status(&mut events, "hanger", |s| matches!(s, Status::Alive)).await;
     let handle = supervisor.extension("hanger").expect("installed");
 
@@ -781,5 +868,214 @@ async fn cancelling_the_run_token_cancels_the_call_across_the_pipe() {
         .await
         .expect("the lane serves");
     assert_eq!(result.report, "EXT-ECHOED:still here");
+    supervisor.shutdown().await;
+}
+
+/// What the recording routes captured, in arrival order.
+#[derive(Default, Clone)]
+struct Recorded {
+    node: std::sync::OnceLock<std::sync::Arc<tabit_wire::node::Node>>,
+    events: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+impl Recorded {
+    fn host(&self) -> tabit_ext::LaunchContext {
+        let events = self.events.clone();
+        let node = std::sync::Arc::new(tabit_wire::node::Node::new("test"));
+        node.subscribe_all(
+            tabit_wire::node::Locality::Both,
+            move |frame: &tabit_protocol::EventFrame| {
+                let origin = frame.origin.clone().unwrap_or_else(|| "-".to_string());
+                events.lock().unwrap().push(format!(
+                    "{origin}|{}",
+                    serde_json::to_string(&frame.event).unwrap()
+                ));
+            },
+        );
+        self.node.get_or_init(|| node.clone());
+        tabit_ext::LaunchContext {
+            node,
+            core_path: "tabit-core".to_string(),
+            cwd: ".".to_string(),
+        }
+    }
+
+    /// The recorded net (set by `host`).
+    fn net(&self) -> std::sync::Arc<tabit_wire::node::Node> {
+        self.node.get().expect("host() ran first").clone()
+    }
+
+    fn events(&self) -> Vec<String> {
+        self.events.lock().unwrap().clone()
+    }
+}
+
+/// The routing generalization over the real pipe: the extension's
+/// command and emission route through the host glue; the ask
+/// registers, the routed answer crosses back down the pipe (mirrored
+/// out by the double as an event), settlement is announced, and the
+/// broadcast mirror honors the watch list.
+#[tokio::test]
+async fn the_shared_grammar_flows_both_directions_over_the_pipe() {
+    let root = test_dir("grammar");
+    install(&root, "grammar-ext", "grammar");
+    let recorded = Recorded::default();
+    let (supervisor, mut events) = supervisor::launch_root(&root, BOOT_TIMEOUT, recorded.host());
+    await_status(&mut events, "grammar-ext", |s| matches!(s, Status::Alive)).await;
+
+    // The double's command crossed and ENTERED THE NET: no session
+    // `boot-session` exists on the test's node, so the uniform miss
+    // error is the command's observable routing outcome (it raced
+    // the Alive transition, so poll — never assert on a snapshot).
+    // The double is deliberately chatty from the ack (the peers
+    // ruling) — the prepared node takes it with nothing parked.
+    let saw_command = wait_for(|| {
+        recorded
+            .events()
+            .iter()
+            .any(|e| e.contains("no session") && e.contains("boot-session"))
+    })
+    .await;
+    assert!(
+        saw_command,
+        "the command entered the node's routing: {:?}",
+        recorded.events()
+    );
+    let saw_ask = wait_for(|| {
+        recorded.events().iter().any(|e| {
+            e.starts_with("grammar-ext|") && e.contains("interaction_request") && e.contains("g-1")
+        })
+    })
+    .await;
+    assert!(
+        saw_ask,
+        "the ask emission routed, origin-stamped: {:?}",
+        recorded.events()
+    );
+
+    // Broadcast honors the watch list: a watched kind mirrors (the
+    // double echoes it back out), an unwatched kind does not.
+    let watched = tabit_protocol::EventFrame {
+        stream: None,
+        origin: None,
+        ttl: None,
+        event: tabit_protocol::SessionEvent::SessionOpened {
+            id: "0198".to_string(),
+            path: String::new(),
+            cwd: String::new(),
+            model: tabit_protocol::ModelSelection::new("p", "m"),
+            resumed: false,
+            parent: None,
+            parent_call: None,
+        },
+    };
+    let net = recorded.net();
+    let emit_from = tabit_wire::node::Channel::local("test", |_| {}, |_| {});
+    net.emit(&emit_from, watched);
+    let unwatched = tabit_protocol::EventFrame {
+        stream: None,
+        origin: None,
+        ttl: None,
+        event: tabit_protocol::SessionEvent::CompactionBegin,
+    };
+    net.emit(&emit_from, unwatched);
+    // The double's echo carries its origin attribution (the raw
+    // emission also passes the recorder — origin "-"; the MIRROR is
+    // the echoed copy, origin "grammar-ext").
+    let echoed = wait_for(|| {
+        recorded.events().iter().any(|e| {
+            e.starts_with("grammar-ext|") && e.contains("session_opened") && e.contains("0198")
+        })
+    })
+    .await;
+    assert!(
+        echoed,
+        "the watched kind mirrored back: {:?}",
+        recorded.events()
+    );
+    assert!(
+        !wait_for_short(|| recorded
+            .events()
+            .iter()
+            .any(|e| e.starts_with("grammar-ext|") && e.contains("compaction_begin")))
+        .await,
+        "the unwatched kind never mirrors"
+    );
+
+    // The answer routes back by id (through the node's table — the
+    // origin, the double, announces the settle).
+    answer(
+        &recorded.net(),
+        "g-1",
+        serde_json::json!({"selected": [], "text": "go ahead"}),
+    );
+    let settled = wait_for(|| {
+        recorded
+            .events()
+            .iter()
+            .any(|e| e.contains("interaction_settled") && e.contains("g-1"))
+    })
+    .await;
+    assert!(settled, "settlement announced: {:?}", recorded.events());
+    let answered = wait_for(|| {
+        recorded
+            .events()
+            .iter()
+            .any(|e| e.contains("interaction_response") && e.contains("go ahead"))
+    })
+    .await;
+    assert!(
+        answered,
+        "the routed answer crossed the pipe (mirrored by the double): {:?}",
+        recorded.events()
+    );
+
+    supervisor.shutdown().await;
+}
+
+/// Poll until true, bounded by the test bound.
+async fn wait_for(check: impl Fn() -> bool) -> bool {
+    let deadline = std::time::Instant::now() + BOUND;
+    while std::time::Instant::now() < deadline {
+        if check() {
+            return true;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    false
+}
+
+/// The negative poll: nothing should appear within a short window.
+async fn wait_for_short(check: impl Fn() -> bool) -> bool {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(300);
+    while std::time::Instant::now() < deadline {
+        if check() {
+            return true;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    false
+}
+
+/// The contained hold door over the real pipe (the review round's
+/// major finding): a guest re-sending a live service-request id — a
+/// plain retry bug — meets the containment, not a host panic. The
+/// lane dies with the mint reason; the supervisor and the rest of
+/// the process live.
+#[tokio::test]
+async fn a_duplicate_service_request_id_kills_the_lane_not_the_host() {
+    let root = test_dir("svc-dupe");
+    install(&root, "dupe", "svc-dupe");
+    let (supervisor, mut events) = supervisor::launch_root(&root, BOOT_TIMEOUT, test_host());
+    await_status(&mut events, "dupe", |s| matches!(s, Status::Alive)).await;
+    let dead = await_status(&mut events, "dupe", |s| matches!(s, Status::Dead { .. })).await;
+    let reason = dead_reason(&dead.status);
+    assert!(
+        reason.contains("mint law"),
+        "the death names the containment: {reason}"
+    );
+    // The supervisor itself is intact — reports answer, the event
+    // channel lives.
+    assert_eq!(supervisor.reports().len(), 1);
     supervisor.shutdown().await;
 }

@@ -14,19 +14,41 @@
 //! one workspace — the full story is a topic after the first
 //! release.
 //!
-//! v1 carries the handshake (`initialize` out, `ack` back with the
+//! v1 carried the handshake (`initialize` out, `ack` back with the
 //! capability declarations), the tool lane (`tool_call` out,
-//! `tool_result` back), the hook lane, and — with checklist task 5 —
-//! the host-service envelope: `service_request` in (verb + payload,
-//! with the interaction ask folded in as verb zero), answered by
-//! `service_response` out by request id.
+//! `tool_result` back), the hook lane, and the host-service envelope:
+//! `service_request` in (verb + payload, with the interaction ask
+//! folded in as verb zero), answered by `service_response` out by
+//! request id. v2 adds the shared grammar (ruled 2026-09, the routing
+//! generalization): the frontend protocol's commands and events ride
+//! the pipe flat as bare lines — commands and emissions out, watched
+//! events and routed answers in — and `initialize` grows the host
+//! facts an owned-session spawner needs (`core_path`, `cwd`), with
+//! `ack` declaring the watched event kinds. v3 deletes the service
+//! envelope's interaction ask (verb zero): the routing
+//! generalization's direct grammar emission superseded it, and a
+//! wrapper nobody needs is deleted, not windowed — `model_prompt`
+//! is the envelope's one verb. v4 makes hook answers per-point (the
+//! 2026-09 ruling): the one `HookDecision` union dies, `hook_result`
+//! carries the point's own answer type serialized
+//! ([`tabit_protocol::points`]) — one shared definition on both ends,
+//! no hand-kept wire mirror.
 
 use serde::{Deserialize, Serialize};
 
-/// The extension protocol this host speaks. An extension acking a
-/// different version is refused at the handshake — the pipe is a
+/// The extension protocol this host speaks. A guest reporting a
+/// different version is killed at the report — the pipe is a
 /// frozen contract, not a negotiated one.
-pub const EXTENSION_PROTOCOL_VERSION: u32 = 1;
+pub const EXTENSION_PROTOCOL_VERSION: u32 = 5;
+
+/// The correlation-kind tags of the dialect's round-trips — the tag
+/// of the response frame that answers each (the correlation-kind
+/// law, read back at the ask table's claim on both sides of the
+/// pipe). Declared here, beside the frames they name, so host and
+/// guest cannot drift.
+pub const KIND_TOOL_RESULT: &str = "tool_result";
+pub const KIND_HOOK_RESULT: &str = "hook_result";
+pub const KIND_SERVICE_RESPONSE: &str = "service_response";
 
 /// One tool the extension serves, declared at the handshake. The
 /// schema is the model-facing JSON Schema; the host turns it into a
@@ -39,34 +61,51 @@ pub struct ToolDecl {
 }
 
 /// One hook point the extension subscribes to, declared at the
-/// handshake. The names are the engine's hook event points.
+/// handshake. The names are the declared hook points
+/// ([`tabit_protocol::points::LIST`]) — anything else refuses the
+/// handshake.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct HookDecl {
     pub event: String,
 }
 
-/// The hook points a v1 extension may subscribe to: the engine's
-/// closure surface (`on::tool_call` ships; `on::tool_result` joins
-/// with checklist task 3, which is its consumer). Anything else
-/// refuses the handshake — pause points stay enumerable.
-pub const HOOK_POINTS: &[&str] = &["tool_call", "tool_result"];
-
-/// The capabilities one process serves, declared once at the
-/// handshake (the byte-stability law: no re-declaration, no drift).
+/// The capabilities one process serves — its SELF-REPORT, the first
+/// line on the channel (owner ruling 2026-09-25: children report
+/// first), declared once (the byte-stability law: no re-declaration,
+/// no drift). `watch` (v2) is not a capability — it is the
+/// subscription list: the event kinds (the frontend grammar's `type`
+/// tags) whose frames the extension wants mirrored onto its pipe.
+/// Fine-grained by ruling (one kind, one entry — no bundles), derived
+/// by an SDK from the callbacks its author registered. A kind the
+/// host does not emit matches nothing and harms nothing (tolerated,
+/// not refused: a typo watches silently, the load-time report is the
+/// diagnostic).
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Ack {
+pub struct Report {
     pub protocol_version: u32,
     pub tools: Vec<ToolDecl>,
     pub hooks: Vec<HookDecl>,
+    #[serde(default)]
+    pub watch: Vec<String>,
 }
 
 /// Host → extension frames.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum HostFrame {
-    /// Open the pipe. First line the extension reads; everything
-    /// else follows only after its ack.
-    Initialize { protocol_version: u32 },
+    /// The host's facts, sent after the extension's report cleared
+    /// the version check (the report model: the child speaks first,
+    /// the spawner decides). `core_path` is the running backend's
+    /// own executable (the thing to spawn for owned sessions — the
+    /// host IS the binary, so there is nothing to resolve), `cwd`
+    /// the backend's working directory (owned children default
+    /// there unless the spawner says otherwise).
+    HostFacts {
+        #[serde(default)]
+        core_path: String,
+        #[serde(default)]
+        cwd: String,
+    },
     /// One tool invocation; the extension answers with a
     /// [`ToolWireResult`] carrying the same `call_id`. Calls may be
     /// outstanding concurrently — the id is the correlation — and
@@ -100,7 +139,9 @@ pub enum HostFrame {
     /// fail closed, exactly as the run's own retraction behaves).
     /// The cancellation CONTRACT mirrors the core tools' (ENGINE.md,
     /// token-and-detach): the host owns WHEN, the guest owns HOW —
-    /// long-running bodies poll their SDK's `is_cancelled`; a guest
+    /// the guest SDK fires the invocation's CancellationToken (the
+    /// wire's own leash primitive) and long-running bodies poll
+    /// `Ctx::cancelled()`; a guest
     /// that never checks simply finishes into the void, same as a
     /// core body that ignores its token.
     Cancel { call_id: String },
@@ -116,30 +157,17 @@ pub enum HostFrame {
     },
 }
 
-/// What a forwarded hook decided (checklist task 3). v1 carries the
-/// consumed decisions only: a policy hook runs the call or skips it
-/// with the in-band message (the denial channel), a result hook keeps
-/// the presentation. Rewrites and stops exist as engine actions but
-/// carry on no wire until a consumer asks for them.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(tag = "decision", rename_all = "snake_case")]
-pub enum HookDecision {
-    /// Execute the call (the neutral action).
-    Run,
-    /// Do not execute; the message is the feedback the model sees.
-    Skip { message: String },
-    /// Keep the result's presentation as-is (the neutral action for
-    /// `tool_result` hooks).
-    Keep,
-}
-
-/// A hook decision on the wire, correlated by the forwarded event's
-/// id.
+/// A hook answer on the wire, correlated by the forwarded event's
+/// id. The payload is the point's own answer type serialized
+/// ([`tabit_protocol::points`] — the shared definition both ends
+/// hold); the pipe carries it untyped and only the point's consumer
+/// parses it back, the same participant-blind law as every routed
+/// payload. An answer that does not parse is a failed handler — the
+/// consumer resolves the point's neutral (fail open).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct HookResult {
     pub hook_id: String,
-    #[serde(flatten)]
-    pub decision: HookDecision,
+    pub answer: serde_json::Value,
 }
 
 /// The envelope's verbs: fixed and typed per protocol version (the
@@ -148,21 +176,14 @@ pub struct HookResult {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "verb", rename_all = "snake_case")]
 pub enum ServiceVerb {
-    /// Verb zero — the interaction ask (the capability lift, folded
-    /// into the envelope 2026-09): `ui_type` + `payload` mirror the
-    /// engine's `UserInteraction` verbatim, so extensions use the
-    /// same `native:*` templates core tools do. The response's
-    /// `result` is the answer; its absence is the dismissal.
-    Ask {
-        ui_type: String,
-        payload: serde_json::Value,
-    },
-    /// Verb one — one model completion (checklist task 5):
-    /// complete-only (no streaming over the pipe), `max_tokens`
-    /// capped by the host. `model` is an optional provider/model or
-    /// bare-id reference; absent means the session's current model.
-    /// Usage bills to the session, tagged with the calling extension.
-    /// The response's `result` is `{ text, usage }`.
+    /// One model completion (checklist task 5): complete-only (no
+    /// streaming over the pipe), `max_tokens` capped by the host.
+    /// `model` is an optional provider/model or bare-id reference;
+    /// absent means the session's current model. Usage bills to the
+    /// session, tagged with the calling extension. The response's
+    /// `result` is `{ text, usage }`. (The envelope's other
+    /// historical verb — the interaction ask — was deleted in v3:
+    /// grammar emission superseded it.)
     ModelPrompt {
         prompt: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -187,11 +208,14 @@ pub struct ToolWireResult {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ExtFrame {
-    /// [`Ack`], on the wire.
-    Ack {
+    /// [`Report`], on the wire — the extension's first line.
+    Report {
         protocol_version: u32,
         tools: Vec<ToolDecl>,
         hooks: Vec<HookDecl>,
+        /// The subscription list ([`Report::watch`]).
+        #[serde(default)]
+        watch: Vec<String>,
     },
     /// [`ToolWireResult`], on the wire.
     ToolResult(ToolWireResult),
@@ -220,29 +244,34 @@ mod tests {
 
     #[test]
     fn host_frames_carry_the_type_tag() {
-        let line = serde_json::to_string(&HostFrame::Initialize {
-            protocol_version: EXTENSION_PROTOCOL_VERSION,
+        let line = serde_json::to_string(&HostFrame::HostFacts {
+            core_path: "C:/bin/tabit-core.exe".to_string(),
+            cwd: "C:/work/proj".to_string(),
         })
         .unwrap();
-        assert_eq!(line, r#"{"type":"initialize","protocol_version":1}"#);
+        assert_eq!(
+            line,
+            r#"{"type":"host_facts","core_path":"C:/bin/tabit-core.exe","cwd":"C:/work/proj"}"#
+        );
         let back: HostFrame = serde_json::from_str(&line).unwrap();
         match back {
-            HostFrame::Initialize { protocol_version } => {
-                assert_eq!(protocol_version, EXTENSION_PROTOCOL_VERSION);
+            HostFrame::HostFacts { core_path, cwd } => {
+                assert_eq!(core_path, "C:/bin/tabit-core.exe");
+                assert_eq!(cwd, "C:/work/proj");
             }
             HostFrame::ToolCall { .. }
             | HostFrame::ServiceResponse { .. }
             | HostFrame::Cancel { .. }
             | HostFrame::Hook { .. } => {
-                panic!("an initialize line parsed as another frame")
+                panic!("a host_facts line parsed as another frame")
             }
         }
     }
 
     #[test]
-    fn ack_round_trips_with_declarations() {
-        let frame = ExtFrame::Ack {
-            protocol_version: 1,
+    fn report_round_trips_with_declarations() {
+        let frame = ExtFrame::Report {
+            protocol_version: 3,
             tools: vec![ToolDecl {
                 name: "echo".to_string(),
                 description: "says it back".to_string(),
@@ -251,24 +280,61 @@ mod tests {
             hooks: vec![HookDecl {
                 event: "tool_call".to_string(),
             }],
+            watch: vec![
+                "session_opened".to_string(),
+                "interaction_settled".to_string(),
+            ],
         };
         let line = serde_json::to_string(&frame).unwrap();
         assert_eq!(
             line,
-            r#"{"type":"ack","protocol_version":1,"tools":[{"name":"echo","description":"says it back","schema":{"type":"object"}}],"hooks":[{"event":"tool_call"}]}"#
+            r#"{"type":"report","protocol_version":3,"tools":[{"name":"echo","description":"says it back","schema":{"type":"object"}}],"hooks":[{"event":"tool_call"}],"watch":["session_opened","interaction_settled"]}"#
         );
         let back: ExtFrame = serde_json::from_str(&line).unwrap();
         match back {
-            ExtFrame::Ack { tools, hooks, .. } => {
+            ExtFrame::Report { tools, watch, .. } => {
                 assert_eq!(tools.len(), 1);
-                assert_eq!(hooks.len(), 1);
+                assert_eq!(watch, vec!["session_opened", "interaction_settled"]);
             }
             ExtFrame::ToolResult(..)
             | ExtFrame::ServiceRequest { .. }
             | ExtFrame::HookResult(_) => {
-                panic!("an ack line parsed as another frame")
+                panic!("a report line parsed as another frame")
             }
         }
+    }
+
+    #[test]
+    fn the_shared_grammar_parses_flat_beside_the_lanes() {
+        // A command line is not an extension frame — the cascade's
+        // second step parses it.
+        assert!(
+            serde_json::from_str::<ExtFrame>(r#"{"type":"compact","session":"0197"}"#).is_err()
+        );
+        let command: tabit_protocol::SessionCommand =
+            serde_json::from_str(r#"{"type":"compact","session":"0197"}"#).unwrap();
+        assert!(matches!(
+            command,
+            tabit_protocol::SessionCommand::Compact { .. }
+        ));
+
+        // An event line parses as neither lane frame nor command.
+        assert!(serde_json::from_str::<ExtFrame>(
+            r#"{"type":"interaction_request","id":"req-1","ui_type":"native:select_one","payload":{}}"#
+        )
+        .is_err());
+        assert!(serde_json::from_str::<tabit_protocol::SessionCommand>(
+            r#"{"type":"interaction_request","id":"req-1","ui_type":"native:select_one","payload":{}}"#
+        )
+        .is_err());
+        let event: tabit_protocol::SessionEvent = serde_json::from_str(
+            r#"{"type":"interaction_request","id":"req-1","ui_type":"native:select_one","payload":{}}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            event,
+            tabit_protocol::SessionEvent::InteractionRequest { .. }
+        ));
     }
 
     #[test]
@@ -328,38 +394,92 @@ mod tests {
     }
 
     #[test]
-    fn the_service_envelope_round_trips() {
-        // Verb zero, folded: the ask rides the envelope.
-        let ask = ExtFrame::ServiceRequest {
-            request_id: "hello-1-ask-1".to_string(),
-            call_id: "hello-1".to_string(),
-            verb: ServiceVerb::Ask {
-                ui_type: "native:select_any".to_string(),
-                payload: serde_json::json!({"title": "T", "body": "B"}),
-            },
-        };
-        let line = serde_json::to_string(&ask).unwrap();
+    fn the_hook_lane_carries_the_points_own_answer() {
+        // v4: the envelope is untyped — the point's answer type
+        // (tabit_protocol::points) rides inside it whole, both
+        // directions pinned as bytes.
+        let verdict = ExtFrame::HookResult(HookResult {
+            hook_id: "gate-1-h2".to_string(),
+            answer: serde_json::to_value(tabit_protocol::points::CallVerdict::Skip {
+                message: "not tonight".to_string(),
+            })
+            .unwrap(),
+        });
+        let line = serde_json::to_string(&verdict).unwrap();
         assert_eq!(
             line,
-            r#"{"type":"service_request","request_id":"hello-1-ask-1","call_id":"hello-1","verb":"ask","ui_type":"native:select_any","payload":{"title":"T","body":"B"}}"#
+            r#"{"type":"hook_result","hook_id":"gate-1-h2","answer":{"verdict":"skip","message":"not tonight"}}"#
         );
         match serde_json::from_str::<ExtFrame>(&line).unwrap() {
-            ExtFrame::ServiceRequest {
-                request_id, verb, ..
-            } => {
-                assert_eq!(request_id, "hello-1-ask-1");
+            ExtFrame::HookResult(result) => {
+                let verdict =
+                    serde_json::from_value::<tabit_protocol::points::CallVerdict>(result.answer)
+                        .unwrap();
                 assert_eq!(
-                    verb,
-                    ServiceVerb::Ask {
-                        ui_type: "native:select_any".to_string(),
-                        payload: serde_json::json!({"title": "T", "body": "B"}),
+                    verdict,
+                    tabit_protocol::points::CallVerdict::Skip {
+                        message: "not tonight".to_string()
                     }
                 );
             }
             _ => panic!("wrong frame"),
         }
 
-        // Verb one: the model completion request, optional fields
+        // The observer point's unit answer: null on the wire (the
+        // unit's encoding, by definition).
+        let observed = ExtFrame::HookResult(HookResult {
+            hook_id: "title-1-h1".to_string(),
+            answer: serde_json::Value::Null,
+        });
+        let line = serde_json::to_string(&observed).unwrap();
+        assert_eq!(
+            line,
+            r#"{"type":"hook_result","hook_id":"title-1-h1","answer":null}"#
+        );
+    }
+
+    #[test]
+    fn a_model_reference_round_trips_through_the_envelope() {
+        // The override field is declared wire vocabulary — an
+        // explicit provider/model reference must survive the line
+        // (the None default is the sibling test's shape).
+        let prompt = ExtFrame::ServiceRequest {
+            request_id: "svc-2".to_string(),
+            call_id: "call-4".to_string(),
+            verb: ServiceVerb::ModelPrompt {
+                prompt: "with a reference".to_string(),
+                model: Some("p/other".to_string()),
+                max_tokens: None,
+            },
+        };
+        let line = serde_json::to_string(&prompt).unwrap();
+        assert!(
+            line.contains(r#""model":"p/other""#),
+            "the reference serializes: {line}"
+        );
+        match serde_json::from_str::<ExtFrame>(&line).unwrap() {
+            ExtFrame::ServiceRequest {
+                verb:
+                    ServiceVerb::ModelPrompt {
+                        model, max_tokens, ..
+                    },
+                ..
+            } => {
+                assert_eq!(model.as_deref(), Some("p/other"));
+                assert_eq!(max_tokens, None);
+            }
+            _ => panic!("the envelope round-trips"),
+        }
+    }
+
+    #[test]
+    fn the_service_envelope_round_trips() {
+        // v3: the ask verb is gone — an ask frame no longer parses
+        // (the grammar's interaction_request carries asks now).
+        let ask_line = r#"{"type":"service_request","request_id":"r","call_id":"c","verb":"ask","ui_type":"native:select_any","payload":{}}"#;
+        assert!(serde_json::from_str::<ExtFrame>(ask_line).is_err());
+
+        // The one verb: the model completion request, optional fields
         // absent by default and round-tripping.
         let prompt = ExtFrame::ServiceRequest {
             request_id: "hello-2-svc-1".to_string(),

@@ -9,36 +9,6 @@ where
 }
 
 #[test]
-fn the_replay_flag_serializes_only_when_set() {
-    // `replay: false` is the default and stays off the wire; `true`
-    // round-trips, and an absent flag parses back as false.
-    let bare = serde_json::to_string(&ClientFrame::Initialize {
-        protocol_version: PROTOCOL_VERSION,
-        replay: false,
-    })
-    .expect("serialize");
-    assert!(!bare.contains("replay"), "false is omitted: {bare}");
-    let parsed: ClientFrame = serde_json::from_str(&bare).expect("parse");
-    assert_eq!(
-        parsed,
-        ClientFrame::Initialize {
-            protocol_version: PROTOCOL_VERSION,
-            replay: false,
-        }
-    );
-    assert_eq!(
-        round_trip(&ClientFrame::Initialize {
-            protocol_version: PROTOCOL_VERSION,
-            replay: true,
-        }),
-        ClientFrame::Initialize {
-            protocol_version: PROTOCOL_VERSION,
-            replay: true,
-        }
-    );
-}
-
-#[test]
 fn commands_round_trip_with_snake_case_tags() {
     let commands = vec![
         SessionCommand::Message {
@@ -49,7 +19,7 @@ fn commands_round_trip_with_snake_case_tags() {
             session: "0197".to_string(),
         },
         SessionCommand::InteractionResponse {
-            session: "0197".to_string(),
+            session: Some("0197".to_string()),
             id: "0197-ask".to_string(),
             payload: serde_json::json!({
                 "option": "Deny",
@@ -57,7 +27,7 @@ fn commands_round_trip_with_snake_case_tags() {
             }),
         },
         SessionCommand::InteractionResponse {
-            session: "0197".to_string(),
+            session: Some("0197".to_string()),
             id: "0198-ask".to_string(),
             payload: serde_json::json!({"text": "use python"}),
         },
@@ -144,7 +114,7 @@ fn commands_round_trip_with_snake_case_tags() {
     );
     assert_eq!(
         serde_json::to_string(&SessionCommand::InteractionResponse {
-            session: "s1".to_string(),
+            session: Some("s1".to_string()),
             id: "0197".to_string(),
             payload: serde_json::json!({"option": "Deny"}),
         })
@@ -156,6 +126,8 @@ fn commands_round_trip_with_snake_case_tags() {
 #[test]
 fn event_frames_serialize_flat_with_the_stream_beside_the_tag() {
     let frame = EventFrame {
+        origin: None,
+        ttl: None,
         stream: Some(StreamId::new("0197-session")),
         event: SessionEvent::TextDelta {
             turn_id: "t1".to_string(),
@@ -195,6 +167,8 @@ fn checked_out_carries_its_suffix_seam_as_an_explicit_null() {
     // the reserved suffix upgrade flips it to Some without a shape
     // change the day a measured problem wants it.
     let frame = EventFrame {
+        origin: None,
+        ttl: None,
         stream: Some(StreamId::new("s1")),
         event: SessionEvent::CheckedOut {
             entry_id: "e9".to_string(),
@@ -214,6 +188,8 @@ fn checked_out_carries_its_suffix_seam_as_an_explicit_null() {
         )
         .expect("suffix shape"),
         EventFrame {
+            origin: None,
+            ttl: None,
             stream: Some(StreamId::new("s1")),
             event: SessionEvent::CheckedOut {
                 entry_id: "e9".to_string(),
@@ -227,6 +203,8 @@ fn checked_out_carries_its_suffix_seam_as_an_explicit_null() {
 fn sampled_event_variants_survive_the_frame_envelope() {
     let frames = vec![
         EventFrame {
+            origin: None,
+            ttl: None,
             stream: Some(StreamId::new("s1")),
             event: SessionEvent::UserMessage {
                 text: "hi".to_string(),
@@ -234,6 +212,8 @@ fn sampled_event_variants_survive_the_frame_envelope() {
             },
         },
         EventFrame {
+            origin: None,
+            ttl: None,
             stream: Some(StreamId::new("s1")),
             event: SessionEvent::TurnStarted {
                 id: "t1".to_string(),
@@ -241,6 +221,8 @@ fn sampled_event_variants_survive_the_frame_envelope() {
             },
         },
         EventFrame {
+            origin: None,
+            ttl: None,
             stream: Some(StreamId::new("s1")),
             event: SessionEvent::ToolCall {
                 turn_id: "t1".to_string(),
@@ -251,6 +233,8 @@ fn sampled_event_variants_survive_the_frame_envelope() {
             },
         },
         EventFrame {
+            origin: None,
+            ttl: None,
             stream: Some(StreamId::new("s1")),
             event: SessionEvent::TurnCommitted {
                 id: "t1".to_string(),
@@ -258,6 +242,8 @@ fn sampled_event_variants_survive_the_frame_envelope() {
             },
         },
         EventFrame {
+            origin: None,
+            ttl: None,
             stream: Some(StreamId::new("s1")),
             event: SessionEvent::ToolResult {
                 turn_id: "t1".to_string(),
@@ -270,6 +256,8 @@ fn sampled_event_variants_survive_the_frame_envelope() {
             },
         },
         EventFrame {
+            origin: None,
+            ttl: None,
             stream: Some(StreamId::new("s1")),
             event: SessionEvent::RunFinished {
                 output: "done".to_string(),
@@ -279,6 +267,8 @@ fn sampled_event_variants_survive_the_frame_envelope() {
             },
         },
         EventFrame {
+            origin: None,
+            ttl: None,
             stream: Some(StreamId::new("s1")),
             event: SessionEvent::RunFailed {
                 message: "boom".to_string(),
@@ -288,6 +278,8 @@ fn sampled_event_variants_survive_the_frame_envelope() {
             },
         },
         EventFrame {
+            origin: None,
+            ttl: None,
             stream: Some(StreamId::new("s1")),
             event: SessionEvent::RunAborted {
                 output: "partial".to_string(),
@@ -296,6 +288,8 @@ fn sampled_event_variants_survive_the_frame_envelope() {
             },
         },
         EventFrame {
+            origin: None,
+            ttl: None,
             stream: Some(StreamId::new("s1")),
             event: SessionEvent::CheckedOut {
                 entry_id: "0197".to_string(),
@@ -303,6 +297,8 @@ fn sampled_event_variants_survive_the_frame_envelope() {
             },
         },
         EventFrame {
+            origin: None,
+            ttl: None,
             stream: Some(StreamId::new("s1")),
             event: SessionEvent::InteractionRequest {
                 id: "0199".to_string(),
@@ -330,56 +326,35 @@ fn sampled_event_variants_survive_the_frame_envelope() {
 }
 
 #[test]
-fn client_frames_parse_initialize_and_commands_from_one_line_shape() {
-    let init: ClientFrame = serde_json::from_str(r#"{"protocol_version":1}"#).expect("initialize");
-    assert_eq!(
-        init,
-        ClientFrame::Initialize {
-            protocol_version: 1,
-            replay: false,
-        }
-    );
-    let replaying: ClientFrame =
-        serde_json::from_str(r#"{"protocol_version":2,"replay":true}"#).expect("replaying");
-    assert_eq!(
-        replaying,
-        ClientFrame::Initialize {
-            protocol_version: 2,
-            replay: true,
-        }
-    );
-    let command: ClientFrame =
+fn client_lines_are_bare_commands() {
+    // v19: the handshake died with the report model — a client line
+    // IS a command, from the spawner's very first line onward.
+    let command: SessionCommand =
         serde_json::from_str(r#"{"type":"message","session":"s1","text":"hi"}"#).expect("command");
     assert_eq!(
         command,
-        ClientFrame::Command(SessionCommand::Message {
+        SessionCommand::Message {
             session: "s1".to_string(),
             text: "hi".to_string()
-        })
+        }
     );
-    let open: ClientFrame =
+    let open: SessionCommand =
         serde_json::from_str(r#"{"type":"open_session","id":"s2"}"#).expect("open");
     assert_eq!(
         open,
-        ClientFrame::Command(SessionCommand::OpenSession {
+        SessionCommand::OpenSession {
             id: "s2".to_string()
-        })
+        }
     );
-    assert!(serde_json::from_str::<ClientFrame>("not json at all").is_err());
+    assert!(serde_json::from_str::<SessionCommand>("not json at all").is_err());
 }
 
 #[test]
 fn server_control_frames_round_trip_and_stay_distinct_from_events() {
-    let ack = ServerControlFrame::InitializeAck {
+    let report = ServerControlFrame::Report {
         protocol_version: PROTOCOL_VERSION,
-        session_id: "s1".to_string(),
     };
-    assert_eq!(round_trip(&ack), ack);
-
-    let rejected = ServerControlFrame::InitializeRejected {
-        reason: "protocol version 1 required".to_string(),
-    };
-    assert_eq!(round_trip(&rejected), rejected);
+    assert_eq!(round_trip(&report), report);
 
     let error = ServerControlFrame::ProtocolError {
         message: "unparseable line".to_string(),
@@ -392,6 +367,8 @@ fn server_control_frames_round_trip_and_stay_distinct_from_events() {
     assert_eq!(frame, ServerFrame::Control(error));
 
     let event_line = serde_json::to_string(&EventFrame {
+        origin: None,
+        ttl: None,
         stream: Some(StreamId::new("s1")),
         event: SessionEvent::RunFailed {
             message: "boom".to_string(),
@@ -482,4 +459,62 @@ fn the_compaction_bracket_and_command_round_trip() {
             message: "cancelled".to_string(),
         }
     );
+}
+
+/// Every command's `tag()` is its serde `type` — the routing layer's
+/// by-type tables key on the same string the wire carries, so the
+/// agreement is pinned, not assumed (the event twin lives in
+/// events_tests).
+#[test]
+fn every_command_tag_agrees_with_the_wire() {
+    use serde_json::Value;
+
+    fn tag_of(command: crate::SessionCommand) -> &'static str {
+        let line = crate::to_wire_line(&command);
+        let value: Value = serde_json::from_str(&line).expect("a command serializes");
+        let wire_tag = value["type"].as_str().expect("the type tag").to_string();
+        assert_eq!(wire_tag, command.tag(), "the wire tag and tag() disagree");
+        command.tag()
+    }
+
+    let every = [
+        tag_of(crate::SessionCommand::Message {
+            session: "s".to_string(),
+            text: String::new(),
+        }),
+        tag_of(crate::SessionCommand::Abort {
+            session: "s".to_string(),
+        }),
+        tag_of(crate::SessionCommand::Continue {
+            session: "s".to_string(),
+        }),
+        tag_of(crate::SessionCommand::InteractionResponse {
+            session: None,
+            id: "a-1".to_string(),
+            payload: serde_json::json!({}),
+        }),
+        tag_of(crate::SessionCommand::NewSession),
+        tag_of(crate::SessionCommand::OpenSession {
+            id: "s".to_string(),
+        }),
+        tag_of(crate::SessionCommand::Checkout {
+            session: "s".to_string(),
+            entry_id: "e-1".to_string(),
+        }),
+        tag_of(crate::SessionCommand::Model {
+            session: "s".to_string(),
+            provider: "p".to_string(),
+            model: "m".to_string(),
+            thinking_level: None,
+        }),
+        tag_of(crate::SessionCommand::Compact {
+            session: "s".to_string(),
+            directives: None,
+        }),
+    ];
+    // Nine commands, nine distinct tags.
+    let mut seen = every.to_vec();
+    seen.sort_unstable();
+    seen.dedup();
+    assert_eq!(seen.len(), every.len(), "every command tag is distinct");
 }

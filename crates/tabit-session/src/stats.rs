@@ -9,8 +9,8 @@
 //! rates in effect, the owner's invoice ruling 2026-09) — never
 //! re-derived from the config's current rates at read.
 
-use rig_core::completion::Usage;
 use std::collections::BTreeMap;
+use tabit_providers::completion::Usage;
 
 /// The one token-accumulation arithmetic (the ledger's, and the run
 /// summaries' through the session facade).

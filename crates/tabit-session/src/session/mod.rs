@@ -1,5 +1,5 @@
 //! The session facade: owns the entry log, the model selection, and the
-//! outer loop's policy, and consumes the rig-agent item stream as its
+//! outer loop's policy, and consumes the tabit-engine item stream as its
 //! driver.
 //!
 //! User messages enter through one door — the run-agnostic mailbox
@@ -9,7 +9,7 @@
 //! a message submitted at any instant is never lost; only the clear
 //! sites discard queued messages (abort, checkout — each only what was
 //! submitted before it). Each pump iteration is one outer loop: the user
-//! message commits through the prompt barrier, the rig-agent engine runs
+//! message commits through the prompt barrier, the tabit-engine engine runs
 //! the turns (a recorder hook stages each completed turn; the roundtrip
 //! commits atomically when the item stream closes it), and the item
 //! stream is folded into the serializable event list a frontend
@@ -51,12 +51,12 @@ use crate::interaction::InteractionHub;
 use crate::notice::NoticeSlot;
 use crate::stats::{ModelStats, SessionStats, UsageLedger};
 use mailbox::Mailbox;
-use rig_agent::agent::Agent;
-use rig_agent::completion::Message;
-use rig_agent::tool::DynamicTool;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use tabit_config::TabitConfig;
+use tabit_engine::agent::Agent;
+use tabit_engine::completion::Message;
+use tabit_engine::tool::DynamicTool;
 use tabit_protocol::{ModelSelection, SessionEvent};
 use tokio_util::sync::CancellationToken;
 
@@ -89,7 +89,7 @@ pub struct Session {
     model_factory: ModelFactory,
     /// The assembly's mounted hook stack (see
     /// [`SessionBuilder::hooks`]); added to every run.
-    run_hooks: Option<rig_agent::agent::HookStack>,
+    run_hooks: Option<tabit_engine::agent::HookStack>,
     /// The built agent — a derived cache of `selection`, not a second
     /// truth. Run open rebuilds it whenever it no longer matches the
     /// selection (owner ruling 2026-08: check at the single point of
@@ -134,11 +134,14 @@ pub struct Session {
     /// folds and grows; nothing persists), so there is nothing to
     /// resume, replay, or list. The subagent scratch child.
     path: Option<PathBuf>,
-    /// The working directory this session runs in — recorded in the
-    /// header, mounted into every run's tool context as
-    /// [`SessionCwd`](rig_agent::tool::SessionCwd) so relative tool
-    /// paths and spawned commands resolve against it, not the process
-    /// cwd (the subagent ruling: a child may scope elsewhere).
+    /// The working directory this session runs in — the process cwd at
+    /// assembly (owner ruling 2026-09-27: the header records no cwd; a
+    /// resumed session adopts the caller's world, so a moved project
+    /// resumes where it now lives) — mounted into every run's tool
+    /// context as [`SessionCwd`](tabit_engine::tool::SessionCwd) so
+    /// relative tool paths and spawned commands resolve against it (a
+    /// child scopes elsewhere by being its own process, spawned with
+    /// its own cwd).
     cwd: PathBuf,
     id: String,
     /// Whether this session continues an existing chain (`resume`) or
@@ -155,10 +158,20 @@ pub struct Session {
     /// ([`SessionBuilder::subagents`]): the process-wide parts; the
     /// per-run capability is minted at run open.
     subagent_parts: Option<Arc<crate::subagent::SubagentParts>>,
+    /// The session's kept-alive subagent children (the `subagent`
+    /// tool parks its completed children, the `followup` tool
+    /// addresses them by id): always minted, aged at every parent
+    /// turn boundary — an empty pool costs nothing. Session-scoped,
+    /// never process-wide: one backend hosts many sessions and their
+    /// children must not mix.
+    subagent_pool: Arc<crate::subagent_pool::SubagentPool>,
     /// The skills catalog, when the assembly mounted it
-    /// ([`SessionBuilder::skills`]): one discovery per process,
-    /// inserted as typed tool context at run open for the `skill`
-    /// tool.
+    /// ([`SessionBuilder::skills`]): ONE DISCOVERY PER SESSION (the
+    /// session-level catalog ruling, 2026-09 — the ladder runs over
+    /// the session's own cwd at build, the extension contribution
+    /// folded in process-level), inserted as typed tool context at
+    /// run open for the `skill` tool and announced as the session
+    /// becomes visible.
     skills: Option<Arc<crate::skills::Skills>>,
     /// The frontend channel's weak, pre-stamped handle for module-level
     /// emissions — anything a session subsystem emits outside a run's
@@ -208,17 +221,10 @@ impl Session {
 
     /// Attach the frontend channel module-level emissions forward
     /// through (subagent child events, the compaction bracket). Called
-    /// once by the session worker at spawn; the sink keeps the notice
-    /// discipline (weak, pre-stamped — the stream ends with the
-    /// frontend).
-    pub fn attach_event_tap(
-        &mut self,
-        events: &tokio::sync::mpsc::UnboundedSender<tabit_protocol::EventFrame>,
-    ) {
-        let _ = self.event_tap.set(crate::notice::NoticeSink::new(
-            events,
-            tabit_protocol::StreamId::new(self.id.clone()),
-        ));
+    /// once by the session worker at spawn — a sink over the session's
+    /// channel, stamped with the session's stream.
+    pub fn attach_event_tap(&mut self, sink: crate::notice::NoticeSink) {
+        let _ = self.event_tap.set(sink);
     }
 
     /// The session id.
@@ -230,6 +236,18 @@ impl Session {
     /// session (nothing to resume or list).
     pub fn path(&self) -> Option<&Path> {
         self.path.as_deref()
+    }
+
+    /// The session's skills catalog as its wire snapshot (empty
+    /// when the assembly mounted none) — the session-level catalog
+    /// ruling: each session's `skills_available` carries its own
+    /// stamp and its own discovery, announced as the session becomes
+    /// visible.
+    pub(crate) fn skills_available(&self) -> Vec<tabit_protocol::AvailableSkill> {
+        self.skills
+            .as_ref()
+            .map(|s| s.available())
+            .unwrap_or_default()
     }
 
     /// The path as the wire carries it — the empty string for an
@@ -283,7 +301,7 @@ impl Session {
         stats
     }
 
-    /// The replay pass (PROTOCOL.md v2): the active branch (the
+    /// The replay pass: the active branch (the
     /// temporary path container, materialized on demand) projected into
     /// finalized live events — the same shapes a live run produces,
     /// ids verbatim from the tree, so a frontend renders history and

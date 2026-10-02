@@ -1,12 +1,13 @@
 //! Session file storage: one JSONL file per session under a caller-chosen
 //! directory.
 //!
-//! The default location is project-local — `<project-root>/.tabit/sessions`
-//! with the project root discovered from the working directory (git root,
-//! else the working directory itself) — because a path relative to the
-//! project survives renames and moves, unlike a home-dir layout keyed by
-//! the absolute cwd. The directory is always a constructor argument, so a
-//! future config option can point it anywhere without touching this module.
+//! The default location is project-local — `<cwd>/.tabit/sessions`,
+//! the working directory the backend was started in, with no
+//! project-root discovery (do not assume a git repo) — because a
+//! path relative to the project survives renames and moves, unlike a
+//! home-dir layout keyed by the absolute cwd. The directory is
+//! always a constructor argument, so a future config option can
+//! point it anywhere without touching this module.
 //!
 //! The store is directory management and nothing else: it names files,
 //! lists them, and hands their bytes to the parser. What a session file
@@ -35,8 +36,6 @@ pub struct SessionSummary {
     pub id: String,
     /// Creation time (RFC 3339).
     pub created_at: String,
-    /// Working directory recorded at creation.
-    pub cwd: String,
     /// Number of entries in the file.
     pub entry_count: usize,
     /// The session file.
@@ -71,14 +70,15 @@ impl SessionStore {
     /// Prepare a new session. Nothing touches the disk: the writer holds
     /// its header in its queue and the file materializes on the first
     /// drain, so a session that never commits — no user message — leaves
-    /// no orphan behind.
-    pub fn create(&self, cwd: &str) -> SessionWriter {
+    /// no orphan behind. The header records no cwd: the session's world
+    /// is the process cwd at assembly (the 2026-09-27 ruling).
+    pub fn create(&self) -> SessionWriter {
         let header = SessionHeader {
             version: SESSION_FORMAT_MAJOR,
             minor: SESSION_FORMAT_MINOR,
             id: ids::new_session_id(),
             created_at: ids::now_rfc3339(),
-            cwd: cwd.to_string(),
+            cwd: None,
             parent_session: None,
         };
         let file_name = format!("{}_{}.jsonl", ids::filename_timestamp(), header.id.as_str());
@@ -138,7 +138,6 @@ impl SessionStore {
             summaries.push(SessionSummary {
                 id: header.id,
                 created_at: header.created_at,
-                cwd: header.cwd,
                 entry_count,
                 path,
             });

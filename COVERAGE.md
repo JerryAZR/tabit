@@ -58,7 +58,39 @@ conformance harness when that grows its event-level scenarios.
 - The whole suite runs offline (cassette replay + test doubles). Doctests
   are NOT included in these numbers (`llvm-cov` was run without
   `--doctests`); they are gated by the same CI run.
-- Current state: **93.61% lines / 92.77% regions** (2,643 of 41,334
+- Current state: **93.1% lines** (3,184 of 46,126; the coverage
+  round's re-collection — the two-leg pass: the llvm-cov
+  re-triage plus a four-reviewer functional sweep whose verified
+  finds filled ~45 scenario gaps and surfaced one unwired port
+  (pi-sanity's tmp-rewrite, wired into the gate this round —
+  see the round's section below). Per crate: the rig crates hold
+  97.9/96.9/98.2; tabit-session 96.5%, tabit-tools 96.3%,
+  tabit-wire 93.6% (client.rs 85.8, router 94.5, node ~99),
+  tabit-config 96.8%, tabit-log 92.9%, tabit-protocol 99.3%,
+  tabit-gate 85.7% (the corpus arms — config.rs's loader contract
+  included — are the port plan's first target),
+  tabit-ext-install 89.2%, tabit-ext 68.2% and tabit-ext-sdk
+  53.8% (the 0% example/test bins dominate: ext-double 289,
+  lmstudio 106, echo/child-ext/autotitle/clash/shadow — the
+  class-6 spawned-child attribution family), tabit-core 64.8%
+  (main.rs 61.2% and extensions.rs 52% — the standing child-role
+  and binary-assembly classes). Before this round:
+  **90.58% lines** (4,389 of 46,568; the clean
+  re-collection after the node-runtime increment — the first
+  measurement of the extension arc, which grew the base 41,334 →
+  46,568: tabit-ext/-sdk/-install/-gate, the GUI's growth,
+  tabit-wire, the core binary. The drop from 93.61% is concentrated,
+  not diffuse: ext-sdk 17.4% (the SDK lib runs inside the spawned
+  example bins — the class-6 attribution family at its largest),
+  tabit-core 57.1% and tabit-gui 36.2% (the standing child-role and
+  egui justifications), tabit-gate 82.1% (pi-sanity's corpus is the
+  port plan); the rig crates hold their historical 97.9/96.9,
+  tabit-session 94.1%, tabit-log 92.9%. Regions were not re-derived
+  this round — see the round's methodology notes. The collection
+  raced the round's fills: the first four were compiled into the
+  run, the rest verified with a crate-scoped re-measure
+  (`node.rs` 272/273 post-fill). Before that:
+  **93.61% lines / 92.77% regions** (2,643 of 41,334
   lines; re-measured after the delta-tokens compaction refactor and
   the subagent pairing round — the deferred item below, closed. The
   round's finds: the pass cap had never fired (a 410×2,000-token
@@ -182,13 +214,13 @@ conformance harness when that grows its event-level scenarios.
 ## Filled
 
 Three passes over the workspace drove the line coverage from 87.0% to
-97.3% (~250 new tests across rig-core, rig-agent, and rig-derive). The
+97.3% (~250 new tests across tabit-providers, tabit-engine, and tabit-derive). The
 tests themselves are the record; notable full-coverage files include
 `completion/message.rs`, `http_client/retry.rs`, `http_client/multipart.rs`,
 `client/*`, `embeddings/*`, `loaders/file.rs`, `vector_store/*`,
 `providers/anthropic/*`, `providers/openai/{client,embedding,model_listing}`,
 `providers/internal/wire.rs`, `tool/{output,portable,result}.rs`,
-`json_utils.rs`, `agent/{model,tool}.rs`, `rig-derive` (in-crate unit tests
+`json_utils.rs`, `agent/{model,tool}.rs`, `tabit-derive` (in-crate unit tests
 for the proc-macro grammar + `tests/embed_behavior.rs` for the Embed
 codegen).
 
@@ -214,10 +246,17 @@ one-huge-line notice). Remaining residue, classified:
   PATH/registry sandbox or a test seam the design deliberately does
   not have (resolution is process-global by OnceLock, once).
 - `lib.rs` (bash core) — the spawn-failure arm (`cannot start`), the
-  cancellation-mid-run arm (races a fast scheduler; the pre-cancelled
-  door IS tested), the wait-error arm, pipe-missing arms (a
+  wait-error arm, pipe-missing arms (a
   process-wrap internal failure), the spill-write failure arm. All
   need filesystem/process fault injection the suite does not have.
+  — Revised 2026-09 (the coverage round): the cancellation-mid-run
+  arm was justified here as a scheduler race, which does not hold —
+  `sleep 30` plus a 150 ms thread cancel is deterministic, and
+  `a_cancel_during_a_run_interrupts_the_command` now pins the abort
+  door (kill + the interrupted report) alongside the pre-cancelled
+  and timeout doors. The stderr join (`--- stderr ---`) gained its
+  first assertion the same round
+  (`stderr_joins_the_report_behind_its_marker`).
 - `file_io.rs` — the fault arms: `create_dir_all` failure, parent
   metadata error, plain-write failure, temp-stage/write/persist
   failures. Same fault-injection class.
@@ -487,6 +526,296 @@ re-measures against known intent rather than discovering it.
   shadow's death restoring the core tool at the next run open) is
   ruled but unimplemented — its seam is named in EXTENSIONS.md.
 
+## The node runtime round (2026-09): tabit-wire's assessment
+
+The coverage round over `tabit-wire` — the node runtime (node.rs,
+router.rs, asks.rs) against the seven routing laws, plus the
+pre-node child-process substrate the crate also carries. Per file
+(workspace-merged): `node.rs` 98.6% (post-fill scoped: 272/273),
+`asks.rs` 99.4%, `router.rs` 90.2%, `routing.rs` 97.3%,
+`process.rs` 95.6%, `client.rs` 81.8% (its consumers are the
+subprocess bridge and the SDK's owned children — crate-scoped it has
+no tests of its own).
+
+**Filled** (the functional review's finds — every sweep test
+previously dropped the asker's awaiter before sweeping, so the
+promise semantics were implied, not pinned):
+
+- `handle_all` had zero callers and zero tests — the one-intake
+  mount is now pinned
+  (`a_one_intake_layer_handles_every_command_type`).
+- **Dismissal read by a live awaiter**: the run-death sweep test now
+  holds the awaiter and asserts `blocking_recv()` is `Err` — law 6's
+  drop-equals-dismissal, at the reading end.
+- **Claim-and-discard at the origin** (the entry-owned-settles
+  ruling's other half): a settle arriving for a locally-held promise
+  dismisses the awaiter directly, the `Orphaned` arm never runs, the
+  node announces nothing of its own (the arrival IS the settle), and
+  the dismissed entry is gone for a late answer
+  (`an_arriving_settle_dismisses_the_origin_without_reannouncing`).
+- `parse_shared`'s discrimination (event line, command line, noise)
+  — the wire helpers only ever fed valid lines.
+- The local channel's no-op answer delivery: a hand-emitted ask
+  arriving on a LOCAL channel has no answer route home — the
+  documented dead end, now pinned rather than merely reachable.
+- Strictness: the miss-error and wrong-kind assertions now pin
+  `error:session@-` — unstamped AND session-kind (FRONTEND.md's
+  stamp-law shape); before, they matched any unstamped error.
+
+**Deleted, not documented:** `Node::name()` — zero callers (the
+stderr report and the id mint read the field directly). It returns
+with a consumer.
+
+**Justified residue:**
+
+- `node.rs` 297 — the channel co-subscription's closing-brace
+  region; the closure body beside it is covered, in-process and over
+  the real pipes. Class 8.
+- `asks.rs` 48 — `unanswer`'s downcast-fail panic, the sanctioned
+  crash: the correlation-kind law at claim guarantees the shape the
+  closure downcasts, so a mismatch requires an internal pairing bug.
+- `router.rs` 54-56 / 63-68 / 87-89 — the `Routed` trait's symmetry
+  methods the current net never invokes on that side
+  (`EventFrame::session/response/shared_command`,
+  `SessionCommand::ask`): the trait demands all five of every
+  implementor, and each is called where its vocabulary uses it
+  (events mint asks; commands answer them). Class 3.
+- `router.rs` 79-81 / 83 — the `session()` or-pattern arms for
+  Continue/Checkout/Model/Compact (mirrors of the covered
+  Message/Abort arms; routing them would assert serde field names,
+  not routing) and InteractionResponse's arm (unreachable through
+  `route_command`'s order: a response is claimed before session
+  routing is consulted).
+- The TTL expiry's stderr report: the report's terminality IS the
+  design (an error event would re-enter the looping net); the
+  behavioral pins — bounded laps, a terminated cycle — carry the
+  law.
+
+**Deferred** (the port-time list): concurrent askers at the node
+level (the session layer's actor twin — two open cards answered in
+reverse order — holds the semantics until the session-edge port),
+mesh/off-path settle clears, multi-hop settles over real pipes.
+
+`client.rs` / `process.rs` residue is the recorded process-fault
+family (the rejected/hung handshake; the crash-synthesis and
+abort-leash arms of `settle` are now PINNED — 2026-09, the round
+that also fixed the synthesis to await the reaper's exit record, so
+the report carries the exit code instead of "no exit recorded";
+`stub_settle` grew `die`/`hang` modes, the fault-injection child
+this family once lacked — and the pump's garbage-line skip), the
+deferred `--session` builder, and the dead `stream`/`frames` getters
+on the standing dead-pub-API list; increment 2's client
+generalization revisits the file wholesale.
+
+**Methodology notes from this round:**
+
+- **Stale coverage state poisons the merge.** Profraws left under
+  `target/llvm-cov*` by a pre-extension-arc session merged ghost
+  records — files deleted weeks ago appearing with zero hits,
+  dragging the workspace to a false ~71%. Clean before collecting
+  (`rm -rf target/llvm-cov target/llvm-cov-target`).
+- lcov emits one SF record per compilation (the unit-test build and
+  the integration build of the same file are separate records); a
+  reader must merge — a line is covered if ANY record counted it.
+  Last-record-wins undercounts by exactly the losers.
+- Integration-test files (`tests/*.rs`) do not appear as SF records
+  at all; their library-code exercise merges into the src records
+  (verified: the channel co-subscription closure, reachable only
+  over the real pipes, is covered). Test files are not shipped code.
+- `--html` and `--lcov` cannot combine in one invocation, and lcov
+  BRDA is unmapped without `--branch`; regions were not re-derived
+  this round (previous region figures came from llvm-cov's own
+  summary output).
+
+## The coverage round (2026-09): re-collection + the functional review
+
+The two-leg pass the maintenance rule calls for: a fresh llvm-cov
+collection with every gap re-triaged (fill / justify / defer), and a
+functional review — four fresh-eye reviewers built scenario-vs-test
+matrices over the tabit crates, and every claimed gap was
+grep-verified before action (one contract test's very name promised
+a failing body while asserting the clash pair's success — verified,
+and now truly pinned). Result: **93.1% lines**, ~45 new scenario
+tests, one unwired port completed, three standing justifications
+revised where their stated reasons did not hold.
+
+**The round's biggest find — an unwired port, not a missing test.**
+`tabit-gate/src/tmp_rewrite.rs` measured 0%: pi-sanity's tmp-rewrite
+ported as pure functions with ZERO callers. The module's own doc
+("the integration rewrites /tmp paths BEFORE running permission
+checks") and the gate hook's comment ("post-rewrite") described a
+contract nothing delivered. On Windows a `write /tmp/x` passed the
+check through the `/tmp/**` allow override while the tool would
+actually write `C:\tmp\x` (drive-root junk), and bash (MSYS maps
+/tmp to %TEMP%) would never see the file — the check and the
+execution disagreed, exactly the divergence the port existed to
+prevent. Fixed at the root: the gate hook rewrites configured
+file-tool params to the real temp dir before checking and returns
+the rewritten map as the effective arguments
+(`ToolCallAction::rewrite` — the engine's existing chain, so later
+hooks and execution see the checked paths), pinned red-green by
+`a_posix_tmp_path_is_rewritten_to_the_real_dir_before_the_check`
+plus nine pure-function tests (`tests/tmp_rewrite.rs`, including
+the `createEmptyConfig` empty-shape pin).
+
+**Filled (the functional review's verified finds):**
+
+- **The gate card matrix** (`tabit-core/src/gate.rs` tests, over a
+  new `tabit_engine::test_utils::hook_context` seam — hosts drive
+  mounted hooks directly over the same capability lookup the engine
+  uses): the whole decision table plus the card shape.
+- **tabit-wire**: the child-role CLI mapping (`ChildSpec::
+  command_line`, extracted pure from `spawn` — the argv contract
+  had zero tests anywhere); the router's same-owner dedup refuse
+  (kind table and wildcard) and the wildcard-table death sweep;
+  `asks`' terminal-sweep obligation arm and the lock-free
+  re-entrant delivery (a delivery closure may re-enter the
+  registry); the node's route re-teach (a stream re-heard on a new
+  channel re-routes — last heard on wins) and the mint-violating
+  frame never reaching local subscribers.
+- **tabit-session**: the `open_session` door's skills announcement
+  (the third copy of the per-session ruling — unpinned before);
+  the compact slot's collapse-to-one and abort-drop (the checkout
+  twins' laws, staged on a provably-busy beat via the blocking
+  tool); the replay flag's collapse; the edge's end-path drain
+  asserted on content (not exit code alone), CRLF input tolerance,
+  and a REAL cold open over the wire (the multi-session test
+  re-opened its resident boot session — the `open` closure never
+  ran; it now opens a pre-seeded stored session first); skills'
+  empty-rel-path default, rel-path file read, and not-found arms;
+  the subagent Completed cargo (`child_id` — the pairing fact the
+  docs call load-bearing, asserted for the first time) and a
+  failing-child e2e over the real binary (the offline provider
+  drives `FailedWith` through the bridge to the Failed mapping,
+  the child's own reason surfacing); the services' valid
+  model-override arm (billed at the override's own row).
+- **tabit-ext / -sdk**: the envelope's `model: Some` field
+  round-trips (declared wire vocabulary, never exercised); the
+  SDK's undeclared-tool error (and clean token sweep), body-Err and
+  body-panic results (`run_call`'s arms — the misnamed contract
+  test's claim is finally backed by a real pin); the answerer
+  mode's ANSWERING half (`an_on_ask_body_answers_the_card_and_the_
+  response_rides_home` — zero coverage at any level before; the
+  close vocabulary correctly stays the origin's, asserted).
+- **tabit-tools**: the bash abort door (see the revised
+  justification above), the stderr join, read's limit-0 page.
+- **tabit-config**: a broken settings layer fails loudly through
+  `load_default` — the door users actually hit (only the direct
+  load was fed before).
+- **tabit-ext-install**: the manifestless-package validate refusal
+  (the never-leaves-a-half-package contract's front door; the root
+  stays clean) and uninstall of a never-installed name.
+- **tabit-engine**: detach-on-drop — the token-and-detach ruling's
+  detach half had no pin (a parked body, the dispatch future
+  dropped without joining, a later dispatch works; drives the
+  `MockControlledTool` pair that existed unused for it).
+
+**Justified (re-derived against this round's lcov):** the corpus
+deferral for tabit-gate's remaining policy arms (config.rs 69.8% —
+the loader's backwards rules parse, catch-all override, and warning
+sinks lead the port plan); the example/test bins at 0% (ext-double
+289 lines, lmstudio 106, echo/child-ext/autotitle/clash/shadow —
+spawned children, class-6 attribution; the SDK's own lib rose to
+67% through its in-crate suite); tabit-core's child-role arms and
+binary assembly (main.rs 61.2%, extensions.rs 52%); the standing
+write-fault, platform-absence, and lock-timeout classes
+(`tabit-log` writer/lock arms unchanged).
+
+**Deferred (explicit — each names what a test would need):** the
+supervisor's wrong-kind correlation refusals and the SDK's mirror
+`WrongKind` death (an ext-double mode answering a call id with the
+wrong kind); the SDK's strict-frame process exits (unknown watch
+kind, unparseable line — `die` exits, needs a process-level
+harness) and `serve`'s seen-kinds dedup (drives only inside the
+bins); the owned-child cancel leash e2e (`Settlement::Aborted` —
+**filled 2026-09**: `stub_settle`'s `hang` mode is the slow child,
+and the wire net's cancelling-the-leash pin drives cancel → Abort →
+close → `Aborted` over a real pipe);
+`extensions.rs`'s hook forwarding through the real `mount()` and
+the pre-send dead-lane fail-open (an e2e installing a
+hook-declaring package); the wire client's boot-timeout,
+stdout-closed-before-boot, and first-frame-not-Report stubs
+(`BOOT_TIMEOUT` is a const — needs a seam or stub variants); the
+lane's exit sweep through the real client; `crash_report` and the
+stderr ring; the SpawnContext per-run snapshot under a mid-run
+model switch; the interaction hub's promise-death `Dismissed` arm;
+the npm version-pin and tarball-escape install scenarios
+(fake-registry variants); autotitle's once-per-session
+second-hook dedup. (Print-mode `--rewind` and the json-mode
+startup-failure shapes left this list 2026-09 — the tabit-core
+split round filled them, below.)
+
+## The tabit-core split round (2026-09): fill, justify, or delete
+
+The 2,373-line main.rs decomposed (cli / assemble / print + a thin
+entry); this round triaged the split modules' gaps against the
+policy. Scoped measurement: `cargo llvm-cov -p tabit-core --lcov
+--ignore-run-fail` (the scope cannot build the SDK's example
+binaries, so extension_tools/subprocess_children fail under the
+coverage target dir — their subject is spawned processes either way,
+class 6 both ways; the split's files moved to the tabit-app crate
+2026-09 — the composition-root extraction — attribution follows
+the code). Unit-attributed per file: assemble.rs 92.0%,
+cli.rs 96.9%, gate.rs 98.2%, extensions.rs 60.4%, print.rs 20.1%,
+main.rs 0% — 70.8% of 2,082 instrumented lines.
+
+**Filled (attributed, unit — `assemble.rs` tests):** the core
+toolset's role independence (`core_tools` mounts the delegation pair
+in every process — the 2026-09-27 ruling: recursion is the spawner's
+forwarded blacklist, never a role check; the pre-ruling role pin
+died with the check); `host_data`'s closures end to end (create is
+always fresh; open resolves the stored id and resumes it — the open
+path needs a file-backed session, staged the real way: one run over
+the dead-port provider commits the user message, the run fails, the
+file exists — deferred creation is the catalog's law; the unknown
+id is the loud named error); the ephemeral in-memory boot
+(`path().is_none()`); the filter semantics (unknown flag names
+match nothing — include/exclude-if-it-exists — and a matching-
+nothing allow is a legal tool-less session).
+
+**Filled (behavioral, class-6 e2e — `tests/modes.rs`, the real
+binary over an httpmock SSE provider with per-child env):** print
+mode's happy path (exit 0; the answer on stdout; the banner AND
+footer on stderr — stdout stays the answer channel; the footer's
+usage matches the chunk's `3 in / 2 out`; exactly one session file
+left behind); the promptless `--rewind` (the dropped-count marker,
+no run) then the branch from before the dropped message in the
+SAME file (rewind branches, it does not fork) — a standing
+deferral, closed; `--list` over an empty and a staged store; and
+the json startup-failure pair — a broken `TABIT_CONFIG` carries
+the first-run guide (report line first, the error event, the
+stderr echo, exit 1) while an unreadable `--session` carries the
+plain `could not start the session` reason and NOT the guide —
+the other standing deferral, closed.
+
+**Justified (standing classes, renumbered to the split):** main.rs
+0% attributed — `run`/`main`/the failure reporters execute only in
+spawned processes, asserted by the modes and crash e2e (class 6);
+`main`'s subscriber install (2026-09) is behaviorally pinned the
+same way — the modes e2e stages a broken skill and asserts the
+discovery warn crosses stderr through it;
+print.rs 20.1% — the stdin watcher and the FIFO card queue own
+real stdin (the standing justification, relocated from the
+pre-split main.rs entry), and `print_mode`/`print_event`/
+`print_banner`/`list_sessions` are the spawned-mode bodies
+(behaviorally pinned above, unattributed); extensions.rs 60.4% —
+the binary-assembly/child-role standing class (the mount machinery
+runs inside the extension e2e's spawned backends).
+
+**Deleted: nothing this round.** The split moved only live code
+(the `-D warnings` lint gate is the item-level proof — dead-code
+lints fire on `pub(crate)` in a bin crate), and the review's dead
+machinery (`ordered-float`, the `rayon` feature, `_is_dependency`,
+the gate's local-path doc) left in the hygiene round before this
+one.
+
+**Methodology note, kept honestly:** the round's first lcov parse
+read the DA record's line NUMBER as its hit count and reported a
+false 100% on every file; the cross-check against the raw lcov
+caught it. A false number in a ledger is worse than none — the
+parser fix is in the round's scratch, the lesson is already the
+ledger's own (coverage measures execution; verify the instrument).
+
 ## Justified residue
 
 The remaining uncovered lines fall into these categories. Where a file is
@@ -531,7 +860,7 @@ named, the classification applies to its current lcov-uncovered ranges.
 6. **Subprocess-executed tests are not attributed**: trybuild compile-fail
    cases and the `dependency_rename` fixture crates run `cargo`/`rustc` as
    subprocesses llvm-cov does not instrument (e.g. the
-   contextual-tool-without-runtime-dep arm in `rig-derive`). The crash
+   contextual-tool-without-runtime-dep arm in `tabit-derive`). The crash
    contract (`tests/crash.rs`) joins this class: the panic hook and
    injection branch run in the spawned `tabit` child, asserted there by
    exit code 101, the stderr report, and empty stdout.
@@ -547,9 +876,11 @@ named, the classification applies to its current lcov-uncovered ranges.
      create: append/write to an unlinked-open handle *succeeds* on Windows
      (verified empirically — the persist-failure test documents it), and
      disk-full / uuid-collision / `create_new` races cannot be staged.
-   - Poisoned-`Mutex` arms in `recorder.rs` — reachable only after a panic
-     inside the lock, which the workspace lint policy forbids in shipped
-     code. `rewind_to`'s failure leg rides the same
+   - Poisoned-`Mutex` arms in the durable layer — the former
+     `recorder.rs` died with the format-v3 refactor; the class
+     (reachable only after a panic inside the lock, which the
+     workspace lint policy forbids in shipped code) applies to
+     `tabit-log`'s writer arms as classified in the round sections. `rewind_to`'s failure leg rides the same
      record-then-`observe` path as `record`'s (both covered by the
      blocked-store bootstrap test: the lost-record contract, one
      degrade announcement, `pending: 0`); staging a write fault that
@@ -562,7 +893,7 @@ named, the classification applies to its current lcov-uncovered ranges.
      fallback (this machine has Git Bash), interpreter spawn failure, the
      `try_wait` OS-error arm, and the abnormal-signal exit description.
    - Engine-driven event arms in `stream_item_event`: `TurnRetried` (the
-     engine emits it on the malformed-tool-args defect path — rig-agent's
+     engine emits it on the malformed-tool-args defect path — tabit-engine's
      loop tests cover that engine path), `NativeItem` from `Unknown` stream
      items (no mock builder emits them), and the `FinalResponse`/
      `StreamUserItem` catch-arms the caller handles directly.
@@ -641,7 +972,8 @@ error rather than skipping, reachable or not.)
 - Re-run the collection after material changes and re-classify anything
   that moved from justified to reachable.
 
-## tabit-gui (walking skeleton)
+## tabit-gui — DELETED (2026-09; the gaps below died with the tree,
+kept as the record of what they were)
 
 - `reducer.rs` — **covered** (92.2% lines; the residue is partial
   field combinations in `add` and `Facts` paths).
@@ -669,13 +1001,21 @@ error rather than skipping, reachable or not.)
   the built-in `tabit-gate` crate (pi-sanity's policy; its own test
   corpus is the port plan). The two gate-ext e2e vehicle tests (the
   SDK contract's session-memory walk and the backend wire test's
-  card-denial round-trip) were deleted with the package — **deferred
-  gap**: the extension SDK's reference consumer restores both when it
-  is developed.
-- `tabit/bin print-mode stdin reader` (`main.rs` watcher thread,
-  card rendering incl. the FIFO card queue) — **JUSTIFIED**: owns real
-  stdin; `parse_answer` is unit-covered (numbered buttons + reason,
-  free text, fail-closed empties).
+  card-denial round-trip) were deleted with the package — **closed
+  2026-09, the coverage round**: the built-in gate is in-process and
+  directly pinned — the full card matrix drives `PermissionGate::
+  on_tool_call` through the new `tabit_engine::test_utils::
+  hook_context` seam (allow, deny-with-reason, ask-answered-allow,
+  block with and without custom text, dismissed, malformed-answer
+  fails closed, no-UI fails closed, and the native:select_one card
+  shape), plus the e2e pair (`the_builtin_gate_asks_on_a_risky_bash_
+  and_a_block_skips`, `a_disabled_gate_mounts_nowhere`).
+- `tabit/bin print-mode stdin reader` (the watcher thread and the
+  FIFO card queue — `print.rs` since the 2026-09 split, `main.rs`
+  before it) — **JUSTIFIED**: owns real stdin; `parse_answer` is
+  unit-covered (numbered buttons + reason, free text, fail-closed
+  empties), and the mode around it is e2e-covered (the split round's
+  print-mode pins, below).
 - json bridge `InteractionResponse` passthrough — rides the generic
   `ClientFrame::Command => link.send(command)` arm, unchanged by this
   feature; the command itself is round-trip covered in tabit-protocol
@@ -687,7 +1027,7 @@ error rather than skipping, reachable or not.)
 
 ## v2 slice 1 — ids, brackets, tool status, error carrier (2026-08)
 
-- Turn announcement (rig-agent `drive_agent`, `TurnStarted`/
+- Turn announcement (tabit-engine `drive_agent`, `TurnStarted`/
   `TurnCommitted` items, hook-context id) — **covered** by the
   streaming tests: announcement-before-content, ids reach
   the hook context, retry announces a fresh id and only the
@@ -706,7 +1046,7 @@ error rather than skipping, reachable or not.)
 - `tool_result` content+status — **covered** (`tool_roundtrip` success
   shape, `failing_tool_results_carry_status_and_content` for
   `failed { exit_code }` + faithful content; bash's structured code
-  pinned in tabit-tools; disposition mapping unit-tested in rig-core).
+  pinned in tabit-tools; disposition mapping unit-tested in tabit-providers).
 - Startup degradations — **covered** (`default_selection_*` note
   assertions; endpoint first-frame; bridge ack-then-note ordering).
   The `push`/`pump` liveness race arms are documented both-orders-safe
@@ -863,8 +1203,8 @@ it changed:
   length (the collapse test's re-render).
 - Deferred, deliberately: the GUI's optimistic switch transient and
   `Facts` drift on switcher switches (ROADMAP item 7 — the per-session
-  transcript redesign); flag 11's panic arm (amended in PROTOCOL.md —
-  see the flag for the rationale).
+  transcript redesign); flag 11's panic arm (the amendment's
+  rationale is git history).
 
 ## Tool-gate seam (2026-08, the permission-leak review) — superseded
 
@@ -963,15 +1303,15 @@ round:
   then_rewinds_at_the_beat`: discard at receive → `run_aborted` →
   `checked_out` at the beat → the pass; the branch prompt then runs
   on the rewound chain). The polite-parking ruling is superseded
-  (PROTOCOL.md stage 2); `pump_with_pause` and its session-level test
+  (the stage-2 checkout round — git history); `pump_with_pause` and its session-level test
   are deleted — the pump returns on an aborted outcome, so the beat
   serves the rewind before any later batch. The pre-close survivor
   test carries over unchanged (`a_checkout_parked_at_the_close_
   executes_before_wind_down`).
 - **The death×checkout window is now the abort transit** — a
   microscopic race between the beat serving the rewind and the death
-  door dropping it, both outcomes log-consistent (documented in
-  PROTOCOL.md's abort bullet). The dedicated death-door test from the
+  door dropping it, both outcomes log-consistent (the abort-discards-queued rule,
+  FRONTEND.md §5). The dedicated death-door test from the
   remediation round dissolved with the parking window it pinned; the
   death door itself stays pinned by the card-open and multi-run
   death tests.
@@ -1300,3 +1640,27 @@ none of the async pieces (std flavor, no stdin, whole output is the
 product); its consolidation was the process-wrap version alignment
 (9/10 skew gone — one major in the lockfile), with `TreeKillGuard`
 still the documented hand-roll (v10's KillOnDrop is tokio-only).
+
+## Subagent follow-ups (2026-09-26, the pool round)
+
+The follow-up surface — `subagent_pool.rs` (park/follow/turn_passed/
+drop), the `followup` tool, the wire's `settle_open` disposition —
+landed with its behavior net in place, per the standing practice for
+freshly landed code (line re-measurement at the next llvm-cov pass):
+
+- `fresh_id`'s mint loop: unit-pinned inside `subagent_pool.rs`
+  (collision re-mint, `None` retry, exhausted-minter fail-loud).
+- Park, follow, the aging boundary, and the failure reap: the three
+  e2e tests over the real binary (`tabit-core`'s subprocess suite) —
+  same-session continuity (the follow-up request provably carries the
+  first task's marker in history), the exact five-turn boundary
+  (followable at the fifth subsequent turn, collected at the sixth's
+  start), and the failed follow-up's entry reap. The sweep's session
+  wiring (the `TurnStarted` arm) is exercised by the boundary test.
+- **Justified, not exercised**: `turn_passed`'s and `Drop`'s
+  busy-slot windows (`try_lock` failing — the entry is being driven
+  while swept/dropped). Both windows require a follow still in
+  flight at a turn boundary or session drop, which the roundtrip's
+  atomicity forbids on every path except the detached-abort window —
+  where the settle fold's own cancel arm closes the child; the
+  skipped close is the no-op its comment claims.

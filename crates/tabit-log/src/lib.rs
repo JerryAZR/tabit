@@ -4,9 +4,9 @@
 //! record vocabulary ([`entry`]), the branch [`SessionTree`], the
 //! conversation's single source of truth ([`ContextManager`]), and the
 //! write buffer ([`SessionWriter`] + the [`WriteBuffer`] contract it
-//! defines in the same module). It depends on rig-core only for the
+//! defines in the same module). It depends on tabit-providers only for the
 //! message shapes — it does not know agents, hooks, tools, sessions, or
-//! frontends exist. The engine (rig-agent) drives a `ContextManager`
+//! frontends exist. The engine (tabit-engine) drives a `ContextManager`
 //! through a run; the session layer (tabit-session) hosts the lifetime
 //! (open/resume/checkout) and writes its side records through the same
 //! shared buffer handle.

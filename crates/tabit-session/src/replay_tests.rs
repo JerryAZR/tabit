@@ -4,10 +4,10 @@
 
 use super::*;
 use crate::entry::{EntryKind, SessionEntry};
-use rig_core::OneOrMany;
-use rig_core::completion::{Message, Usage};
-use rig_core::message::{AssistantContent, ToolCall, ToolFunction, ToolResultContent};
 use tabit_protocol::SessionEvent;
+use tabit_providers::OneOrMany;
+use tabit_providers::completion::{Message, Usage};
+use tabit_providers::message::{AssistantContent, ToolCall, ToolFunction, ToolResultContent};
 
 fn entry(id: &str, kind: EntryKind) -> SessionEntry {
     SessionEntry::with_id(
@@ -77,12 +77,12 @@ fn a_chain_projects_to_bracketed_whole_text_events() {
         entry(
             "r1",
             EntryKind::ToolResult {
-                result: rig_core::message::ToolResult {
+                result: tabit_providers::message::ToolResult {
                     id: "call-1".to_string(),
                     call_id: Some("wire-1".to_string()),
                     details: None,
                     content: OneOrMany::one(ToolResultContent::text("3 files")),
-                    status: Some(rig_core::completion::ToolResultStatus::Success),
+                    status: Some(tabit_providers::completion::ToolResultStatus::Success),
                 },
             },
         ),
@@ -203,7 +203,7 @@ fn multiple_text_items_and_reasoning_blocks_project_to_one_text_and_per_block_de
                 AssistantContent::text("part one "),
                 AssistantContent::text("part two"),
                 AssistantContent::Reasoning(
-                    rig_core::message::Reasoning::new_with_signature("second block", None)
+                    tabit_providers::message::Reasoning::new_with_signature("second block", None)
                         .with_id("r2".to_string()),
                 ),
             ],
@@ -277,14 +277,14 @@ fn failed_results_keep_their_structured_status() {
         entry(
             "r1",
             EntryKind::ToolResult {
-                result: rig_core::message::ToolResult {
+                result: tabit_providers::message::ToolResult {
                     id: "call-1".to_string(),
                     call_id: None,
                     details: None,
                     content: OneOrMany::one(ToolResultContent::text(
                         "command exited with status 3:\nboom",
                     )),
-                    status: Some(rig_core::completion::ToolResultStatus::Failed {
+                    status: Some(tabit_providers::completion::ToolResultStatus::Failed {
                         code: Some("3".to_string()),
                     }),
                 },
@@ -315,10 +315,10 @@ fn a_compaction_node_replays_as_the_boundary_marker() {
                 cut_child: "u2".to_string(),
                 tokens_before: 0,
                 tokens_after: 4321,
-                usage: rig_core::completion::Usage {
+                usage: tabit_providers::completion::Usage {
                     input_tokens: 900,
                     output_tokens: 60,
-                    ..rig_core::completion::Usage::default()
+                    ..tabit_providers::completion::Usage::default()
                 },
                 cost: Some(0.00096),
             },

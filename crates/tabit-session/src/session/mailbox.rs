@@ -5,11 +5,11 @@ use super::Session;
 use super::wire::user_text;
 use crate::lock::lock;
 use crate::notice::{NoticeSink, NoticeSlot};
-use rig_agent::completion::Message;
-use tabit_protocol::{EventFrame, SessionEvent, StreamId};
+use tabit_engine::completion::Message;
+use tabit_protocol::SessionEvent;
 use tokio_util::sync::CancellationToken;
 
-/// A queued user message with its born-early entry id (PROTOCOL.md v2):
+/// A queued user message with its born-early entry id:
 /// minted at accept, announced by `message_queued` when a run is live,
 /// carried into the log when the message drains, restated by
 /// `user_message { entry_id }` — and handed back by `messages_discarded`
@@ -50,6 +50,12 @@ pub(crate) struct Mailbox {
     /// spawn (see [`crate::notice`] for the channel discipline). Absent
     /// for direct [`Session`] consumers: no frontend, no notices.
     notices: std::sync::Arc<NoticeSlot>,
+    /// The session's skills catalog, attached at assembly when skills
+    /// were discovered — the receive-time invocation expansion's
+    /// resolver (skills.rs: a message's `<skill name="..."/>` tags
+    /// append their bodies here, at the one door every user message
+    /// enters). Absent = no expansion, plain queuing.
+    expander: std::sync::Arc<std::sync::OnceLock<std::sync::Arc<crate::skills::Skills>>>,
     /// Wakes the resident worker when work arrives. One permit covers any
     /// number of pushes; the queue itself is the source of truth — the
     /// signal exists only so an empty queue can be waited on.
@@ -57,14 +63,17 @@ pub(crate) struct Mailbox {
 }
 
 impl Mailbox {
-    /// Attach the event channel for submit-time notices (the resident
-    /// worker, at spawn), stamped with the session's stream.
-    pub(crate) fn attach_notices(
-        &self,
-        events: &tokio::sync::mpsc::UnboundedSender<EventFrame>,
-        stream: StreamId,
-    ) {
-        let _ = self.notices.set(NoticeSink::new(events, stream));
+    /// Attach the submit-time notice sink (the resident worker, at
+    /// spawn): a sink over the session's channel, stamped with the
+    /// session's stream.
+    pub(crate) fn attach_notices(&self, sink: NoticeSink) {
+        let _ = self.notices.set(sink);
+    }
+
+    /// Attach the invocation expander's catalog (the assembly, when
+    /// the session discovered skills).
+    pub(crate) fn attach_expander(&self, skills: std::sync::Arc<crate::skills::Skills>) {
+        let _ = self.expander.set(skills);
     }
 
     /// A pump began: submissions from here until [`Self::run_ended`] are
@@ -79,6 +88,24 @@ impl Mailbox {
     }
 
     pub(crate) fn push(&self, message: Message) {
+        // Receive-time skill invocation (FRONTEND.md's tag): expand
+        // before the id is minted, so the queued acknowledgment, the
+        // steers, the events, and the log all carry the one expanded
+        // text — what the model actually sees is what replay shows.
+        // A message without resolvable tags passes through untouched
+        // (the expansion is the identity for it).
+        let message = match self.expander.get() {
+            Some(skills) => {
+                let text = user_text(&message);
+                let expanded = crate::skills::expand_invocations(&text, skills);
+                if expanded != text {
+                    Message::user(expanded)
+                } else {
+                    message
+                }
+            }
+            None => message,
+        };
         let queued = QueuedMessage {
             id: crate::ids::new_entry_id(),
             message,
@@ -226,7 +253,7 @@ pub struct AbortHandle {
 
 impl AbortHandle {
     /// Abort the current run, if any, and discard what was queued at
-    /// abort time — one semantic, one site (PROTOCOL.md flag 6): the
+    /// abort time — one semantic, one site: the
     /// discard notice is immediate, through the mailbox's notice
     /// channel; messages arriving after this queue normally and start
     /// the next run. Aborting while idle just discards the queue.
@@ -244,7 +271,7 @@ pub(super) struct SessionSteers {
     pub(super) mailbox: Mailbox,
 }
 
-impl rig_agent::SteeringSource for SessionSteers {
+impl tabit_engine::SteeringSource for SessionSteers {
     fn drain(&self) -> Vec<(String, Message)> {
         self.mailbox.take_all()
     }
@@ -275,15 +302,11 @@ impl Session {
         }
     }
 
-    /// Point the mailbox's submit-time notices at the worker's event
-    /// channel (`message_queued` for live-run submissions), stamped with
-    /// the session's stream. Called by the session worker at spawn,
+    /// Point the mailbox's submit-time notices at the worker's sink
+    /// (`message_queued` for live-run submissions), stamped with the
+    /// session's stream. Called by the session worker at spawn,
     /// alongside [`Self::attach_interaction`].
-    pub fn attach_mailbox_notices(
-        &self,
-        events: &tokio::sync::mpsc::UnboundedSender<EventFrame>,
-        stream: StreamId,
-    ) {
-        self.mailbox.attach_notices(events, stream);
+    pub fn attach_mailbox_notices(&self, sink: NoticeSink) {
+        self.mailbox.attach_notices(sink);
     }
 }

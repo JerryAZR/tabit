@@ -18,7 +18,7 @@ fn user_node() -> crate::entry::FileRecord {
         None,
         "t".to_string(),
         EntryKind::UserMessage {
-            message: rig_core::completion::Message::user("x"),
+            message: tabit_providers::completion::Message::user("x"),
         },
     ))
 }
@@ -33,15 +33,20 @@ fn commit_one(writer: &mut SessionWriter) {
 #[test]
 fn create_defers_to_disk_until_the_first_commit() {
     let store = temp_store("orphan-gate");
-    let mut writer = store.create("C:/work");
+    let mut writer = store.create();
     assert!(
         !writer.path().exists(),
         "a session that never commits leaves no file"
     );
     commit_one(&mut writer);
     assert!(writer.path().exists());
+    let raw = std::fs::read_to_string(writer.path()).expect("read");
+    let header_line = raw.lines().next().unwrap_or_default();
+    assert!(
+        !header_line.contains("\"cwd\""),
+        "since 6.2 the header records no cwd: {header_line}"
+    );
     let parsed = store.open_path(writer.path()).expect("open");
-    assert_eq!(parsed.header.cwd, "C:/work");
     assert!(
         parsed.tree.head().is_some(),
         "the committed node is the head"
@@ -50,9 +55,40 @@ fn create_defers_to_disk_until_the_first_commit() {
 }
 
 #[test]
+fn a_6_1_file_still_carries_a_tolerated_cwd() {
+    // The 6.2 ruling stopped *writing* the header cwd; files from
+    // 6.1 and earlier still open, the field tolerated and ignored
+    // (the session's world is the caller's cwd, never the file's).
+    let store = temp_store("old-header");
+    let mut writer = store.create();
+    let id = writer.session_id().to_string();
+    commit_one(&mut writer);
+    let path = writer.path().to_path_buf();
+    let raw = std::fs::read_to_string(&path).expect("read");
+    let body: Vec<&str> = raw.lines().skip(1).collect();
+    let header_61 = format!(
+        "{{\"version\":6,\"minor\":1,\"id\":\"{id}\",\
+\"created_at\":\"2026-09-01T00:00:00Z\",\"cwd\":\"C:/moved/away\"}}"
+    );
+    let rewritten = std::iter::once(header_61.as_str())
+        .chain(body.iter().copied())
+        .collect::<Vec<_>>()
+        .join("\n");
+    std::fs::write(&path, rewritten).expect("write");
+    let parsed = store.open_path(&path).expect("a 6.1 file still opens");
+    assert_eq!(
+        parsed.header.cwd.as_deref(),
+        Some("C:/moved/away"),
+        "the tolerated field parses"
+    );
+    assert!(parsed.tree.head().is_some(), "the body still folds");
+    std::fs::remove_dir_all(store.dir()).ok();
+}
+
+#[test]
 fn open_by_session_id_finds_the_file() {
     let store = temp_store("by-id");
-    let mut writer = store.create("C:/work");
+    let mut writer = store.create();
     commit_one(&mut writer);
     let id = writer.session_id().to_string();
     let parsed = store.open(&id).expect("open by id");
@@ -65,7 +101,7 @@ fn open_by_session_id_finds_the_file() {
 fn a_torn_tail_fails_the_open_loudly() {
     // The repair pass is deleted: corruption is named, never patched.
     let store = temp_store("torn");
-    let mut writer = store.create("C:/work");
+    let mut writer = store.create();
     commit_one(&mut writer);
     let path = writer.path().to_path_buf();
     use std::io::Write as _;
@@ -84,10 +120,10 @@ fn a_torn_tail_fails_the_open_loudly() {
 #[test]
 fn list_orders_newest_first_and_counts_records() {
     let store = temp_store("list");
-    let mut older = store.create("C:/a");
+    let mut older = store.create();
     commit_one(&mut older);
     std::thread::sleep(std::time::Duration::from_millis(1100));
-    let mut newer = store.create("C:/b");
+    let mut newer = store.create();
     commit_one(&mut newer);
 
     let summaries = store.list().expect("list");

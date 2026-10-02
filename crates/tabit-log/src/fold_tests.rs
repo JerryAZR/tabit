@@ -2,12 +2,12 @@
 
 use super::*;
 use crate::entry::{EntryKind, SessionEntry};
-use rig_core::OneOrMany;
-use rig_core::completion::Message;
-use rig_core::message::{
+use serde_json::json;
+use tabit_providers::OneOrMany;
+use tabit_providers::completion::Message;
+use tabit_providers::message::{
     AssistantContent, Text, ToolCall, ToolFunction, ToolResult, ToolResultContent, UserContent,
 };
-use serde_json::json;
 
 fn entry(kind: EntryKind) -> SessionEntry {
     SessionEntry::new(None, "t".to_string(), kind)
@@ -35,7 +35,7 @@ fn assistant_tool_calls(ids: &[&str]) -> EntryKind {
     .expect("non-empty");
     EntryKind::AssistantMessage {
         message: Message::Assistant { id: None, content },
-        usage: rig_core::completion::Usage::default(),
+        usage: tabit_providers::completion::Usage::default(),
         delta_tokens: None,
         cost: None,
     }
@@ -47,7 +47,7 @@ fn assistant_text(text: &str) -> EntryKind {
             id: None,
             content: OneOrMany::one(AssistantContent::text(text)),
         },
-        usage: rig_core::completion::Usage::default(),
+        usage: tabit_providers::completion::Usage::default(),
         delta_tokens: None,
         cost: None,
     }
@@ -163,7 +163,7 @@ fn a_non_assistant_message_carries_no_calls() {
         message: Message::User {
             content: OneOrMany::one(UserContent::Text(Text::new("odd but legal"))),
         },
-        usage: rig_core::completion::Usage::default(),
+        usage: tabit_providers::completion::Usage::default(),
         delta_tokens: None,
         cost: None,
     })];
@@ -209,7 +209,7 @@ fn compaction(summary: &str) -> EntryKind {
         cut_child: "irrelevant-to-the-fold".to_string(),
         tokens_before: 0,
         tokens_after: 0,
-        usage: rig_core::completion::Usage::default(),
+        usage: tabit_providers::completion::Usage::default(),
         cost: None,
     }
 }

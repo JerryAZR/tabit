@@ -150,7 +150,7 @@ impl OneShotSteer {
     }
 }
 
-impl rig_agent::SteeringSource for OneShotSteer {
+impl tabit_engine::SteeringSource for OneShotSteer {
     fn drain(&self) -> Vec<(String, rig::completion::Message)> {
         self.0
             .lock()

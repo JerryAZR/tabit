@@ -5,23 +5,33 @@ use crate::SessionError;
 use crate::entry::EntryKind;
 use crate::session::{RunOutcome, RunSummary, SessionBuilder};
 use crate::store::SessionStore;
-use rig_agent::agent::ModelHandle;
-use rig_agent::test_utils::{MockCompletionModel, MockStreamEvent};
-use rig_agent::tool::DynamicTool;
-use rig_core::OneOrMany;
-use rig_core::completion::{Message, Usage};
-use rig_core::message::{AssistantContent, Text, UserContent};
 use serde_json::json;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use tabit_config::TabitConfig;
+use tabit_engine::agent::ModelHandle;
+use tabit_engine::test_utils::{MockCompletionModel, MockStreamEvent};
+use tabit_engine::tool::DynamicTool;
 use tabit_protocol::{ModelSelection, SessionEvent};
+use tabit_providers::OneOrMany;
+use tabit_providers::completion::{Message, Usage};
+use tabit_providers::message::{AssistantContent, Text, UserContent};
 
 /// The file path of a file-backed session (tests here always build
 /// persisted sessions; the ephemeral suite asserts `path().is_none()`
 /// directly).
 fn file_path(session: &crate::Session) -> &std::path::Path {
     session.path().expect("file-backed")
+}
+
+/// The refusing session builders as the boot's data half (tests
+/// that never drive session lifecycle).
+pub(crate) fn plain_data() -> crate::SessionHostData {
+    crate::SessionHostData {
+        create: std::sync::Arc::new(|| Err("new_session is not driven".to_string())),
+        open: std::sync::Arc::new(|_| Err("open_session is not driven".to_string())),
+        extensions: Default::default(),
+    }
 }
 
 pub(crate) fn temp_store(tag: &str) -> SessionStore {
@@ -43,17 +53,6 @@ pub(crate) fn load_records(path: &Path) -> Vec<crate::entry::FileRecord> {
         .filter(|line| !line.is_empty())
         .map(|line| serde_json::from_str(line).expect("a valid record line"))
         .collect()
-}
-
-/// The message a caught panic carries, whatever box it landed in.
-pub(crate) fn panic_message(payload: &Box<dyn std::any::Any + Send>) -> String {
-    if let Some(text) = payload.downcast_ref::<String>() {
-        return text.clone();
-    }
-    if let Some(text) = payload.downcast_ref::<&str>() {
-        return (*text).to_string();
-    }
-    String::new()
 }
 
 /// The file's records as kind tags (side records prefixed) — the shape
@@ -197,7 +196,7 @@ pub(crate) fn echo_tool() -> DynamicTool {
         json!({"type":"object","properties":{"value":{"type":"string"}}}),
         |_ctx, args| {
             Box::pin(async move {
-                Ok(rig_agent::tool::ToolOutput::text(
+                Ok(tabit_engine::tool::ToolOutput::text(
                     args.get("value").and_then(|v| v.as_str()).unwrap_or(""),
                 ))
             })
@@ -251,7 +250,7 @@ impl Factory {
     }
 
     /// The requests served by the latest model this factory handed out.
-    pub(crate) fn requests(&self) -> Vec<rig_core::completion::CompletionRequest> {
+    pub(crate) fn requests(&self) -> Vec<tabit_providers::completion::CompletionRequest> {
         self.models
             .lock()
             .ok()
@@ -383,7 +382,7 @@ cache_write = 0.0
     // spend that left.
     let (resumed, _) = Factory::new(vec![text_turn("never runs")])
         .into_builder_with_config(store.clone(), config(0.5), ModelSelection::new("p", "m"))
-        .resume(&path)?;
+        .resume(&path, "C:/w")?;
     let resumed_cost = resumed.stats().total_cost;
     assert!(
         (resumed_cost - spent).abs() < 1e-12,
@@ -534,7 +533,7 @@ async fn failing_tool_results_carry_status_and_content() -> Result<(), SessionEr
         |_ctx, _args| {
             Box::pin(async move {
                 Err(
-                    rig_agent::tool::ToolExecutionError::other("boom: the thing failed")
+                    tabit_engine::tool::ToolExecutionError::other("boom: the thing failed")
                         .with_code("3"),
                 )
             })
@@ -689,13 +688,13 @@ async fn truncated_turn_warns_and_the_run_still_completes() -> Result<(), Sessio
     let factory = Factory::new(vec![vec![
         MockStreamEvent::text("partial answer"),
         MockStreamEvent::FinalResponse(
-            rig_agent::test_utils::mock_final(Usage {
+            tabit_engine::test_utils::mock_final(Usage {
                 input_tokens: 100,
                 output_tokens: 10,
                 total_tokens: 110,
                 ..Usage::default()
             })
-            .with_finish_reason(rig_core::completion::FinishReason::Length),
+            .with_finish_reason(tabit_providers::completion::FinishReason::Length),
         ),
     ]]);
     let mut session = factory.into_builder(store.clone()).create("C:/w")?;
@@ -748,8 +747,33 @@ async fn resumed_reflects_create_vs_resume() -> Result<(), SessionError> {
 
     let (second, _report) = Factory::new(vec![text_turn("b")])
         .into_builder(store)
-        .resume(&path)?;
+        .resume(&path, "C:/w")?;
     assert!(second.resumed(), "a resumed session continues a chain");
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_resumed_session_takes_its_world_from_the_caller() -> Result<(), SessionError> {
+    // Owner ruling 2026-09-27: the process cwd is the session's world.
+    // The header records no cwd; a resumed session adopts the caller's
+    // cwd (a moved project resumes where it now lives), never a
+    // recorded one — gate, skills, preamble, and tools all key on the
+    // one world the assembly chose.
+    let store = temp_store("resume-world");
+    let factory = Factory::new(vec![text_turn("a")]);
+    let mut first = factory.into_builder(store.clone()).create("C:/original")?;
+    first.prompt("hi").await;
+    let path = first.path().expect("file-backed").to_path_buf();
+    drop(first);
+
+    let (second, _report) = Factory::new(vec![text_turn("b")])
+        .into_builder(store)
+        .resume(&path, "D:/moved/here")?;
+    assert_eq!(
+        second.cwd(),
+        std::path::Path::new("D:/moved/here"),
+        "the caller's world wins, the created-in directory does not"
+    );
     Ok(())
 }
 
@@ -764,7 +788,7 @@ async fn resume_continues_the_log_and_reports_the_model() -> Result<(), SessionE
 
     let (second, report) = Factory::new(vec![text_turn("two")])
         .into_builder(store.clone())
-        .resume(&path)
+        .resume(&path, "C:/w")
         .expect("resume");
     assert_eq!(
         report
@@ -801,7 +825,7 @@ async fn a_dangling_tool_roundtrip_fails_the_resume_loudly() -> Result<(), Sessi
     // file written only at roundtrip boundaries cannot look like this —
     // the open is a loud corruption error, never a repair (the repair
     // pass is deleted: it hid real bugs).
-    let mut writer = store.create("C:/w");
+    let mut writer = store.create();
     let user = crate::entry::SessionEntry::with_id(
         "u1".to_string(),
         None,
@@ -823,9 +847,9 @@ async fn a_dangling_tool_roundtrip_fails_the_resume_loudly() -> Result<(), Sessi
             message: Message::Assistant {
                 id: None,
                 content: OneOrMany::one(AssistantContent::ToolCall(
-                    rig_core::message::ToolCall::new(
+                    tabit_providers::message::ToolCall::new(
                         "c1".to_string(),
-                        rig_core::message::ToolFunction::new("echo".to_string(), json!({})),
+                        tabit_providers::message::ToolFunction::new("echo".to_string(), json!({})),
                     ),
                 )),
             },
@@ -841,7 +865,7 @@ async fn a_dangling_tool_roundtrip_fails_the_resume_loudly() -> Result<(), Sessi
 
     let resumed = Factory::new(vec![text_turn("never runs")])
         .into_builder(store.clone())
-        .resume(&path);
+        .resume(&path, "C:/w");
     match resumed {
         Err(SessionError::Corrupt { message, .. }) => {
             assert!(
@@ -895,7 +919,7 @@ async fn failed_run_still_records_the_user_message() -> Result<(), SessionError>
 #[tokio::test]
 async fn malformed_tool_call_exhaustion_fails_the_run_and_leaves_the_session_alive()
 -> Result<(), SessionError> {
-    use rig_agent::test_utils::MockError;
+    use tabit_engine::test_utils::MockError;
 
     let store = temp_store("malformed-exhaustion");
     let malformed = || {
@@ -1186,7 +1210,7 @@ async fn resume_uses_the_builder_selection_and_records_the_switch() -> Result<()
             vec![text_turn("b")],
         )))
     }));
-    let (session, report) = builder.resume(&path).expect("resume");
+    let (session, report) = builder.resume(&path, "C:/w").expect("resume");
     // The report still says what the log last used...
     let resumed = report.resumed_model.expect("log carried the switch");
     assert_eq!(
@@ -1344,7 +1368,7 @@ async fn persistence_failure_fails_the_run_loudly() -> Result<(), SessionError> 
                         }
                     }
                 }
-                Ok(rig_agent::tool::ToolOutput::text("log deleted"))
+                Ok(tabit_engine::tool::ToolOutput::text("log deleted"))
             })
         },
     );
@@ -1515,7 +1539,7 @@ async fn steering_during_a_run_is_recorded_one_to_one() -> Result<(), SessionErr
 #[tokio::test]
 async fn one_context_builder_spans_the_run_boundary() -> Result<(), SessionError> {
     // The engine's run-scoped conversation and the recorder's durable
-    // fold are one implementation (`rig_agent::agent::conversation`),
+    // fold are one implementation (`tabit_engine::agent::conversation`),
     // fed by the same events. This pins that structurally: the request
     // the model actually receives for the next run's first turn is
     // exactly the durable projection plus the new prompt — every
@@ -1593,7 +1617,7 @@ async fn messages_queued_before_pump_all_join_the_first_run() -> Result<(), Sess
         .collect();
     assert_eq!(user_texts, vec!["one", "two"]);
     // Born-early ids: each user_message event's entry_id is the id its
-    // entry keeps in the reloaded log (PROTOCOL.md v2).
+    // entry keeps in the reloaded log.
     let event_ids: Vec<&str> = run
         .events
         .iter()
@@ -1771,13 +1795,13 @@ async fn a_post_tool_stop_discards_the_pending_queue() -> Result<(), SessionErro
     // where a post-failure message starts the next run (the test above).
     // The session itself stays alive: a later message runs.
     struct StopAfterEcho;
-    impl rig_agent::agent::AgentHook for StopAfterEcho {
+    impl tabit_engine::agent::AgentHook for StopAfterEcho {
         async fn on_tool_result(
             &self,
-            _ctx: &rig_agent::agent::HookContext,
-            _event: rig_agent::agent::hook::ToolResultEvent<'_>,
-        ) -> rig_agent::agent::hook::ToolResultAction {
-            rig_agent::agent::hook::ToolResultAction::stop("stopped: one echo is enough")
+            _ctx: &tabit_engine::agent::HookContext,
+            _event: tabit_engine::agent::hook::ToolResultEvent<'_>,
+        ) -> tabit_engine::agent::hook::ToolResultAction {
+            tabit_engine::agent::hook::ToolResultAction::stop("stopped: one echo is enough")
         }
     }
 
@@ -1786,7 +1810,7 @@ async fn a_post_tool_stop_discards_the_pending_queue() -> Result<(), SessionErro
     let mut session = factory
         .into_builder(store.clone())
         .dynamic_tool(echo_tool())
-        .hooks(rig_agent::agent::HookStack::with(StopAfterEcho))
+        .hooks(tabit_engine::agent::HookStack::with(StopAfterEcho))
         .create("C:/w")?;
     let mailbox = session.mailbox_handle();
     session.submit("start");
@@ -1981,7 +2005,7 @@ async fn a_rewind_never_moves_the_model_register() -> Result<(), SessionError> {
     drop(session);
     let (session, report) = Factory::new(vec![text_turn("answer three")])
         .into_builder(store.clone())
-        .resume(&path)
+        .resume(&path, "C:/w")
         .expect("resume");
     let resumed = report.resumed_model.expect("the register was read");
     assert_eq!(
@@ -2018,7 +2042,7 @@ async fn promptless_rewind_survives_reopen() -> Result<(), SessionError> {
 
     let (session, _report) = Factory::new(vec![text_turn("continued")])
         .into_builder(store.clone())
-        .resume(&path)
+        .resume(&path, "C:/w")
         .expect("resume");
     assert_eq!(
         user_messages(&session.context()),
@@ -2074,7 +2098,7 @@ async fn rewind_targets_steers_like_prompts() -> Result<(), SessionError> {
     let store = temp_store("rewind-steer");
     // Hand-written log whose last user message is a mid-run steer: a
     // rewind of one message drops the steer — "un-send it".
-    let mut writer = store.create("C:/w");
+    let mut writer = store.create();
     let user = write_node(
         &mut writer,
         None,
@@ -2106,7 +2130,7 @@ async fn rewind_targets_steers_like_prompts() -> Result<(), SessionError> {
 
     let (mut session, _report) = Factory::new(vec![text_turn("ok")])
         .into_builder(store.clone())
-        .resume(&path)
+        .resume(&path, "C:/w")
         .expect("resume");
     let rewind = session.rewind(1).expect("rewind");
     assert_eq!(rewind.dropped, 1);
@@ -2120,13 +2144,13 @@ async fn rewind_targets_steers_like_prompts() -> Result<(), SessionError> {
 }
 
 #[tokio::test]
-async fn rewinding_into_an_open_roundtrip_panics() -> Result<(), SessionError> {
+async fn rewinding_into_an_open_roundtrip_resolves_forward() -> Result<(), SessionError> {
     let store = temp_store("rewind-midbatch");
     // Hand-written log with a complete two-call roundtrip; rewinding to
     // the FIRST result entry targets a branch that ends mid-roundtrip —
-    // flag 23's resolution: unsupported, panics loud ("revisit later"),
-    // never repaired (the repair machinery is deleted).
-    let mut writer = store.create("C:/w");
+    // the 2026-09-26 ruling: resolve forward to the batch's last result
+    // (the landing is reported; the ask was mid-batch).
+    let mut writer = store.create();
     let user = write_node(
         &mut writer,
         None,
@@ -2141,13 +2165,13 @@ async fn rewinding_into_an_open_roundtrip_panics() -> Result<(), SessionError> {
             message: Message::Assistant {
                 id: None,
                 content: OneOrMany::many(vec![
-                    AssistantContent::ToolCall(rig_core::message::ToolCall::new(
+                    AssistantContent::ToolCall(tabit_providers::message::ToolCall::new(
                         "c1".to_string(),
-                        rig_core::message::ToolFunction::new("echo".to_string(), json!({})),
+                        tabit_providers::message::ToolFunction::new("echo".to_string(), json!({})),
                     )),
-                    AssistantContent::ToolCall(rig_core::message::ToolCall::new(
+                    AssistantContent::ToolCall(tabit_providers::message::ToolCall::new(
                         "c2".to_string(),
-                        rig_core::message::ToolFunction::new("echo".to_string(), json!({})),
+                        tabit_providers::message::ToolFunction::new("echo".to_string(), json!({})),
                     )),
                 ])
                 .expect("two calls"),
@@ -2161,24 +2185,24 @@ async fn rewinding_into_an_open_roundtrip_panics() -> Result<(), SessionError> {
         &mut writer,
         Some(&assistant.id),
         EntryKind::ToolResult {
-            result: rig_core::message::ToolResult {
+            result: tabit_providers::message::ToolResult {
                 id: "c1".to_string(),
                 call_id: None,
                 details: None,
-                content: OneOrMany::one(rig_core::message::ToolResultContent::text("one")),
+                content: OneOrMany::one(tabit_providers::message::ToolResultContent::text("one")),
                 status: None,
             },
         },
     );
-    write_node(
+    let last_result = write_node(
         &mut writer,
         Some(&first_result.id),
         EntryKind::ToolResult {
-            result: rig_core::message::ToolResult {
+            result: tabit_providers::message::ToolResult {
                 id: "c2".to_string(),
                 call_id: None,
                 details: None,
-                content: OneOrMany::one(rig_core::message::ToolResultContent::text("two")),
+                content: OneOrMany::one(tabit_providers::message::ToolResultContent::text("two")),
                 status: None,
             },
         },
@@ -2187,33 +2211,31 @@ async fn rewinding_into_an_open_roundtrip_panics() -> Result<(), SessionError> {
 
     let (mut session, _report) = Factory::new(vec![text_turn("ok")])
         .into_builder(store.clone())
-        .resume(&path)
+        .resume(&path, "C:/w")
         .expect("resume");
 
-    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        session.rewind_to_entry(&first_result.id)
-    }));
-    let fault = outcome.expect_err("a mid-roundtrip target panics loud");
-    let fault = panic_message(&fault);
-    assert!(
-        fault.contains("open tool roundtrip"),
-        "the panic names the ruled shape: {fault}"
+    let summary = session.rewind_to_entry(&first_result.id)?;
+    assert_eq!(
+        summary.to_entry, last_result.id,
+        "the head lands at the batch's last result, not the mid-batch ask"
     );
-    // Nothing moved and nothing was written by the failed checkout.
+    // The moved head is the same closed conversation it was; the
+    // checkout record lands (the rewind happened, unlike the old
+    // refusal that wrote nothing).
     assert_eq!(
         session.context().len(),
         3,
         "user, assistant, one merged batch"
     );
     assert!(
-        !load_records(&path).iter().any(|record| matches!(
+        load_records(&path).iter().any(|record| matches!(
             record,
             crate::entry::FileRecord::Side(crate::entry::SideRecord {
                 kind: crate::entry::SideKind::Checkout { .. },
                 ..
             })
         )),
-        "no checkout record landed"
+        "the checkout record landed"
     );
     std::fs::remove_dir_all(store.dir()).ok();
     Ok(())
@@ -2245,7 +2267,7 @@ async fn rewind_to_the_root_leaves_the_register_untouched() -> Result<(), Sessio
     // Hand-written log whose first entry is a user message with no
     // parent (create always records a model change first, so only a
     // hand-written log reaches a root branch).
-    let mut writer = store.create("C:/w");
+    let mut writer = store.create();
     let user = write_node(
         &mut writer,
         None,
@@ -2269,7 +2291,7 @@ async fn rewind_to_the_root_leaves_the_register_untouched() -> Result<(), Sessio
     let path = writer.path().to_path_buf();
     let mut session = Factory::new(vec![text_turn("fresh answer"), text_turn("next")])
         .into_builder(store.clone())
-        .resume(&path)
+        .resume(&path, "C:/w")
         .expect("resume")
         .0;
 
@@ -2317,7 +2339,7 @@ async fn a_ghost_model_in_history_does_not_block_a_rewind() -> Result<(), Sessio
     // history's stale selections are inert records, and the session's
     // current (valid) selection keeps answering — so the rewind
     // succeeds where it once failed loudly.
-    let mut writer = store.create("C:/w");
+    let mut writer = store.create();
     let error = tabit_log::WriteBuffer::enqueue(
         &mut writer,
         &[crate::entry::FileRecord::Side(crate::entry::SideRecord {
@@ -2354,7 +2376,7 @@ async fn a_ghost_model_in_history_does_not_block_a_rewind() -> Result<(), Sessio
 
     let (mut session, _report) = Factory::new(vec![text_turn("ok"), text_turn("after")])
         .into_builder(store.clone())
-        .resume(&path)
+        .resume(&path, "C:/w")
         .expect("resume");
 
     session.rewind(1).expect("the ghost is inert history");
@@ -2438,13 +2460,13 @@ extra_body = { shared = "level" }
 async fn an_empty_truncated_stream_warns_and_completes() -> Result<(), SessionError> {
     let store = temp_store("truncation-empty");
     let factory = Factory::new(vec![vec![MockStreamEvent::FinalResponse(
-        rig_agent::test_utils::mock_final(Usage {
+        tabit_engine::test_utils::mock_final(Usage {
             input_tokens: 100,
             output_tokens: 10,
             total_tokens: 110,
             ..Usage::default()
         })
-        .with_finish_reason(rig_core::completion::FinishReason::Length),
+        .with_finish_reason(tabit_providers::completion::FinishReason::Length),
     )]]);
     let mut session = factory.into_builder(store.clone()).create("C:/w")?;
 
@@ -2469,7 +2491,7 @@ async fn an_empty_truncated_stream_warns_and_completes() -> Result<(), SessionEr
 }
 
 /// Replay re-emits the chain as finalized live events with the ids the
-/// live run announced (PROTOCOL.md v2's payoff: a frontend that kept the
+/// live run announced (the replay payoff: a frontend that kept the
 /// live stream could have rendered the replay blind, and vice versa) —
 /// and with whole texts where live streamed deltas.
 #[tokio::test]
@@ -2525,7 +2547,7 @@ async fn replay_re_emits_the_chain_with_live_ids_and_whole_texts() -> Result<(),
     // Resume and replay: the pass carries the same ids verbatim.
     let (resumed, _report) = Factory::new(vec![text_turn("never runs")])
         .into_builder(store.clone())
-        .resume(&path)?;
+        .resume(&path, "C:/w")?;
     let replayed = resumed.replay_events();
 
     let replay_turns: Vec<String> = replayed
@@ -2612,7 +2634,7 @@ async fn resumed_sessions_probe_ids_from_earlier_processes() -> Result<(), Sessi
     // A fresh session over the same file (the next process): the
     // probe answers for entries it never recorded — off-chain
     // branches included, the checkout branch-switch case.
-    let (resumed, _) = factory.into_builder(store.clone()).resume(&path)?;
+    let (resumed, _) = factory.into_builder(store.clone()).resume(&path, "C:/w")?;
     assert!(resumed.entry_id_probe().contains(&off_chain));
     assert!(!resumed.entry_id_probe().contains("never-recorded"));
     std::fs::remove_dir_all(store.dir()).ok();
@@ -2635,9 +2657,9 @@ async fn a_runs_tools_see_the_session_cwd() {
             let seen = probe_seen.clone();
             Box::pin(async move {
                 *seen.lock().expect("probe lock") = ctx
-                    .get::<rig_agent::tool::SessionCwd>()
+                    .get::<tabit_engine::tool::SessionCwd>()
                     .map(|cwd| cwd.0.clone());
-                Ok(rig_agent::tool::ToolOutput::text("probed"))
+                Ok(tabit_engine::tool::ToolOutput::text("probed"))
             })
         },
     );
@@ -2654,26 +2676,6 @@ async fn a_runs_tools_see_the_session_cwd() {
         Some(std::path::PathBuf::from("D:/the/session/dir")),
         "the run's tool context carried the session cwd"
     );
-    std::fs::remove_dir_all(store.dir()).ok();
-}
-
-#[tokio::test]
-async fn a_resumed_session_adopts_its_recorded_cwd() {
-    let store = temp_store("session-cwd-resume");
-    let path = {
-        let mut session = Factory::new(vec![text_turn("one")])
-            .into_builder(store.clone())
-            .create("E:/recorded/cwd")
-            .expect("session");
-        // The first commit materializes the file (the no-orphan gate).
-        session.prompt("hello").await;
-        session.path().expect("file-backed").to_path_buf()
-    };
-    let (resumed, _) = Factory::new(vec![text_turn("two")])
-        .into_builder(store.clone())
-        .resume(&path)
-        .expect("resume");
-    assert_eq!(resumed.cwd(), Path::new("E:/recorded/cwd"));
     std::fs::remove_dir_all(store.dir()).ok();
 }
 

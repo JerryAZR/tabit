@@ -11,34 +11,40 @@
 //! with the child's cwd as the **process** cwd — the OS enforces the
 //! scope every tool, extension, and path inside resolves against.
 //! Everything a session command does works on a child structurally:
-//! the child is a full session host, routing
-//! ([`crate::routing`]) forwards wire lines to it, and there is no
+//! the child is a full session host on its own node, and there is no
 //! child-specific consumption code anywhere by design.
 //!
 //! The framework's surface is exactly the parent-half machinery a
 //! child has no worker to provide: [`SpawnContext::spawn_subprocess`]
-//! (the bridge builder — model, cwd, toolset, budget) and
+//! (the bridge builder — model, cwd, tool policy, budget) and
 //! [`SpawnContext::drive_subprocess`] (the pump under the abort
-//! leash — the one recipe extensions must not hand-roll).
+//! leash — the one recipe extensions must not hand-roll). The
+//! session's [`SubagentPool`](crate::subagent_pool) keeps completed
+//! children addressable by friendly id — the `subagent` tool parks,
+//! the `followup` tool sends more work to the same child session, and
+//! the pool collects the idle ones at the parent's turn boundary.
 
 use crate::session::RunSummary;
-use rig_agent::completion::Message;
-use rig_agent::tool::{DynamicTool, InternalCallId, ToolContext, ToolExecutionError, ToolOutput};
-use rig_derive::rig_tool;
 use std::path::PathBuf;
 use std::sync::Arc;
+use tabit_derive::rig_tool;
+use tabit_engine::completion::Message;
+use tabit_engine::tool::{
+    DynamicTool, InternalCallId, ToolContext, ToolExecutionError, ToolOutput,
+};
 use tabit_protocol::ModelSelection;
 use tokio_util::sync::CancellationToken;
 
 /// The process-wide half: everything an extension tool cannot get
-/// from [`ToolContext`] alone, minted once by the assembly. Defaults
-/// and access — not policy: the default child toolset and budget are
-/// conveniences to filter or ignore.
+/// from [`ToolContext`] alone, minted once by the assembly. Policy,
+/// not defaults: the tool lists and budget cross to children as the
+/// spawner's choices.
 pub struct SubagentParts {
-    /// The child registry the host routes through — spawns register
-    /// here, routing's second table reads here (one table per
-    /// process; the assembly shares it with the host wiring).
-    pub router: Arc<crate::routing::ChildRouter>,
+    /// The node the host and its children share — spawns register
+    /// their lanes on it (the learning table carries child and
+    /// grandchild routes alike), so this must be the same net the
+    /// session host mounts on.
+    pub node: Arc<tabit_wire::node::Node>,
     /// The tabit executable subprocess children spawn (`--json` child
     /// role). The assembly resolves it to the current executable, no
     /// exceptions (the pi self-spawn pattern) — children are this very
@@ -50,44 +56,53 @@ pub struct SubagentParts {
     /// children on the same root (and tests pin empty dirs for
     /// hermeticity). An empty dir is a valid extension-less root.
     pub extensions: PathBuf,
-    /// The default child toolset — the parent's minus the subagent
-    /// tool (recursion depth is enforced by omission). A starting
-    /// point for allow-lists: filter it, ignore it, build your own.
-    pub tools: Vec<DynamicTool>,
+    /// The assembly's effective allow-list, forwarded to children
+    /// (`--tools`) — `None` when the invocation set none (the usual
+    /// case: the child mounts everything the blacklist spares).
+    /// Policy, never tools: the child assembles its own toolset and
+    /// filters it itself.
+    pub tool_allow: Option<Vec<String>>,
+    /// The assembly's effective deny-list, forwarded to children
+    /// (`--without`, extended with `subagent`/`followup` by the
+    /// spawn preset — the recursion guard is the spawner's blacklist
+    /// policy, never a baked-in role check). Unknown names match
+    /// nothing child-side (include/exclude-if-it-exists).
+    pub tool_deny: Vec<String>,
     /// The default per-child model-call budget.
     pub max_turns: usize,
 }
 
-/// The per-run spawn context: this parent's identity and channels,
-/// snapshot at run open, over the process-wide [`SubagentParts`].
+/// The per-run spawn context: this parent's identity, snapshot at
+/// run open, over the process-wide [`SubagentParts`] and the
+/// session's [`SubagentPool`](crate::subagent_pool::SubagentPool).
 /// Mounted into each run's [`ToolContext`] when the assembly enables
 /// subagents; extension tools read the same capability.
 pub struct SpawnContext {
     parts: Arc<SubagentParts>,
+    pool: Arc<crate::subagent_pool::SubagentPool>,
     parent_id: String,
     parent_selection: ModelSelection,
     parent_cwd: PathBuf,
-    notice: Option<crate::notice::NoticeSink>,
 }
 
 impl SpawnContext {
-    /// Build the per-run context from the session's state and its
-    /// attached channels. The run opener calls this; tests and
-    /// alternative assemblies (a tool that spawns without a mounted
-    /// run) construct it directly — every argument is public state.
+    /// Build the per-run context from the session's state. The run
+    /// opener calls this; tests and alternative assemblies (a tool
+    /// that spawns without a mounted run) construct it directly —
+    /// every argument is public state.
     pub fn new(
         parts: Arc<SubagentParts>,
+        pool: Arc<crate::subagent_pool::SubagentPool>,
         parent_id: String,
         parent_selection: ModelSelection,
         parent_cwd: PathBuf,
-        notice: Option<crate::notice::NoticeSink>,
     ) -> Self {
         Self {
             parts,
+            pool,
             parent_id,
             parent_selection,
             parent_cwd,
-            notice,
         }
     }
 
@@ -95,6 +110,13 @@ impl SpawnContext {
     /// default child toolset and budget).
     pub fn parts(&self) -> &SubagentParts {
         &self.parts
+    }
+
+    /// The session's kept-alive children — the `subagent` tool parks
+    /// its completed children here, the `followup` tool addresses
+    /// them by id.
+    pub fn pool(&self) -> &crate::subagent_pool::SubagentPool {
+        &self.pool
     }
 
     /// This parent's session id — the child's `parent` field.
@@ -112,19 +134,31 @@ impl SpawnContext {
         &self.parent_cwd
     }
 
-    /// The frontend channel's weak, pre-stamped handle — the subprocess
-    /// bridge forwards the child process's frames through it, as-is.
-    pub(crate) fn notice(&self) -> Option<crate::notice::NoticeSink> {
-        self.notice.clone()
-    }
-
-    /// Begin a subprocess child: the bridge builder. The OS enforces
-    /// the cwd, the child builds its own truthful preamble in that
-    /// cwd, and a persisted child is just a session file under its
-    /// own cwd. The child announces itself (`--parent` speaks at the
-    /// source of truth); routing registers at spawn.
-    pub fn spawn_subprocess(&self) -> crate::subprocess::SubprocessBuilder {
-        crate::subprocess::SubprocessBuilder::new(self)
+    /// Begin a subprocess child: the spawner's preset over the shared
+    /// spec — the exe, this parent's identity (`--parent` speaks at
+    /// the source of truth), the extensions root, the lane mount
+    /// on the assembly's node, and the tool policy crossing as
+    /// `--tools`/`--without` (the blacklist extended with
+    /// `subagent`/`followup` — the recursion guard; the child
+    /// filters its own toolset against the lists). The caller chains
+    /// the child-role knobs (cwd, model, budget, persistence) and
+    /// spawns; the child announces itself and routing registers at
+    /// spawn.
+    pub fn spawn_subprocess(&self) -> tabit_wire::client::ChildSpec {
+        let parts = self.parts();
+        let mut deny = parts.tool_deny.clone();
+        deny.push("subagent".to_string());
+        deny.push("followup".to_string());
+        let mut spec =
+            tabit_wire::client::ChildSpec::new(parts.exe.clone(), self.parent_cwd().to_path_buf())
+                .parent(self.parent_id().to_string())
+                .extensions(parts.extensions.clone())
+                .on_node(parts.node.clone())
+                .without(deny);
+        if let Some(allow) = &parts.tool_allow {
+            spec = spec.tools(allow.clone());
+        }
+        spec
     }
 
     /// Drive a subprocess child under the abort leash: the task
@@ -137,11 +171,11 @@ impl SpawnContext {
     /// [`RunSummary`] to a tool result is the caller's policy.
     pub async fn drive_subprocess(
         &self,
-        child: &mut crate::subprocess::SubprocessChild,
+        child: &mut tabit_wire::client::ChildHandle,
         task: Message,
         token: Option<CancellationToken>,
     ) -> RunSummary {
-        child.drive(task, token).await
+        crate::subprocess::drive_child(child, task, token).await
     }
 }
 
@@ -155,7 +189,10 @@ impl SpawnContext {
                    and returns its final answer. It runs this session's model and \
                    toolset (minus this tool). Optional: cwd — scope the subagent to \
                    another directory; its tools and instructions follow it there. \
-                   Progress streams to the user on the subagent's own channel."
+                   Progress streams to the user on the subagent's own channel. \
+                   A completed subagent stays available: the result names its id, \
+                   and the followup tool can send it more work in the same \
+                   conversation."
 )]
 pub async fn subagent(
     #[rig(context)] context: &mut ToolContext,
@@ -184,7 +221,7 @@ pub async fn subagent(
     // in its own cwd (truthful by construction); the task crosses as
     // the first message. The call's correlation id crosses too: the
     // child's announce pairs its session with this very tool call.
-    let mut builder = ctx
+    let mut spec = ctx
         .spawn_subprocess()
         .cwd(
             cwd.map(PathBuf::from)
@@ -194,35 +231,85 @@ pub async fn subagent(
         .max_turns(parts.max_turns)
         .ephemeral(true);
     if let Some(id) = context.get::<InternalCallId>() {
-        builder = builder.parent_call(id.0.clone());
+        spec = spec.parent_call(id.0.clone());
     }
-    let mut child = builder.spawn().await.map_err(ToolExecutionError::other)?;
-    let summary = ctx
-        .drive_subprocess(&mut child, Message::user(task), token)
-        .await;
-    let id = child.id().to_string();
-    child.wait_exit().await;
-    summary_result(summary, &id)
+    let child = spec.spawn().await.map_err(ToolExecutionError::other)?;
+    // The pool's drive parks a completed child for follow-ups (its
+    // ids, its aging); every other terminal reaps it there.
+    let run = ctx.pool().start(child, task, token).await;
+    summary_result(run.summary, &run.child_id, run.id.as_deref())
+}
+
+/// Follow up with a subagent parked earlier — the same child process
+/// and session, so the earlier task's full context is still its
+/// memory. The id is the address the `subagent` tool's result named.
+#[rig_tool(
+    description = "Send a follow-up message to a subagent started earlier with the \
+                   subagent tool — the same agent process, with everything it did \
+                   for the earlier task still in its context. Pass the id the \
+                   subagent tool's result named. A subagent idles out after 5 \
+                   unused turns; an expired or unknown id means starting a fresh \
+                   subagent instead."
+)]
+pub async fn followup(
+    #[rig(context)] context: &mut ToolContext,
+    id: String,
+    message: String,
+) -> Result<ToolOutput, ToolExecutionError> {
+    let token = context.get::<CancellationToken>().cloned();
+    // The same structural pre-cancel refusal as the subagent tool's.
+    if token.as_ref().is_some_and(|t| t.is_cancelled()) {
+        return Err(ToolExecutionError::other(
+            "the follow-up was interrupted before starting — it did not run".to_string(),
+        ));
+    }
+    let ctx = context.get::<Arc<SpawnContext>>().cloned().ok_or_else(|| {
+        ToolExecutionError::other(
+            "subagents are not available in this session — the assembly did not mount them",
+        )
+    })?;
+    match ctx.pool().follow(&id, message, token).await {
+        Some(run) => summary_result(run.summary, &run.child_id, run.id.as_deref()),
+        None => Err(ToolExecutionError::other(format!(
+            "no live subagent \"{id}\" — it idled out after {} unused turns or never ran in this \
+             session; start a fresh one with the subagent tool",
+            crate::subagent_pool::MAX_IDLE_TURNS,
+        ))),
+    }
 }
 
 /// Map a run summary to the tool's result — the subprocess drive's
 /// terminal synthesized in the child's own event vocabulary. The
-/// cargo carries the pairing fact (`child_id`); the child's turns and
-/// token usage are bookkeeping the model has no use for.
-fn summary_result(summary: RunSummary, child_id: &str) -> Result<ToolOutput, ToolExecutionError> {
+/// cargo carries the pairing fact (`child_id`) and, when the child
+/// stayed parked, its friendly id (the `followup` address — spelled
+/// out in the report so the model cannot miss it); the child's turns
+/// and token usage are bookkeeping the model has no use for.
+fn summary_result(
+    summary: RunSummary,
+    child_id: &str,
+    id: Option<&str>,
+) -> Result<ToolOutput, ToolExecutionError> {
     use crate::session::RunOutcome;
     use tabit_protocol::SessionEvent;
 
     match summary.outcome {
         RunOutcome::Completed => {
-            let report = if summary.output.trim().is_empty() {
+            let mut report = if summary.output.trim().is_empty() {
                 "The subagent completed the task without a final answer.".to_string()
             } else {
                 summary.output
             };
-            rig_core::tool::content_parts(
+            if let Some(id) = id {
+                report.push_str(&format!(
+                    "\n\nThe subagent is still available: send follow-ups with the followup \
+                     tool, id \"{id}\" (it idles out after {} unused turns).",
+                    crate::subagent_pool::MAX_IDLE_TURNS
+                ));
+            }
+            tabit_providers::tool::content_parts(
                 report,
                 Some(serde_json::json!({
+                    "id": id,
                     "child_id": child_id,
                     "outcome": "completed",
                 })),
@@ -254,40 +341,16 @@ fn summary_result(summary: RunSummary, child_id: &str) -> Result<ToolOutput, Too
 
 /// The subagent tool as a session-registerable [`DynamicTool`].
 pub fn subagent_tool() -> DynamicTool {
-    rig_agent::tool::dynamic_contextual(Subagent)
+    tabit_engine::tool::dynamic_contextual(Subagent)
+}
+
+/// The followup tool as a session-registerable [`DynamicTool`] —
+/// registered beside the subagent tool, omitted from child toolsets
+/// with it (recursion depth is enforced by omission).
+pub fn followup_tool() -> DynamicTool {
+    tabit_engine::tool::dynamic_contextual(Followup)
 }
 
 #[cfg(test)]
 #[path = "subagent_tests.rs"]
 mod tests;
-
-/// Filter a toolset down to an allow-list of names — the one
-/// implementation of the concern (the `subagent` tool's `tools` arg
-/// and the CLI's `--tools` flag both ride it). An unknown name is a
-/// loud error, not a silent drop — a typo'd allow-list that quietly
-/// empties the toolset would look like a broken child.
-pub fn filter_tools(
-    defaults: &[DynamicTool],
-    allow: &[String],
-) -> Result<Vec<DynamicTool>, ToolExecutionError> {
-    let mut chosen = Vec::with_capacity(allow.len());
-    let mut missing = Vec::new();
-    for name in allow {
-        match defaults.iter().find(|tool| tool.name() == name) {
-            Some(tool) => chosen.push(tool.clone()),
-            None => missing.push(name.clone()),
-        }
-    }
-    if !missing.is_empty() {
-        return Err(ToolExecutionError::other(format!(
-            "unknown tools in the allow-list: {} — the child toolset offers: {}",
-            missing.join(", "),
-            defaults
-                .iter()
-                .map(|tool| tool.name())
-                .collect::<Vec<_>>()
-                .join(", ")
-        )));
-    }
-    Ok(chosen)
-}

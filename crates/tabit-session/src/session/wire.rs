@@ -2,7 +2,7 @@
 //! tabit-protocol forms. The live fold and the replay projection share
 //! this one home — one translation, one truth.
 
-use rig_agent::completion::Message;
+use tabit_engine::completion::Message;
 
 /// The text of a user message (joined text parts).
 pub(crate) fn user_text(message: &Message) -> String {
@@ -12,7 +12,7 @@ pub(crate) fn user_text(message: &Message) -> String {
     content
         .iter()
         .filter_map(|part| match part {
-            rig_core::message::UserContent::Text(text) => Some(text.text.as_str()),
+            tabit_providers::message::UserContent::Text(text) => Some(text.text.as_str()),
             _ => None,
         })
         .collect()
@@ -20,7 +20,7 @@ pub(crate) fn user_text(message: &Message) -> String {
 
 /// The text of a tool result — exactly what the model saw of it (text
 /// parts joined; images have no textual form).
-pub(crate) fn result_text(result: &rig_core::message::ToolResult) -> String {
+pub(crate) fn result_text(result: &tabit_providers::message::ToolResult) -> String {
     result
         .content
         .iter()
@@ -33,7 +33,9 @@ pub(crate) fn result_text(result: &rig_core::message::ToolResult) -> String {
 /// structured facts riding `tool_result.details` (today: the edit
 /// tool's diff + outcomes). Details live on the result itself; the
 /// model never sees them.
-pub(crate) fn result_details(result: &rig_core::message::ToolResult) -> Option<serde_json::Value> {
+pub(crate) fn result_details(
+    result: &tabit_providers::message::ToolResult,
+) -> Option<serde_json::Value> {
     result.details.clone()
 }
 
@@ -49,13 +51,13 @@ pub(crate) fn result_details(result: &rig_core::message::ToolResult) -> Option<s
 /// translation, one truth.
 #[allow(clippy::panic)] // sanctioned crash: a status-less result is a broken producer invariant (AGENTS.md doctrine)
 pub(crate) fn wire_status(
-    status: &Option<rig_core::completion::ToolResultStatus>,
+    status: &Option<tabit_providers::completion::ToolResultStatus>,
 ) -> tabit_protocol::ToolResultStatus {
     match status {
-        Some(rig_core::completion::ToolResultStatus::Success) => {
+        Some(tabit_providers::completion::ToolResultStatus::Success) => {
             tabit_protocol::ToolResultStatus::Success
         }
-        Some(rig_core::completion::ToolResultStatus::Failed { code }) => {
+        Some(tabit_providers::completion::ToolResultStatus::Failed { code }) => {
             tabit_protocol::ToolResultStatus::Failed {
                 exit_code: code.as_deref().and_then(|code| code.parse().ok()),
             }
@@ -67,7 +69,7 @@ pub(crate) fn wire_status(
 /// Convert the engine's usage record to the protocol's wire shape
 /// (the engine's richer fields — reasoning, tool-use, per-TTL splits —
 /// stay engine-internal).
-pub(crate) fn wire_usage(usage: &rig_core::completion::Usage) -> tabit_protocol::Usage {
+pub(crate) fn wire_usage(usage: &tabit_providers::completion::Usage) -> tabit_protocol::Usage {
     tabit_protocol::Usage {
         input_tokens: usage.input_tokens,
         output_tokens: usage.output_tokens,
@@ -86,14 +88,16 @@ mod tests {
         // A non-user message carries no user text.
         let assistant = Message::Assistant {
             id: None,
-            content: rig_core::OneOrMany::one(rig_core::message::AssistantContent::text("hi")),
+            content: tabit_providers::OneOrMany::one(
+                tabit_providers::message::AssistantContent::text("hi"),
+            ),
         };
         assert!(user_text(&assistant).is_empty());
         // Non-text parts contribute nothing; text parts join.
         let message = Message::User {
-            content: rig_core::OneOrMany::many(vec![
-                rig_core::message::UserContent::image_base64("aGk=", None, None),
-                rig_core::message::UserContent::text("the text"),
+            content: tabit_providers::OneOrMany::many(vec![
+                tabit_providers::message::UserContent::image_base64("aGk=", None, None),
+                tabit_providers::message::UserContent::text("the text"),
             ])
             .expect("two parts"),
         };
@@ -102,8 +106,8 @@ mod tests {
 
     #[test]
     fn result_details_reads_the_details_field() {
-        use rig_core::OneOrMany;
-        use rig_core::message::{ToolResult, ToolResultContent};
+        use tabit_providers::OneOrMany;
+        use tabit_providers::message::{ToolResult, ToolResultContent};
 
         let field = ToolResult {
             id: "call".to_string(),

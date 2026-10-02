@@ -1,0 +1,11 @@
+[package]
+name = "tabit-derive-core-only-contextual-fixture"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+core_runtime = { package = "tabit-providers", path = "../../../../tabit-providers", default-features = false }
+rig_macros = { package = "tabit-derive", path = "../../.." }

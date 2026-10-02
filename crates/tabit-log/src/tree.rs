@@ -82,6 +82,32 @@ impl SessionTree {
         Ok(())
     }
 
+    /// The forward continuation from `from` (exclusive): the unique
+    /// child chain, collected until a branch point (more than one
+    /// child) or a leaf. Under the one-commit-door invariant a
+    /// roundtrip enters the tree whole, so branch points sit at closed
+    /// positions only — a mid-roundtrip walk (an open position's
+    /// completing tool results) never faces ambiguity and spans at
+    /// most one batch. Built from an on-demand children pass: walks
+    /// are checkout-rare, the tree never maintains the index.
+    pub fn forward_from(&self, from: &str) -> Vec<SessionEntry> {
+        let mut children: HashMap<&str, Vec<&str>> = HashMap::new();
+        for entry in self.nodes.values() {
+            if let Some(parent) = &entry.parent_id {
+                children.entry(parent.as_str()).or_default().push(&entry.id);
+            }
+        }
+        let mut chain = Vec::new();
+        let mut current = from;
+        while let [only] = children.get(current).map(Vec::as_slice).unwrap_or(&[])
+            && let Some(entry) = self.nodes.get(*only)
+        {
+            chain.push(entry.clone());
+            current = &entry.id;
+        }
+        chain
+    }
+
     /// The model-visible **history view** ending at the head: the
     /// newest compaction's summary leading its retained tail plus
     /// every newer entry. Constructed by one backward walk — the

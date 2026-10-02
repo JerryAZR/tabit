@@ -2,7 +2,9 @@
 name = "tabit-tools"
 version.workspace = true
 edition.workspace = true
-license = "MIT"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
 description = "Tabit coding tools: file reading and shell execution as PortableTools."
 
 [lints]
@@ -15,14 +17,14 @@ doctest = true
 
 [dependencies]
 base64 = { workspace = true }
-rig-agent = { path = "../rig-agent", version = "0.41.0", default-features = false, features = ["derive"] }
-rig-derive = { path = "../rig-derive", version = "0.41.0" }
+tabit-engine = { path = "../tabit-engine", version = "0.1.0", default-features = false, features = ["derive"] }
+tabit-derive = { path = "../tabit-derive", version = "0.1.0" }
 # The std flavor (this crate owns no runtime — tool bodies poll on
 # the engine's sidecar). Version-aligned with tabit-ext's tokio
 # flavor (one major in the tree; the std/tokio split is the crate's
 # own feature choice, not a version fork).
 process-wrap = { version = "10", default-features = false, features = ["std", "creation-flags", "job-object", "process-group"] }
-rig-core = { path = "../rig-core", version = "0.41.0", default-features = false }
+tabit-providers = { path = "../tabit-providers", version = "0.1.0", default-features = false }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 similar = "2"

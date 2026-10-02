@@ -1,0 +1,79 @@
+[package]
+name = "tabit-rig"
+version.workspace = true
+edition = { workspace = true }
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+# The cassette corpus (tests/cassettes, ~4MB) is a dev-time replay fixture;
+# keep it out of the published package.
+exclude = ["tests/cassettes"]
+description = "One-dependency facade over tabit-providers + tabit-engine + tabit-derive; hosts the provider cassette test harness."
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+[lints]
+workspace = true
+
+[dependencies]
+tabit-providers = { path = "../tabit-providers", version = "0.1.0", default-features = false }
+tabit-engine = { path = "../tabit-engine", version = "0.1.0", optional = true, default-features = false }
+tabit-derive = { path = "../tabit-derive", version = "0.1.0", optional = true }
+
+[features]
+default = ["tabit-providers/default", "agent", "derive", "rustls"]
+agent = ["dep:tabit-engine"]
+test-utils = ["tabit-providers/test-utils", "tabit-engine?/test-utils"]
+derive = ["dep:tabit-derive", "tabit-providers/derive", "tabit-engine?/derive"]
+socks = ["tabit-providers/socks"]
+reqwest = ["tabit-providers/reqwest"]
+rustls = ["tabit-providers/rustls"]
+native-tls = ["tabit-providers/native-tls"]
+reqwest-middleware = ["tabit-providers/reqwest-middleware"]
+reqwest-middleware-rustls = ["tabit-providers/reqwest-middleware-rustls"]
+reqwest-middleware-native-tls = ["tabit-providers/reqwest-middleware-native-tls"]
+
+[dev-dependencies]
+tabit-providers = { path = "../tabit-providers", version = "0.1.0", default-features = false, features = [
+    "test-utils",
+] }
+tabit-engine = { path = "../tabit-engine", version = "0.1.0", default-features = false, features = [
+    "test-utils",
+] }
+tabit-log = { path = "../tabit-log" }
+anyhow = { workspace = true }
+async-stream = { workspace = true }
+base64 = { workspace = true }
+bytes = { workspace = true }
+futures = { workspace = true }
+httpmock = { workspace = true, features = ["record", "proxy"] }
+reqwest = { workspace = true, features = ["json", "stream"] }
+reqwest-middleware = { workspace = true, features = [
+    "json",
+    "multipart",
+    "charset",
+    "http2",
+    "rustls",
+] }
+schemars = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+# `float_roundtrip` keeps cassette scrubbing idempotent on float-heavy bodies
+# (e.g. embedding vectors): without it, parse→print can oscillate between two
+# representations of the same decimal and the recorded YAML never stabilizes.
+# (`preserve_order` comes via tabit-providers's own dependency, where it belongs.)
+serde_json = { workspace = true, features = ["float_roundtrip"] }
+serde_yaml = { workspace = true }
+sha2 = { workspace = true }
+# `syn` drives the AST scan in `tests/common/cassette_safety.rs`; it is the one
+# crate from upstream's "drop" list that a kept test actually needs.
+syn = { workspace = true, features = ["full", "visit"] }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
+url = { workspace = true }
+axum = { workspace = true }
+aws-smithy-eventstream = { workspace = true }
+aws-smithy-types = { workspace = true }

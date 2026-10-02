@@ -10,13 +10,13 @@
         clippy::unwrap_used
     )
 )]
-//! Tabit sessions: persistent, resumable conversations over the rig-agent
+//! Tabit sessions: persistent, resumable conversations over the tabit-engine
 //! outer loop.
 //!
 //! A session is one JSONL file (header + append-only entries) under a
 //! caller-chosen directory — project-local by default, because a path
 //! relative to the project survives renames and moves. The session layer
-//! is the *policy owner* around the rig-agent engine: it selects the model
+//! is the *policy owner* around the tabit-engine engine: it selects the model
 //! for each outer loop (from `tabit-config`), adopts the parsed log as
 //! its resident state at open, commits each tool-use roundtrip atomically
 //! as the item stream closes it (plus steers, model switches, and
@@ -57,9 +57,10 @@
 //! let run = session.prompt("explain this repository").await;
 //! println!("{}", run.output);
 //!
-//! // Resuming is the same builder with `.resume(path)` instead of
-//! // `.create(cwd)` — the log is the source of truth. A fresh session
-//! // leaves no file behind until its first user message.
+//! // Resuming is the same builder with `.resume(&path, cwd)` instead
+//! // of `.create(cwd)` — the log is the state, the caller's cwd the
+//! // world (the header records none). A fresh session leaves no file
+//! // behind until its first user message.
 //! # Ok(())
 //! # }
 //! ```
@@ -67,6 +68,7 @@
 //! [`Session::prompt`]: crate::Session::prompt
 
 mod compaction;
+pub mod edge;
 mod endpoint;
 mod error;
 mod interaction;
@@ -76,13 +78,13 @@ mod parser;
 mod prompt;
 mod registry;
 pub(crate) mod replay;
-mod routing;
 pub mod services;
 mod session;
 pub mod skills;
 mod stats;
 mod store;
 pub mod subagent;
+pub mod subagent_pool;
 mod subprocess;
 
 // The durable-conversation layer, extracted to tabit-log (2026-08):
@@ -97,8 +99,8 @@ pub use tabit_log::writer;
 
 pub use context_manager::{CheckoutError, ContextManager};
 pub use endpoint::{
-    OpenSessionSource, SessionCommandLink, SessionHost, SessionHostWiring, SessionInfo,
-    SessionSource,
+    FrontendStream, OpenSessionSource, SessionCommandLink, SessionHost, SessionHostData,
+    SessionHostMount, SessionHostWiring, SessionInfo, SessionSource, mount_frontend,
 };
 pub use entry::{
     EntryKind, SESSION_FORMAT_MAJOR, SESSION_FORMAT_MINOR, SessionEntry, SessionHeader,
@@ -110,7 +112,6 @@ pub use notice::NoticeSink;
 pub use parser::Parsed;
 pub use prompt::{build_system_prompt, build_system_prompt_with_base};
 pub use registry::ModelRegistry;
-pub use routing::ChildRouter;
 pub use session::{
     AbortHandle, DEFAULT_MAX_TURNS, MailboxHandle, RewindSummary, RunOutcome, RunSummary, Session,
     SessionBuilder, TOOL_CONCURRENCY,
@@ -118,9 +119,10 @@ pub use session::{
 pub use stats::{ModelStats, ModelUsage, SessionStats, UsageLedger};
 pub use store::{SessionStore, SessionSummary};
 pub use tabit_protocol::{
-    ClientFrame, EventFrame, ModelSelection, PROTOCOL_VERSION, ServerControlFrame, ServerFrame,
-    SessionCommand, SessionEvent, StreamId,
+    EventFrame, ModelSelection, PROTOCOL_VERSION, ServerControlFrame, ServerFrame, SessionCommand,
+    SessionEvent, StreamId,
 };
+pub use tabit_wire::node::{Channel, Node};
 pub use tree::{SessionTree, TreeFault};
 pub use writer::{SessionWriter, SharedBuffer, WriteBuffer};
 

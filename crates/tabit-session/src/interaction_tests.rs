@@ -6,24 +6,24 @@
 use super::*;
 use crate::SessionEvent;
 use crate::tests::{Factory, temp_store, text_turn, tool_turn};
-use rig_agent::test_utils::MockStreamEvent;
-use rig_agent::tool::{DynamicTool, ToolOutput};
-use rig_core::completion::Usage;
 use serde_json::json;
+use tabit_engine::test_utils::MockStreamEvent;
+use tabit_engine::tool::{DynamicTool, ToolOutput};
 use tabit_protocol::SessionCommand;
+use tabit_providers::completion::Usage;
 
 /// A minimal ask-gate over the public hook surface — the seam these
 /// tests cover (a policy hook asking through the run context, the hub
 /// routing, the actor answering). The real permission gate is the
 /// `gate` extension package (EXTENSIONS.md); the binary assembles
 /// hooks exactly the way this factory does.
-fn gated_gate() -> rig_agent::agent::HookStack {
-    use rig_agent::agent::hook::ToolCallAction;
+fn gated_gate() -> tabit_engine::agent::HookStack {
+    use tabit_engine::agent::hook::ToolCallAction;
     let granted: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<String>>> =
         std::sync::Arc::default();
-    rig_agent::agent::HookStack::new().hook(
+    tabit_engine::agent::HookStack::new().hook(
         ("test-gate", 0),
-        rig_agent::agent::on::tool_call(move |ctx, call| {
+        tabit_engine::agent::on::tool_call(move |ctx, call| {
             let granted = granted.clone();
             let tool = call.tool_name.to_string();
             let args = call.args.to_string();
@@ -65,11 +65,11 @@ fn gated_gate() -> rig_agent::agent::HookStack {
                     .request(tabit_protocol::templates::ui::SELECT_ONE, payload)
                     .await
                 {
-                    rig_agent::tool::interaction::InteractionOutcome::Answered(payload) => {
+                    tabit_engine::tool::interaction::InteractionOutcome::Answered(payload) => {
                         serde_json::from_value::<tabit_protocol::templates::SelectAnswer>(payload)
                             .unwrap_or_default()
                     }
-                    rig_agent::tool::interaction::InteractionOutcome::Dismissed => {
+                    tabit_engine::tool::interaction::InteractionOutcome::Dismissed => {
                         tabit_protocol::templates::SelectAnswer::default()
                     }
                 };
@@ -122,7 +122,7 @@ fn asking_tool() -> DynamicTool {
         json!({"type":"object","properties":{"question":{"type":"string"}}}),
         |ctx, args| {
             Box::pin(async move {
-                use rig_agent::tool::interaction::UserInteraction;
+                use tabit_engine::tool::interaction::UserInteraction;
                 let question = args
                     .get("question")
                     .and_then(|v| v.as_str())
@@ -143,13 +143,13 @@ fn asking_tool() -> DynamicTool {
                     .request(tabit_protocol::templates::ui::SELECT_ANY, payload)
                     .await;
                 let text = match reply {
-                    rig_agent::tool::interaction::InteractionOutcome::Answered(payload) => {
+                    tabit_engine::tool::interaction::InteractionOutcome::Answered(payload) => {
                         serde_json::from_value::<tabit_protocol::templates::SelectAnswer>(payload)
                             .map(|a| a.text)
                             .ok()
                             .flatten()
                     }
-                    rig_agent::tool::interaction::InteractionOutcome::Dismissed => None,
+                    tabit_engine::tool::interaction::InteractionOutcome::Dismissed => None,
                 };
                 Ok(ToolOutput::text(
                     text.unwrap_or_else(|| "dismissed".to_string()),
@@ -210,12 +210,17 @@ async fn a_permission_card_answered_allow_runs_the_tool() {
     .hooks(gated_gate())
     .create("C:/w")
     .expect("session");
-    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store));
+    let mut handle = SessionHost::spawn(
+        session,
+        Vec::new(),
+        plain_wiring(&store),
+        crate::tests::plain_data(),
+    );
     let link = handle.command_link();
 
     let frames = run_answering(&mut handle, &link, |session, id| {
         SessionCommand::InteractionResponse {
-            session: session.to_string(),
+            session: Some(session.to_string()),
             id: id.to_string(),
             payload: json!({"selected": ["Allow"]}),
         }
@@ -248,12 +253,17 @@ async fn a_permission_denial_skips_the_tool_in_band() {
     .hooks(gated_gate())
     .create("C:/w")
     .expect("session");
-    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store));
+    let mut handle = SessionHost::spawn(
+        session,
+        Vec::new(),
+        plain_wiring(&store),
+        crate::tests::plain_data(),
+    );
     let link = handle.command_link();
 
     let frames = run_answering(&mut handle, &link, |session, id| {
         SessionCommand::InteractionResponse {
-            session: session.to_string(),
+            session: Some(session.to_string()),
             id: id.to_string(),
             payload: json!({"selected": ["Deny"], "text": "never in tests"}),
         }
@@ -294,12 +304,17 @@ async fn always_allow_remembers_across_calls_in_the_session() {
     .hooks(gated_gate())
     .create("C:/w")
     .expect("session");
-    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store));
+    let mut handle = SessionHost::spawn(
+        session,
+        Vec::new(),
+        plain_wiring(&store),
+        crate::tests::plain_data(),
+    );
     let link = handle.command_link();
 
     let frames = run_answering(&mut handle, &link, |session, id| {
         SessionCommand::InteractionResponse {
-            session: session.to_string(),
+            session: Some(session.to_string()),
             id: id.to_string(),
             payload: json!({"selected": ["Always allow"]}),
         }
@@ -318,13 +333,18 @@ async fn always_allow_remembers_across_calls_in_the_session() {
         .into_builder(store.clone())
         .dynamic_tool(gated_tool())
         .hooks(gated_gate())
-        .resume(std::path::Path::new(&path))
+        .resume(std::path::Path::new(&path), "C:/w")
         .expect("resume");
-    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store));
+    let mut handle = SessionHost::spawn(
+        session,
+        Vec::new(),
+        plain_wiring(&store),
+        crate::tests::plain_data(),
+    );
     let link = handle.command_link();
     let frames = run_answering(&mut handle, &link, |session, id| {
         SessionCommand::InteractionResponse {
-            session: session.to_string(),
+            session: Some(session.to_string()),
             id: id.to_string(),
             payload: json!({"selected": ["Allow"]}),
         }
@@ -350,12 +370,17 @@ async fn an_ask_user_tool_body_round_trips_the_question_and_answer() {
     .dynamic_tool(asking_tool())
     .create("C:/w")
     .expect("session");
-    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store));
+    let mut handle = SessionHost::spawn(
+        session,
+        Vec::new(),
+        plain_wiring(&store),
+        crate::tests::plain_data(),
+    );
     let link = handle.command_link();
 
     let frames = run_answering(&mut handle, &link, |session, id| {
         SessionCommand::InteractionResponse {
-            session: session.to_string(),
+            session: Some(session.to_string()),
             id: id.to_string(),
             payload: json!({"text": "main.rs"}),
         }
@@ -391,7 +416,12 @@ async fn frontend_death_with_a_card_open_winds_the_worker_down() {
         .hooks(gated_gate())
         .create("C:/w")
         .expect("session");
-    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store));
+    let mut handle = SessionHost::spawn(
+        session,
+        Vec::new(),
+        plain_wiring(&store),
+        crate::tests::plain_data(),
+    );
     let mut events = handle.take_events().expect("the event stream");
 
     handle.message(handle.info().session_id.as_str(), "run it");
@@ -403,6 +433,9 @@ async fn frontend_death_with_a_card_open_winds_the_worker_down() {
         if matches!(
             frame,
             Some(tabit_protocol::EventFrame {
+                // The hub's own asks are origin-stamped (the asking
+                // participant's speech) — the kind is what identifies
+                // the card.
                 event: SessionEvent::InteractionRequest { .. },
                 ..
             })
@@ -456,7 +489,7 @@ async fn frontend_death_with_a_card_open_winds_the_worker_down() {
     );
     let (resumed, _report) = Factory::new(vec![text_turn("recovered")])
         .into_builder(store.clone())
-        .resume(std::path::Path::new(&path))
+        .resume(std::path::Path::new(&path), "C:/w")
         .expect("the log reopens after the death");
     let _ = resumed;
     std::fs::remove_dir_all(store.dir()).ok();
@@ -471,7 +504,12 @@ async fn abort_with_a_card_open_closes_the_question_totally() {
         .hooks(gated_gate())
         .create("C:/w")
         .expect("session");
-    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store));
+    let mut handle = SessionHost::spawn(
+        session,
+        Vec::new(),
+        plain_wiring(&store),
+        crate::tests::plain_data(),
+    );
     let link = handle.command_link();
 
     handle.message(handle.info().session_id.as_str(), "run it");
@@ -492,7 +530,7 @@ async fn abort_with_a_card_open_closes_the_question_totally() {
             // it genuinely reaches the handler.
             if let Some(id) = &stale_id {
                 link.send(SessionCommand::InteractionResponse {
-                    session: handle.info().session_id.clone(),
+                    session: Some(handle.info().session_id.clone()),
                     id: id.clone(),
                     payload: json!({"selected": ["Allow"]}),
                 });
@@ -536,7 +574,12 @@ async fn two_open_cards_answered_in_reverse_order_both_run() {
         .hooks(gated_gate())
         .create("C:/w")
         .expect("session");
-    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store));
+    let mut handle = SessionHost::spawn(
+        session,
+        Vec::new(),
+        plain_wiring(&store),
+        crate::tests::plain_data(),
+    );
     let link = handle.command_link();
 
     let session = handle.info().session_id.clone();
@@ -552,7 +595,7 @@ async fn two_open_cards_answered_in_reverse_order_both_run() {
         if open.len() == 2 {
             for id in open.iter().rev() {
                 link.send(SessionCommand::InteractionResponse {
-                    session: session.clone(),
+                    session: Some(session.clone()),
                     id: id.clone(),
                     payload: json!({"selected": ["Allow"]}),
                 });

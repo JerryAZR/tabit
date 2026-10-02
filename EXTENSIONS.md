@@ -2,12 +2,13 @@
 
 The extension development record. **The substrate is ruled (2026-09,
 below) and implemented through checklist task 4 — `crates/tabit-ext`:
-discovery and the enablement gate, the initialize/ack handshake,
+discovery and the enablement gate, the report-first contract,
 supervision, the death policy, the tool lane, the hook lane, the
-skills tables; `crates/tabit-ext-sdk`: the guest dispatcher and the
-example packages (the permission gate included — it lives here now,
-not in core).** Host-service frames (task 5) and install (task 6)
-land with their checklist tasks (ROADMAP item 9). Every entry names
+skills tables; `crates/tabit-ext-sdk`: the guest's functional layer
+over its node (the port, 2026-09 — the private dispatcher and
+registries died onto the routing layer) and the example packages.**
+Host-service frames (task 5) and install (task 6)
+landed with their checklist tasks (all complete). Every entry names
 the decision, where it is recorded, and what it implies for extension
 authors. Entries record **existing design decisions**; nothing about
 how a particular extension is written leaks in — the contract is the
@@ -21,13 +22,104 @@ Rules of the ledger:
 - anything an extension author must not do (a boundary) is stated as
   a boundary, not a suggestion.
 
+Two protocols, two homes (owner ruling 2026-09-26): the frontend
+protocol — commands, stamped events, the ask pattern — is FRONTEND.md's
+contract. The extension protocol is that same wire plus the extension
+lanes (the report, the tool and hook lanes, host-service requests —
+"the wire" below), and **this document is its home**: the frame
+contract, the rulings that shape it, and the boundaries for authors.
+Frontend-protocol support is inherited, never re-specified here — the
+pipe carries the frontend grammar verbatim, and an extension speaks it
+as a peer.
+
+## Getting started: your first extension
+
+The sections below are the record; this is the path through it. Two
+ways in — with the Rust SDK, or from scratch in any language — and
+the local loop is the same for both.
+
+**With the SDK (Rust).** A package is a directory: a `tabit.json`
+manifest plus an entry binary. The manifest carries install-time
+facts only:
+
+```json
+{
+  "name": "my-ext",
+  "version": "0.1.0",
+  "description": "what it does, one line",
+  "entry": ["my-ext"]
+}
+```
+
+`entry` is argv (arguments follow the command: `["node",
+"server.js"]`); absent means a static package (skills and provider
+fragments contribute; no process ever spawns). The binary is the whole surface
+— `crates/tabit-ext-sdk/src/bin/echo.rs` is the shape, in one file:
+
+```rust
+fn main() {
+    tabit_ext_sdk::serve(
+        Extension::new()
+            .tool(tool(
+                "my_tool",
+                "What the model sees.",
+                schema_for!(["path"]),
+                |args, ctx| async move { Ok(Output::from("done")) },
+            ))
+            .watch(watch(tags::INTERACTION_SETTLED, |ctx, frame| async move {
+                ctx.emit(/* an event the frontend sees */)
+            })),
+    )
+}
+```
+
+Bodies are futures (asks await natively; `ctx.cancelled()` polls the
+leash — "Tool cancellation crosses the pipe" below). The SDK bins
+are the full worked set: `echo` (tools + asks + watches),
+`autotitle` (model_prompt), `lmstudio` (a provider relay),
+`child-ext` (owned subagent children).
+
+**From scratch (any language).** The pipe is JSONL on your stdio and
+six laws:
+
+1. **You speak first.** Your very first stdout line is the report:
+   `{"type":"report","protocol_version":5,"tools":[…],"hooks":[…],
+   "watch":[…]}` — `tools` carry `name`/`description`/`schema`
+   (JSON Schema), `hooks` name declared hook points, `watch` names
+   watched event tags. What you report is what you serve.
+2. The host answers with `host_facts` (`core_path`, `cwd`); there is
+   no other handshake.
+3. The frontend grammar rides the pipe flat ("The wire" below):
+   tool calls arrive as commands, your events and asks cross as
+   stamped frames, hook consults and results ride the hook lane.
+4. **Ignore nothing.** An unparseable line, a well-formed frame of a
+   type the host does not know, or a result answering the wrong
+   correlation is a contract break — death with the snippet. If you
+   need new extension→host vocabulary, the protocol version bumps
+   and older hosts refuse you at the report (the one-directional
+   compatibility law below).
+5. Never block the pipe: answers may take arbitrarily long, but you
+   keep reading while you work ("Tool bodies never stall the
+   harness").
+6. The behavioral reference is `crates/tabit-ext/src/bin/ext-double.rs`
+   — one pathological path per argv, spoken over the real pipe.
+
+**The local loop.** `tabit-core install path:/abs/path/to/pkg`
+(stage-validate-place; the directory is the single truth — no
+lockfile), then boot the backend: stderr reports
+`extension my-ext: loaded`, the model's vocabulary carries your
+tools on the next boot, and `tabit-core extensions list` shows the
+standing. Update is install again; the refusal-uninstall and the
+disable list (`~/.tabit/settings.toml` or the workspace layer) are
+the "Packages mount by default" section below.
+
 ## Extensions are subprocesses over a frozen pipe (2026-09, the
 item-9 substrate ruling)
 
 Ruled: an extension is an opaque executable speaking a small frozen
 JSONL protocol over stdin/stdout — the subagent substrate,
 generalized. The host spawns the entry command at process start,
-handshakes, and from then on tool calls, hook events, interaction
+takes its report, and from then on tool calls, hook events, interaction
 frames, and host-service requests cross the pipe. **Every tabit
 process boots its own host — the frontend-attached backend and every
 subagent child alike (ruled 2026-09: children pick up extensions;
@@ -83,23 +175,25 @@ the `extensions_available` catalog, its `providers.toml` fragment
 does not merge, and its skills do not join the tables — absent
 everywhere, and *silent* (the user's setting is not a failure;
 `tabit-core extensions list`, task 6, is where disabled packages become
-visible). A REFUSED package (bad manifest, failed handshake) still
+visible). A REFUSED package (bad manifest, failed report) still
 reports as dead whatever the settings say — a broken package is
 loud; a disabled one is quiet. Children (subagent processes) re-derive
 the disable list from their inherited inputs — the same env, the same
 workspace cwd, the same one code path the parent booted through —
 never a forked child rule.
 
-## Declaration: manifest for install facts, handshake for
+## Declaration: manifest for install facts, report for
 capabilities (2026-09)
 
 The manifest (`tabit.json`) carries install-time facts only — name
 (the path relative to the root, so scoped names nest), version, the
 entry command + args (OPTIONAL: absent means a static package that
-never spawns — the install entry below), one-line description, and
-`requires` (name-only dependencies). Capabilities are
-declared live at the handshake (initialize → ack: tools with
-name/description/schema, hook points) — the initialize/ack pattern
+never spawns — the install entry below), one-line description,
+`requires` (name-only dependencies), and `disables` (core tool names
+the package removes from the assembly — see the naming rules).
+Capabilities are
+declared live in the extension's self-report (tools with
+name/description/schema, hook points) — the report-first pattern
 every tabit edge already uses. What the process serves is what it
 declared; no schema file drifts. **The manifest is also the home for
 any future host-required metadata (ruled 2026-09): when the host
@@ -118,22 +212,238 @@ that future is.**
 the version bump (2026-09 review-round ruling)
 
 A **newer host keeps an older extension working**: the host sends
-only what the extension declared at its handshake, and the extension
+only what the extension declared in its report, and the extension
 side is told to ignore frames it does not know. The reverse is
 refused, not endured: **an extension speaking vocabulary its host
 lacks might not work properly** (vocabulary it depends on is
 missing), so an unparseable line, a well-formed line of an unknown
 frame type, or a result answering the wrong kind of correlation is a
 contract break — death with the snippet, the same as garbage. For
-that refusal to happen at the handshake rather than mid-stream,
+that refusal to happen at the report rather than mid-stream,
 **additions the EXTENSION can emit (new extension→host frame types,
 new required fields) bump the protocol version** and older hosts
-refuse at the ack's exact match; additions only the HOST emits (new
+refuse at the report's exact match; additions only the HOST emits (new
 optional fields, new host→extension frames) need no bump. Altering
 existing shapes is of course the same boundary. Until external
 extensions exist, host and SDK version as one workspace — no skew is
 possible; the full versioning story is a topic after the first
 release.
+
+## The wire: the frontend grammar rides the pipe flat (2026-09, the
+routing generalization)
+
+Ruled over the SDK discussion: the extension pipe carries the
+**frontend protocol's vocabulary verbatim, as bare lines**, beside
+the extension's own lanes — no wrapper frames, no second grammar.
+Dispatch on the inbound side is a parse cascade: the extension lanes
+(`report`, `tool_result`, `hook_result`, `service_request`) first, then
+any session command, then any session event; a line parseable as
+none of the three is the contract break it always was (death with
+the snippet). The two tag namespaces are disjoint and stay so.
+
+**Participants are peers, not subordinates** (owner ruling 2026-09,
+correcting the reactivity claim): any node may send anything a
+frontend can from its report onward — a co-frontend extension's
+`new_session` right after its report, a subagent child's steer — with
+no supervisor action required and no reactivity constraint. The
+corresponding duty is the parent's: **be structurally prepared
+before the child can speak.** The core's boot is structure, then
+data: the frontend stream mounts first (every frame from every
+participant's first line crosses it, in arrival order — no buffering
+anywhere), then the session host's command surface (the by-type
+lifecycle handlers) goes live, then the extensions gather, then the
+session builds. What the structure cannot answer yet — a lifecycle
+command whose builders are the boot's still-gathering data — parks,
+and serves in arrival order behind the boot's announcements.
+
+**What `new_session`/`open_session` mean is a functional-layer
+concern, not routing or management** (owner ruling 2026-09): in
+principle only session nodes handle them — the net's by-type
+dispatch delivers them and each host's layer answers. An extension
+that makes itself a session host (spawning co-frontend subprocesses
+of its own) may lawfully handle them inside; one that does not
+registers no handlers for them, and a lifecycle command sent to such
+a node is unanswered — the sender's business. There is
+no "next frame after the report" contract at all (owner ruling
+2026-09): everything after the report is the event stream — the core's own
+startup sequence is today's common order, not a guarantee; other
+participants' frames interleave in arrival order; a future core may
+report its own initialization progress ahead of `session_opened`.
+Frontends build on the events' own identities (stamps, kinds), never
+on their position after the report.
+
+The four directions, one sentence each:
+
+- **Commands out** (extension → host): any session command,
+  session-addressed with the same scope a frontend has — no
+  registration, no special cases. The extension learns session ids
+  from the events it watches (`session_opened`).
+  Effects arrive as events; collision semantics (a compact landing
+  mid-compaction, abort racing a checkout) are whatever the doors
+  and parked-intent machinery already do — a second commander adds
+  no new case.
+- **Events out** (extension → frontend and subscribers): any session
+  event, re-emitted by the host **origin-stamped** (`origin` names
+  the speaking extension; the stamp is attribution, not permission —
+  the trust model is install-consent). An emitted
+  `interaction_request` additionally registers its ask in the
+  backend registry below.
+- **Events in** (host → extension): the stamped event stream,
+  mirrored per the **watch list** — the report declares the event kinds
+  (`watch`, the wire `type` tags) whose frames the extension wants.
+  Fine-grained by ruling: one kind, one entry, no bundles; an
+  unknown kind matches nothing (tolerated, not refused). The primary
+  frontend is subscriber zero — the same frames, unfiltered, on
+  stdout; the pump's fan-out is participant-blind.
+- **Answers back**: the frontend's `interaction_response` claims the
+  node's ONE ask table by id (the id-first seam is gone — a session
+  card and an extension's grammar ask are the same law): an id
+  registered by an extension ask delivers the serialized command
+  line back down that extension's pipe (`session` omitted; the id is
+  the correlation). The **origin announces the settle** (the
+  entry-owned-settles rule): the extension emits
+  `interaction_settled { id }` when its ask's answer comes home, and
+  the host's sweep announces on the extension's death — so no
+  channel holds a card that can never be answered. The ask's
+  lifecycle (open → answered → settled) makes that airtight for
+  cards: a transit entry that has been answered stays open, carrying
+  the settle announce death owes it, until the extension's settle
+  crosses (closing it) or the sweep runs the obligation — an
+  extension dying between its answer and its announce still closes
+  the card. An entry owing no obligation (a tool call, a hook, a
+  service round-trip — no settle vocabulary exists for it) closes on
+  its answer: the answer IS its settle, and lingering would only
+  leak. Unknown ids are the race's tolerated drop.
+
+Report-model contract (extension protocol **v5**): the guest speaks
+first — its `report` (protocol version, tool/hook/watch
+declarations) is its first line on the pipe. The host version-checks
+it and kills a mismatched guest within the boot bound — the check
+runs the moment the report is read, and the kill owns the race with
+anything the guest emitted before it lands (a mismatched guest's
+earlier lines are the loser's noise); only then does the host send
+`host_facts`, carrying `core_path` (the running backend's own
+executable — the host IS the binary, so an owned-session spawner
+never resolves anything) and `cwd`. No ack exists: the report IS the
+registration.
+
+The service envelope's ask (verb zero) is **deleted** (extension
+protocol v3): an extension that can emit an `interaction_request`
+needs no wrapper, and a wrapper nobody needs goes, not windows.
+`model_prompt` is the envelope's one verb. The SDK's ask helper is
+the emission-and-await flow over the grammar; abandonment is the
+run's cancellation (the guest reads its cancel frame as the ask
+resolving dismissed, and the call fails cancelled at the leash).
+
+## Extension nodes: the two operating models (2026-09, the node
+architecture)
+
+Every tabit process is a node; an extension is one whose functional
+layer is its tools and hooks. What crosses an extension's stdio is
+decided entirely by registrations — the node is mode-agnostic, and
+the operating model is a registration set:
+
+**Default — local-door stdio (the leaf participant).** The stdio
+subscribes every kind from the LOCAL door alone: the extension's own
+speech — its emissions, its asks, their settle announces — crosses
+the pipe, and nothing else does. A child session's cards and deltas
+arrive from the child's lane and fan only to the extension's
+opted-in captures (remote-hearing subscriptions); the card pair
+crosses only by the card surface's declared mode (below). Locality
+is a fact of the dispatch site — the node's two doors, `emit` and
+`intake` — never a frame field (owner ruling 2026-09-25), so the
+crossing policy is plain subscription config with no machinery
+beside the fan.
+
+**Opt-in — session-equivalent routing (the preset).** The extension
+subscribes its stdio to the session event vocabulary from BOTH doors
+and becomes, deliberately, what a session host is: arrivals cross
+verbatim (the ingress law keeps a frame from re-crossing the door it
+arrived on; the learning table was taught by the arrival, so routes
+stay correct with no re-emission), and its children are directly
+addressable through the chain. The preset is one named registration
+helper over the same fine-grained surface — bundles live in the SDK,
+never in the router. Per-kind opt-ins between the two ends are just
+shorter registration sets.
+
+The SDK is expected to stay (owner ruling 2026-09): its reason to
+exist is the abstraction — extension authors focus on functionality
+(tools, hooks, asks) and never meet the router or the channel
+concepts underneath. The port landed on that criterion: the SDK's
+dispatcher machinery is dead — the guest runs a node whose stdio is
+the pipe's shared-grammar face (the loop is the dialect's parse
+cascade into `Node::intake`), every arriving call and hook is held on
+the ask table and answered through it, the watch surface is
+subscriptions, an author's `ask`/`emit`/`command` are the node's
+ask, emission fan, and outbound command — while
+the author-facing surface (tools, consultations, watches, children,
+the four directions on `Ctx`) never grew a router concept. The SDK is
+**async** (owner ruling 2026-09): bodies are futures, an ask awaits
+its promise natively, cancellation is a wake not a poll. What
+remains SDK-local is policy, not routing: the per-invocation
+token table (the host's `cancel` frame fires the wire's
+CancellationToken; `Ctx::cancelled()` polls it), the frozen
+dialect's report and result frames, the pipe's one line
+pump, and the card surface — the remote-door pair at the node (one
+declared mode: the shipped lift or the author answerers; see the
+card surface below). One behavior the unification
+buys, recorded: the extension's watches now hear its own emissions
+and its own cards' settles (the local loopback), not only the host's
+mirrors.
+
+**The card surface: one declared mode** (owner rulings 2026-09-25,
+second and third rounds). Relaying someone's card — lifting a
+child's or grandchild's ask to your own host — is the one flow with
+a settle obligation at every step, and the pairing rule is the law:
+**a forwarded ask needs its forwarded settle; an intercepted one
+needs neither.**
+
+- **The shipped lift** (no author answerers): the stdio subscribes
+  the card PAIR — `interaction_request` and `interaction_settled`
+  — from the REMOTE door (the exclusion is the partition
+  justification: the pipe's local door is owned by the wildcard
+  own-speech subscription, so Both would double-carry local frames).
+  Cards and settles cross verbatim together;
+  riding the channel subscription is what the ingress law protects:
+  a card the host mirrored down (a watched ask kind) arrives on the
+  stdio and is identity-skipped, so it can never bounce back and
+  re-register a live id.
+- **The answerer mode** (the first `on_ask` registration): the pair
+  is heard from BOTH doors — the default, no exclusion justified:
+  a card's close may be the origin's announce, this node's death
+  sweep, or an arriving frame, and a subscriber cannot and should
+  not care which. Nothing crosses for the card itself — the host
+  never saw it (a swept close rides the local wildcard and lands at
+  the host as the tolerated unknown-id drop).
+
+The settle law, stated from the requestor side (owner ruling
+2026-09, a doc law — no semantic-layer enforcement exists):
+**when you stop waiting on the thing requested (answer received, or
+no longer needed), announce the settled event by the same local fan
+that carried the request.** Subscribing the settle kind is the
+caller's declaration — the wire stays fine-grained, no
+node-enforced bundles.
+
+**Manual forwarding: callbacks re-stamp, channels cross verbatim**
+(owner ruling 2026-09-25, third round). A verbatim crossing is
+CHANNEL machinery alone — the frame moves along its own route (a
+lane's subscription fan, the hop's own write), and the ingress law
+is what keeps the loop closed. A CALLBACK that wants to forward an
+ask re-stamps: the arriving ask is consumed at the extension's node
+(its transit entry is the answer route home), the callback mints its
+own ask, and the linkage between the two ids lives in the callback's
+closure — invisible on the wire. Re-emitting a foreign ask frame
+verbatim from a callback is an implementation error, not a method:
+it duplicates a live id downstream and the mint law kills an
+innocent. The re-stamp also hides the child's address — upstream
+learns the extension, commands arrive addressed to it, and the
+extension becomes the interception surface; the verbatim crossing
+keeps the child directly addressable through the chain. Teaching is
+idempotent either way.
+
+Ask round-trips are unaffected by re-stamping: correlation is by
+ask id, not stream, so a re-stamped card's answer walks home hop by
+hop exactly as a verbatim one's does.
 
 ## Model-facing names are flat; identity is the pair (2026-09)
 
@@ -151,7 +461,7 @@ re-announcement joins when a consumer exists (the GUI redesign is
 the natural trigger).
 
 **One name, one tool, resolved at host assembly.** The host builds
-the model-facing toolset as a name→tool map after all handshakes and
+the model-facing toolset as a name→tool map after all reports and
 hands the engine a conflict-free set by construction — the engine's
 duplicate-name shadowing never engages. **Handshakes run
 concurrently; registration is ordered (ruled 2026-09): the assembly
@@ -168,8 +478,16 @@ policy (pi's rule):
 - Extension vs. extension, same name: the newcomer is refused, naming
   the incumbent. No silent peer precedence — the user resolves by
   disabling one.
+- **The manifest's `disables` list** names core tools to remove —
+  the role-shaping declaration (a role-based-subagent package
+  disables the built-in `subagent`). The names join the deny list
+  `--without` builds, the same filter at the same point (after the
+  extension tools register, over the full toolset) — no separate
+  mechanism, silent like `--without`. To REPLACE a core tool's
+  behavior, declare a tool of the same name (the shadow above); the
+  two declarations are alternatives, not layers.
 - **Only a LIVE declaration holds a name** (2026-09 review-round
-  ruling): a package that died — at the handshake or since — lists
+  ruling): a package that died — at the report or since — lists
   what it would have served in the catalog but neither replaces a
   core tool nor refuses a live peer. And when an extension that
   shadowed a built-in tool dies (its process; the core keeps
@@ -180,7 +498,7 @@ policy (pi's rule):
   slice the death event feeds.
 
 Sibling domains carry their own rules: skills merge last-wins-with-
-warn per the discovery ladder (ROADMAP item 3); providers are
+warn per the discovery ladder; providers are
 user-config-wins (below).
 
 ## Extension-shipped skills ride in-memory tables (2026-09, task 4)
@@ -205,19 +523,26 @@ as tool registration.
 task 3)
 
 Forwarded hooks are the tool lane's sibling: `hook { hook_id, event,
-payload }` out, `hook_result { hook_id, decision }` back, v1
-decisions `run`, `skip { message }`, `keep` (rewrites and stops are
-engine actions that carry on no wire until a consumer asks). The
+payload }` out, `hook_result { hook_id, answer }` back — **the answer
+is the point's own type, serialized** (the per-point ruling,
+2026-09; the declarations live in `tabit-protocol`'s `points`, one
+shared definition on both ends — no hand-kept wire mirror). The pipe
+carries the answer untyped and only the point's consumer parses it.
+Protocol v4 answers: `tool_call` a verdict — `run` /
+`skip { message }` (rewrites and stops are engine actions that
+carry on no wire until a consumer asks) — and `tool_result` the
+unit (observers do stuff synchronously and owe nothing back). The
 payload carries the session identity, the tool, the args (and the
 presentation for `tool_result`); the session identity is what
-per-session policy state keys on. Mid-hook asks ride the same
-interaction lift (the correlation id is the hook's). Registrations
+per-session policy state keys on. Mid-hook asks ride the grammar's
+direct emission (the correlation id is the hook's). Registrations
 compose in scan order through `HookStack::merge` — one priority law.
 
 **A failing hook is treated as absence; a failed tool call is the
 model-visible failure.** Dead or broken resolve identically (ruled
 2026-09): a hook whose extension died, errored, or panicked resolves
-with the neutral decision for its point (run / keep) — crash
+with the point's declared neutral (the gate's `run`, the observer's
+unit) — crash
 isolation: one broken package cannot brick the tool phase, and the
 failure is reported loudly (the host's dead standing; the SDK's
 stderr) — while a tool *execution* that dies or errors is the
@@ -258,7 +583,7 @@ settled 2026-09, shipped as `crates/tabit-ext-install`)
   policy's business; requirements never reorder anything — nothing
   links). Version ranges wait for the post-release versioning topic.
 - **`entry` is optional — a static package.** Absent: no process, no
-  handshake; the package's contributions are exactly the scan-driven
+  report; the package's contributions are exactly the scan-driven
   ones (skills tables, providers fragment, `requires` for install)
   and it announces nothing (its skills attribute by location; a
   static package runs no code, ever — its contributions are data
@@ -345,17 +670,14 @@ extensions *serve* verbs (cross-extension calls routed by the host,
 a provider/type/opaque-payload namespace) would be a different class
 — well-formed requests to a real provider, with only true unknowns
 failing — and joins additively with its consumer; v1 builds none of
-it. **The interaction ask is verb zero** (ruled 2026-09, restored):
-at the extension pipe the ask IS a backend capability — how the
-backend services it (a card routed to the frontend, anything else)
-is invisible to the extension, and the frontend-backend protocol is
-untouched by the fold. Its dual-id shape — the request id, plus the
-correlation to the in-flight call that routes the request to its
-session — is **the** attribution pattern every envelope verb rides
-(`model_prompt` bills to the session the same way). The ask's open
-template payload (`ui_type` + opaque JSON) sits inside the typed
-frame as a field; the open namespace is the frontend-template
-family's, unchanged.
+it. The ask verb was **deleted** (extension protocol v3): an
+extension that can ask emits an `interaction_request` into the
+shared grammar (the SDK's `Ctx::ask`) and awaits the routed
+response by id — no envelope wrapper (a wrapper nobody needs
+goes, not windows). The dual-id attribution pattern every envelope
+verb rides — the request id, plus the correlation to the in-flight
+call that routes the request to its session — survives in
+`model_prompt`, which bills to the session the same way.
 
 Verb one: **`model_prompt`** — prompt content + a model ref (or the
 session's), capped `max_tokens`, complete-only (no streaming over the
@@ -365,9 +687,8 @@ this verb is what makes the attribution story real).
 
 **Shipped (2026-09)**: the envelope is `service_request { request_id,
 call_id, verb, …payload }` in / `service_response { request_id,
-result?, error? }` out; the ask rides it as verb zero (`ui_type` +
-payload fields; a dismissal is the bare response). The capability —
-`HostServices`, in rig-agent beside `UserInteraction` (the contexts
+result?, error? }` out; `model_prompt` is its one verb. The capability —
+`HostServices`, in tabit-engine beside `UserInteraction` (the contexts
 are the carriers) — is snapshotted per run into the tool context;
 `model_prompt` is a BARE completion (no preamble, no tools, no
 history, its own standalone conversation and cache route — the
@@ -387,7 +708,7 @@ Ruled: the ask-pattern hub — many producers, one outbound queue (the
 event channel), one inbound router (`interaction_response` by id to
 the awaiting asker) — is **the** model for user interaction from
 backend code. Recorded in ENGINE.md's tool-phase section and
-PROTOCOL.md/FRONTEND.md §8.
+FRONTEND.md §8.
 
 Implications:
 
@@ -397,29 +718,28 @@ Implications:
   (`interaction_request { id, title, body, options, free_text }` /
   `interaction_response { id, option?, text? }`) is generic on
   purpose: reuse it; do not invent new popup frames.
-- **The extension pipe's lift (task 2) mirrors the engine's
-  capability verbatim**: `interaction_request { call_id, id, ui_type,
-  payload }` in, `interaction_response { id, outcome }` back
-  (`outcome: null` is the dismissal) — `ui_type` + opaque payload,
-  so extensions use the same `native:*` templates core tools do. The
-  `call_id` routes to the session whose proxy call is executing; no
-  capability on that call (a non-interactive session) answers
-  dismissed — fail closed, exactly as core tools behave.
+- **The extension pipe's lift (task 2) mirrored the engine's
+  capability verbatim** — `interaction_request { call_id, id, ui_type,
+  payload }` in, `interaction_response { id, outcome }` back. Deleted
+  with protocol v3: asks ride the grammar's direct emission now, and
+  the routed response is the one shape every asker shares. (Recorded
+  for the shape it established: `ui_type` + opaque payload, the same
+  `native:*` templates core tools use, answers by id.)
 - **Whose panic is whose** (ruled 2026-09): the lifted ask's future
   is CORE's code — we wrote it, we do not expect it to fail, and if
   it does an assumption is violated, so it panics (the crash hook
   exits the binary; nothing contains it — continuing in that state
   is undefined). An extension's OWN handler failures are the other
   class and stay graceful on its side of the pipe: the SDK's catch
-  answers the neutral decision and reports to stderr.
+  answers the point's neutral and reports to stderr.
 - The capability reaches sites through **contexts**: the tool body
   via `ToolContext`'s typed map (the `CancellationToken` precedent);
   the tool-call gate by hook construction. Other hook points gain
   context-carriage when a consumer exists — pause points stay
   enumerable (ENGINE.md lists them), and adding one is a design
   event, not a freedom.
-- The capability type lives in rig-agent
-  (`crates/rig-agent/src/tool/interaction.rs`) — one crate below the
+- The capability type lives in tabit-engine
+  (`crates/tabit-engine/src/tool/interaction.rs`) — one crate below the
   session layer, reachable by every hook and tool site. Dependency
   direction is architecture law, not license law, but it still points
   one way.
@@ -542,7 +862,7 @@ them: the proxy carries the run's token, and firing it sends
 `cancel { call_id }` down the pipe, removes the pending entry, and
 fails the call (a hook resolves fail-open — the neutral decision —
 by the absence ruling). **The guest owns how**: long-running bodies
-poll the SDK's `is_cancelled()` between units of work and stop —
+poll `Ctx::cancelled()` between units of work and stop —
 kill the sandbox, close the stream, stop billing; a body that never
 checks finishes into the void, exactly as a core body that ignores
 its token. Racing results are unknown ids (tolerated, dropped);
@@ -559,7 +879,7 @@ second mechanism).
 result-delta lane and no post-cancel delivery — firing the token
 removes the pending entry and fails the call, so whatever the body
 returns after a cancel is a racing result the host drops. The honest
-long-running recipe is final-report-only: poll `is_cancelled()`
+long-running recipe is final-report-only: poll `Ctx::cancelled()`
 between units of work; on a flip, stop the work (kill the sandbox,
 close the stream, stop billing) and return — the model sees the
 cancellation failure, not a partial report. What already completed
@@ -624,8 +944,8 @@ is planned.
 Changing the prompt is a deliberate user action with a known cost:
 install/configure the extension, let the current task finish
 (compact if wanted), then reload — the GUI respawns the backend,
-which re-reads config, auth, and sessions (PROTOCOL.md's startup &
-recovery ruling), and replay restores the transcript with the same
+which re-reads config, auth, and sessions (FRONTEND.md §3's startup
+& recovery contract), and replay restores the transcript with the same
 ids. The cache miss lands where the user chose it.
 
 Implications:
@@ -640,8 +960,8 @@ Implications:
   today the respawn path. The reserved refinement is an in-process
   session reload (the backend rebuilds the chosen session's
   build-time inputs at the beat; history and transcript untouched):
-  explicitly deferred until respawns actually annoy (PROTOCOL.md's
-  startup & recovery ruling). Its command-path home already exists
+  explicitly deferred until respawns actually annoy (FRONTEND.md §3).
+  Its command-path home already exists
   — the checkout pattern (session-addressed command, parked intent,
   beat execution) minus the rewind, with an outcome event instead
   of a replay pass; the mid-run question (abort-compose like

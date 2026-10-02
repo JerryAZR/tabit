@@ -1,6 +1,6 @@
 //! The serializable event stream a tabit frontend consumes.
 //!
-//! v1 events are the item-level view of one outer loop plus session-level
+//! Events are the item-level view of one outer loop plus session-level
 //! bookkeeping. The enum is closed: the CLI/RPC surface (ROADMAP item 7)
 //! ships in this workspace, so an added variant is a coordinated change,
 //! not a compatibility hazard.
@@ -232,19 +232,21 @@ pub enum SessionEvent {
     /// chain as finalized live events — the same shapes a live run
     /// produces, ids included verbatim, deltas whole. `total` is the
     /// number of events the pass will emit between this and
-    /// `replay_done`.
-    ReplayStarted {
+    /// `replay_end` (v19's name; the count is the progress
+    /// denominator — a frontend may track it, or ignore the pass
+    /// whole).
+    ReplayBegin {
         /// The pass's event count (the progress denominator).
         total: u64,
     },
     /// The replay pass ended: every event it announced has been emitted.
-    ReplayDone,
+    ReplayEnd,
     /// A `checkout` succeeded: the session's active chain now ends at
     /// `entry_id` (inclusive). Followed immediately by a full replay
     /// pass bracketing the rewound chain — the pass is the re-render
     /// (`base_id: null` = the frontend drops everything it holds; the
     /// reserved suffix upgrade flips it to `Some` and shrinks the
-    /// pass behind the same bracket, PROTOCOL.md v3 stage 2).
+    /// pass behind the same bracket).
     CheckedOut {
         /// The entry the chain now ends at — the command's target.
         entry_id: String,
@@ -253,8 +255,9 @@ pub enum SessionEvent {
         #[serde(default)]
         base_id: Option<String>,
     },
-    /// The session catalog, announced once at startup right after the
-    /// ack's startup notes: every stored session, newest first, from a
+    /// The session catalog, announced once at startup, after the boot
+    /// session's announcements (its notes, then its skills catalog):
+    /// every stored session, newest first, from a
     /// header-only listing (lazy loading — only the boot session is
     /// loaded). Minimal by ruling; a plain object fields can grow
     /// into. A brand-new session has no file yet and is absent.
@@ -262,15 +265,18 @@ pub enum SessionEvent {
         /// Every stored session, newest first.
         sessions: Vec<AvailableSession>,
     },
-    /// The skills catalog, announced once at startup right after
-    /// `sessions_available` (v8): every skill the four-source
-    /// discovery merged, the same facts the prompt catalog carries.
-    /// **Unstamped, backend-level** — one backend process has one
-    /// cwd, so one skill set; fold it connection-level. Only
-    /// announced when discovery found at least one skill (no empty
-    /// announcements). Skill *invocation* needs no wire shape: the
-    /// model calls the `skill` tool, which is an ordinary
-    /// `tool_call`/`tool_result` pair on the asking session's stream.
+    /// A session's skills catalog (v20): every skill the four-source
+    /// discovery merged over that session's own cwd — one discovery
+    /// per session build, the same facts the session's prompt
+    /// catalog carries. **Stamped with the session's stream** and
+    /// announced as each session becomes visible (the boot attach,
+    /// `new_session`, `open_session`); fold per stream — a subagent
+    /// child is a full session host in its own cwd and announces
+    /// its own catalog. Only announced when discovery found at
+    /// least one skill (no empty announcements). Skill
+    /// *invocation* needs no wire shape: the model calls the
+    /// `skill` tool, which is an ordinary `tool_call`/`tool_result`
+    /// pair on the asking session's stream.
     SkillsAvailable {
         /// Every discovered skill.
         skills: Vec<AvailableSkill>,
@@ -369,10 +375,9 @@ pub enum SessionEvent {
     /// frontend (see `templates`), extension types (`ext:<id>:*`)
     /// render where the extension's widgets live — and `payload` is
     /// opaque cargo the asker shaped however it wants. Several may be
-    /// open at once (concurrent chains, any answer order); a run
-    /// terminal closes every unanswered request — no close event,
-    /// none needed. Never persisted, never replayed; the durable
-    /// record is the tool result.
+    /// open at once (concurrent chains, any answer order). Never
+    /// persisted, never replayed; the durable record is the tool
+    /// result.
     InteractionRequest {
         /// Backend-minted request id (UUIDv7, like every protocol id).
         id: String,
@@ -380,6 +385,19 @@ pub enum SessionEvent {
         ui_type: String,
         /// The ask, opaque to the core.
         payload: serde_json::Value,
+    },
+    /// An interaction request settled — answered, retracted, or dead
+    /// (v17). The first answer lands and the rest are dropped by the
+    /// hub's id routing; this event is how every *other* holder of the
+    /// card learns it is no longer needed (with one frontend, run
+    /// terminals sufficed as the close signal; with more channels
+    /// answering, a card can die long before any terminal). Id-only by
+    /// ruling: the answer itself is indirectly visible wherever its
+    /// asker surfaces it (the tool result, typically). Fire-and-forget
+    /// from every settle site; stamped like the request it closes.
+    InteractionSettled {
+        /// The settled request's id.
+        id: String,
     },
     /// A compaction invocation began (v15): the envelope for every
     /// following compaction event until `compaction_end` or
@@ -692,3 +710,130 @@ impl RunFailedKind {
 #[cfg(test)]
 #[path = "events_tests.rs"]
 mod tests;
+
+impl SessionEvent {
+    /// The wire tag of one event kind — the `type` field's value. The
+    /// match is exhaustive by construction: a new variant breaks this
+    /// compile until it is tagged, so the mapping cannot silently rot
+    /// (the constants below and the serialization round-trip tests pin
+    /// the rest).
+    #[must_use]
+    pub const fn tag(&self) -> &'static str {
+        match self {
+            SessionEvent::RunAborted { .. } => tags::RUN_ABORTED,
+            SessionEvent::UserMessage { .. } => tags::USER_MESSAGE,
+            SessionEvent::MessageQueued { .. } => tags::MESSAGE_QUEUED,
+            SessionEvent::MessagesDiscarded { .. } => tags::MESSAGES_DISCARDED,
+            SessionEvent::TurnStarted { .. } => tags::TURN_STARTED,
+            SessionEvent::TurnCommitted { .. } => tags::TURN_COMMITTED,
+            SessionEvent::TextDelta { .. } => tags::TEXT_DELTA,
+            SessionEvent::ReasoningDelta { .. } => tags::REASONING_DELTA,
+            SessionEvent::ToolCall { .. } => tags::TOOL_CALL,
+            SessionEvent::ToolResult { .. } => tags::TOOL_RESULT,
+            SessionEvent::TurnRetried { .. } => tags::TURN_RETRIED,
+            SessionEvent::CompletionCall { .. } => tags::COMPLETION_CALL,
+            SessionEvent::TurnTruncated { .. } => tags::TURN_TRUNCATED,
+            SessionEvent::RunFinished { .. } => tags::RUN_FINISHED,
+            SessionEvent::RunFailed { .. } => tags::RUN_FAILED,
+            SessionEvent::Error { .. } => tags::ERROR,
+            SessionEvent::ReplayBegin { .. } => tags::REPLAY_BEGIN,
+            SessionEvent::ReplayEnd => tags::REPLAY_END,
+            SessionEvent::CheckedOut { .. } => tags::CHECKED_OUT,
+            SessionEvent::SessionsAvailable { .. } => tags::SESSIONS_AVAILABLE,
+            SessionEvent::SkillsAvailable { .. } => tags::SKILLS_AVAILABLE,
+            SessionEvent::ExtensionsAvailable { .. } => tags::EXTENSIONS_AVAILABLE,
+            SessionEvent::SessionOpened { .. } => tags::SESSION_OPENED,
+            SessionEvent::ModelChanged { .. } => tags::MODEL_CHANGED,
+            SessionEvent::NativeItem { .. } => tags::NATIVE_ITEM,
+            SessionEvent::InteractionRequest { .. } => tags::INTERACTION_REQUEST,
+            SessionEvent::InteractionSettled { .. } => tags::INTERACTION_SETTLED,
+            SessionEvent::CompactionBegin => tags::COMPACTION_BEGIN,
+            SessionEvent::CompactionDelta { .. } => tags::COMPACTION_DELTA,
+            SessionEvent::CompactionStep { .. } => tags::COMPACTION_STEP,
+            SessionEvent::CompactionRetried => tags::COMPACTION_RETRIED,
+            SessionEvent::CompactionEnd { .. } => tags::COMPACTION_END,
+            SessionEvent::CompactionFailed { .. } => tags::COMPACTION_FAILED,
+        }
+    }
+
+    /// Whether `kind` names a real event kind (a wire tag).
+    #[must_use]
+    pub fn is_known_tag(kind: &str) -> bool {
+        tags::LIST.contains(&kind)
+    }
+}
+
+/// The wire tags as constants — the watch-list vocabulary (the
+/// subscription keys name event kinds; these are their spellings).
+pub mod tags {
+    pub const RUN_ABORTED: &str = "run_aborted";
+    pub const USER_MESSAGE: &str = "user_message";
+    pub const MESSAGE_QUEUED: &str = "message_queued";
+    pub const MESSAGES_DISCARDED: &str = "messages_discarded";
+    pub const TURN_STARTED: &str = "turn_started";
+    pub const TURN_COMMITTED: &str = "turn_committed";
+    pub const TEXT_DELTA: &str = "text_delta";
+    pub const REASONING_DELTA: &str = "reasoning_delta";
+    pub const TOOL_CALL: &str = "tool_call";
+    pub const TOOL_RESULT: &str = "tool_result";
+    pub const TURN_RETRIED: &str = "turn_retried";
+    pub const COMPLETION_CALL: &str = "completion_call";
+    pub const TURN_TRUNCATED: &str = "turn_truncated";
+    pub const RUN_FINISHED: &str = "run_finished";
+    pub const RUN_FAILED: &str = "run_failed";
+    pub const ERROR: &str = "error";
+    pub const REPLAY_BEGIN: &str = "replay_begin";
+    pub const REPLAY_END: &str = "replay_end";
+    pub const CHECKED_OUT: &str = "checked_out";
+    pub const SESSIONS_AVAILABLE: &str = "sessions_available";
+    pub const SKILLS_AVAILABLE: &str = "skills_available";
+    pub const EXTENSIONS_AVAILABLE: &str = "extensions_available";
+    pub const SESSION_OPENED: &str = "session_opened";
+    pub const MODEL_CHANGED: &str = "model_changed";
+    pub const NATIVE_ITEM: &str = "native_item";
+    pub const INTERACTION_REQUEST: &str = "interaction_request";
+    pub const INTERACTION_SETTLED: &str = "interaction_settled";
+    pub const COMPACTION_BEGIN: &str = "compaction_begin";
+    pub const COMPACTION_DELTA: &str = "compaction_delta";
+    pub const COMPACTION_STEP: &str = "compaction_step";
+    pub const COMPACTION_RETRIED: &str = "compaction_retried";
+    pub const COMPACTION_END: &str = "compaction_end";
+    pub const COMPACTION_FAILED: &str = "compaction_failed";
+
+    /// Every tag, one per kind — registration validation reads this.
+    pub const LIST: &[&str] = &[
+        RUN_ABORTED,
+        USER_MESSAGE,
+        MESSAGE_QUEUED,
+        MESSAGES_DISCARDED,
+        TURN_STARTED,
+        TURN_COMMITTED,
+        TEXT_DELTA,
+        REASONING_DELTA,
+        TOOL_CALL,
+        TOOL_RESULT,
+        TURN_RETRIED,
+        COMPLETION_CALL,
+        TURN_TRUNCATED,
+        RUN_FINISHED,
+        RUN_FAILED,
+        ERROR,
+        REPLAY_BEGIN,
+        REPLAY_END,
+        CHECKED_OUT,
+        SESSIONS_AVAILABLE,
+        SKILLS_AVAILABLE,
+        EXTENSIONS_AVAILABLE,
+        SESSION_OPENED,
+        MODEL_CHANGED,
+        NATIVE_ITEM,
+        INTERACTION_REQUEST,
+        INTERACTION_SETTLED,
+        COMPACTION_BEGIN,
+        COMPACTION_DELTA,
+        COMPACTION_STEP,
+        COMPACTION_RETRIED,
+        COMPACTION_END,
+        COMPACTION_FAILED,
+    ];
+}

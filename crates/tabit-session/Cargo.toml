@@ -2,8 +2,10 @@
 name = "tabit-session"
 version.workspace = true
 edition.workspace = true
-license = "MIT"
-description = "Tabit session layer: persistent agent sessions over the rig-agent outer loop."
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Tabit session layer: persistent agent sessions over the tabit-engine outer loop."
 
 [lints]
 workspace = true
@@ -16,17 +18,18 @@ doctest = true
 [dependencies]
 futures = { workspace = true }
 humantime = { workspace = true }
-rig-agent = { path = "../rig-agent", version = "0.41.0", default-features = false }
-rig-core = { path = "../rig-core", version = "0.41.0", default-features = false }
-rig-derive = { path = "../rig-derive", version = "0.41.0" }
+tabit-engine = { path = "../tabit-engine", version = "0.1.0", default-features = false }
+tabit-providers = { path = "../tabit-providers", version = "0.1.0", default-features = false }
+tabit-derive = { path = "../tabit-derive", version = "0.1.0" }
 http = { workspace = true }
+petname = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 serde_yaml = { workspace = true }
-tabit-config = { path = "../tabit-config", version = "0.41.0" }
-tabit-ext = { path = "../tabit-ext", version = "0.41.0" }
-tabit-log = { path = "../tabit-log", version = "0.41.0" }
-tabit-protocol = { path = "../tabit-protocol", version = "0.41.0" }
+tabit-config = { path = "../tabit-config", version = "0.1.0" }
+tabit-wire = { path = "../tabit-wire", version = "0.1.0" }
+tabit-log = { path = "../tabit-log", version = "0.1.0" }
+tabit-protocol = { path = "../tabit-protocol", version = "0.1.0" }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true, features = ["v7"] }
@@ -35,5 +38,5 @@ tokio = { workspace = true, features = ["macros", "process", "rt", "sync"] }
 tokio-util = { version = "0.7", default-features = false }
 
 [dev-dependencies]
-rig-agent = { path = "../rig-agent", version = "0.41.0", default-features = false, features = ["test-utils"] }
+tabit-engine = { path = "../tabit-engine", version = "0.1.0", default-features = false, features = ["test-utils"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }

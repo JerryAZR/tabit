@@ -45,6 +45,11 @@ pub struct Manifest {
     /// and the installer pulls the missing ones by npm name.
     #[serde(default)]
     pub requires: Vec<String>,
+    /// Core tool names this package removes from the host's assembly
+    /// (the role-shaping declaration): the names join the same deny
+    /// list `--without` builds, applied once over the full toolset.
+    #[serde(default)]
+    pub disables: Vec<String>,
 }
 
 impl Manifest {

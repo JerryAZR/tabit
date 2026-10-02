@@ -12,11 +12,11 @@
 
 use super::*;
 use crate::entry::EntryKind;
-use rig_agent::AgentBuilder;
-use rig_agent::test_utils::{MockCompletionModel, MockStreamEvent};
-use rig_core::completion::{CompletionError, Message};
 use std::sync::Arc;
+use tabit_engine::AgentBuilder;
+use tabit_engine::test_utils::{MockCompletionModel, MockStreamEvent};
 use tabit_protocol::SessionEvent;
+use tabit_providers::completion::{CompletionError, Message};
 
 fn config_with_window(window: u64) -> Arc<TabitConfig> {
     Arc::new(
@@ -173,28 +173,32 @@ fn valid_boundary_rejects_tool_carrying_outputs_and_mid_turn_positions() {
             Message::user("q"),
             Message::Assistant {
                 id: None,
-                content: rig_core::OneOrMany::one(rig_core::message::AssistantContent::ToolCall(
-                    rig_core::message::ToolCall::new(
-                        "call-1".to_string(),
-                        rig_core::message::ToolFunction::new(
-                            "echo".to_string(),
-                            serde_json::json!({}),
+                content: tabit_providers::OneOrMany::one(
+                    tabit_providers::message::AssistantContent::ToolCall(
+                        tabit_providers::message::ToolCall::new(
+                            "call-1".to_string(),
+                            tabit_providers::message::ToolFunction::new(
+                                "echo".to_string(),
+                                serde_json::json!({}),
+                            ),
                         ),
                     ),
-                )),
+                ),
             },
             Message::User {
-                content: rig_core::OneOrMany::one(rig_core::message::UserContent::ToolResult(
-                    rig_core::message::ToolResult {
-                        id: "call-1".to_string(),
-                        call_id: None,
-                        details: None,
-                        content: rig_core::OneOrMany::one(
-                            rig_core::message::ToolResultContent::text("ok"),
-                        ),
-                        status: None,
-                    },
-                )),
+                content: tabit_providers::OneOrMany::one(
+                    tabit_providers::message::UserContent::ToolResult(
+                        tabit_providers::message::ToolResult {
+                            id: "call-1".to_string(),
+                            call_id: None,
+                            details: None,
+                            content: tabit_providers::OneOrMany::one(
+                                tabit_providers::message::ToolResultContent::text("ok"),
+                            ),
+                            status: None,
+                        },
+                    ),
+                ),
             },
             Message::user("steer"),
             Message::assistant("final"),
@@ -217,11 +221,12 @@ fn an_overflow_rejection_teaches_the_window_and_shortens() {
     let state = Compaction::new();
     let cell = cell_with_measured_dialogue(4, 9_000);
     let history = read(&cell).history();
-    let error =
-        CompletionError::HttpError(rig_core::http_client::Error::InvalidStatusCodeWithMessage(
+    let error = CompletionError::HttpError(
+        tabit_providers::http_client::Error::InvalidStatusCodeWithMessage(
             http::StatusCode::BAD_REQUEST,
             "prompt is too long: 19565 tokens > 16384 tokens maximum".to_string(),
-        ));
+        ),
+    );
     match rejected(error, &state, 4, &history) {
         Rejection::Shorten(shortened) => {
             assert!(shortened < 4);
@@ -248,11 +253,12 @@ fn an_overflow_rejection_at_the_empty_prefix_fails_the_pass() {
     let state = Compaction::new();
     let cell = cell_with_measured_dialogue(4, 9_000);
     let history = read(&cell).history();
-    let error =
-        CompletionError::HttpError(rig_core::http_client::Error::InvalidStatusCodeWithMessage(
+    let error = CompletionError::HttpError(
+        tabit_providers::http_client::Error::InvalidStatusCodeWithMessage(
             http::StatusCode::BAD_REQUEST,
             "prompt is too long: 19565 tokens > 16384 tokens maximum".to_string(),
-        ));
+        ),
+    );
     assert!(matches!(
         rejected(error, &state, 0, &history),
         Rejection::Fail(message) if message.contains("empty prefix")
@@ -450,7 +456,7 @@ async fn a_committed_pass_bills_the_ledger_and_carries_its_facts() {
 
 async fn run_manual(
     cell: &ConversationCell,
-    agent: &rig_agent::agent::Agent,
+    agent: &tabit_engine::agent::Agent,
     config: &Arc<TabitConfig>,
 ) -> (Outcome, Vec<SessionEvent>) {
     let state = Compaction::new();
@@ -475,8 +481,8 @@ async fn run_manual(
 fn summary_stream_turns() -> Vec<Vec<MockStreamEvent>> {
     vec![vec![
         MockStreamEvent::text("## Goal\n- keep working"),
-        MockStreamEvent::FinalResponse(rig_core::test_utils::mock_final(
-            rig_core::completion::Usage {
+        MockStreamEvent::FinalResponse(tabit_providers::test_utils::mock_final(
+            tabit_providers::completion::Usage {
                 input_tokens: 100,
                 output_tokens: 20,
                 ..Default::default()
@@ -519,7 +525,7 @@ async fn a_manual_pass_commits_the_entry_and_truncates_the_context() {
     };
     assert!(matches!(
         content.first(),
-        rig_core::message::UserContent::Text(text) if text.text.contains("keep working")
+        tabit_providers::message::UserContent::Text(text) if text.text.contains("keep working")
     ));
     assert_eq!(
         branch_of(&cell).len(),
@@ -587,8 +593,8 @@ async fn a_violating_summarizer_is_discarded_and_the_request_retried() {
         vec![
             MockStreamEvent::text("let me look"),
             MockStreamEvent::tool_call("call-1", "read", serde_json::json!({"path": "x"})),
-            MockStreamEvent::FinalResponse(rig_core::test_utils::mock_final(
-                rig_core::completion::Usage::default(),
+            MockStreamEvent::FinalResponse(tabit_providers::test_utils::mock_final(
+                tabit_providers::completion::Usage::default(),
             )),
         ],
         vec![
@@ -596,8 +602,8 @@ async fn a_violating_summarizer_is_discarded_and_the_request_retried() {
                 "## Goal
 - recovered",
             ),
-            MockStreamEvent::FinalResponse(rig_core::test_utils::mock_final(
-                rig_core::completion::Usage::default(),
+            MockStreamEvent::FinalResponse(tabit_providers::test_utils::mock_final(
+                tabit_providers::completion::Usage::default(),
             )),
         ],
     ]))
@@ -634,8 +640,8 @@ async fn a_persistently_violating_summarizer_fails_the_pass_and_persists_nothing
     let violating_turn = vec![
         MockStreamEvent::text("let me look"),
         MockStreamEvent::tool_call("call-1", "read", serde_json::json!({"path": "x"})),
-        MockStreamEvent::FinalResponse(rig_core::test_utils::mock_final(
-            rig_core::completion::Usage::default(),
+        MockStreamEvent::FinalResponse(tabit_providers::test_utils::mock_final(
+            tabit_providers::completion::Usage::default(),
         )),
     ];
     let agent = AgentBuilder::new(MockCompletionModel::from_stream_turns([
@@ -673,8 +679,8 @@ async fn a_persistently_violating_summarizer_fails_the_pass_and_persists_nothing
 async fn an_empty_summary_fails_the_pass() {
     let cell = cell_with_measured_dialogue(4, 9_000);
     let agent = AgentBuilder::new(MockCompletionModel::from_stream_turns([vec![
-        MockStreamEvent::FinalResponse(rig_core::test_utils::mock_final(
-            rig_core::completion::Usage::default(),
+        MockStreamEvent::FinalResponse(tabit_providers::test_utils::mock_final(
+            tabit_providers::completion::Usage::default(),
         )),
     ]]))
     .build();
@@ -773,15 +779,15 @@ async fn a_broken_tool_call_is_the_same_violation_discarded_and_retried() {
     // resend. Second attempt: a clean summary.
     let agent = AgentBuilder::new(MockCompletionModel::from_stream_turns([
         vec![MockStreamEvent::Error(
-            rig_agent::test_utils::MockError::malformed_tool_call(
+            tabit_engine::test_utils::MockError::malformed_tool_call(
                 "read",
                 "arguments are not valid JSON",
             ),
         )],
         vec![
             MockStreamEvent::text("## Goal\n- recovered"),
-            MockStreamEvent::FinalResponse(rig_core::test_utils::mock_final(
-                rig_core::completion::Usage::default(),
+            MockStreamEvent::FinalResponse(tabit_providers::test_utils::mock_final(
+                tabit_providers::completion::Usage::default(),
             )),
         ],
     ]))
@@ -847,8 +853,8 @@ async fn a_history_far_over_the_window_compacts_in_strictly_shrinking_passes() {
     let summary = || {
         vec![
             MockStreamEvent::text("## Goal\n- pass"),
-            MockStreamEvent::FinalResponse(rig_core::test_utils::mock_final(
-                rig_core::completion::Usage {
+            MockStreamEvent::FinalResponse(tabit_providers::test_utils::mock_final(
+                tabit_providers::completion::Usage {
                     input_tokens: 100,
                     output_tokens: 20,
                     ..Default::default()
@@ -946,8 +952,8 @@ async fn a_huge_late_growth_the_cut_cannot_shed_stops_the_loop_loud() {
     let summary = || {
         vec![
             MockStreamEvent::text("## Goal\n- pass"),
-            MockStreamEvent::FinalResponse(rig_core::test_utils::mock_final(
-                rig_core::completion::Usage {
+            MockStreamEvent::FinalResponse(tabit_providers::test_utils::mock_final(
+                tabit_providers::completion::Usage {
                     input_tokens: 100,
                     output_tokens: 20,
                     ..Default::default()
@@ -999,8 +1005,8 @@ async fn a_huge_late_growth_the_cut_cannot_shed_stops_the_loop_loud() {
 }
 
 fn length_capped_turn() -> Vec<MockStreamEvent> {
-    let mut final_record = rig_core::test_utils::mock_final(Usage::default());
-    final_record.finish_reason = Some(rig_core::completion::FinishReason::Length);
+    let mut final_record = tabit_providers::test_utils::mock_final(Usage::default());
+    final_record.finish_reason = Some(tabit_providers::completion::FinishReason::Length);
     vec![
         MockStreamEvent::text("cut short"),
         MockStreamEvent::FinalResponse(final_record),
@@ -1016,8 +1022,8 @@ async fn a_length_capped_summary_shortens_and_retries() {
         length_capped_turn(),
         vec![
             MockStreamEvent::text("## Goal\n- fits now"),
-            MockStreamEvent::FinalResponse(rig_core::test_utils::mock_final(
-                rig_core::completion::Usage::default(),
+            MockStreamEvent::FinalResponse(tabit_providers::test_utils::mock_final(
+                tabit_providers::completion::Usage::default(),
             )),
         ],
     ]))
@@ -1059,15 +1065,15 @@ async fn an_in_stream_overflow_rejection_shortens_and_retries() {
     let cell = cell_with_measured_dialogue(4, 9_000);
     let agent = AgentBuilder::new(MockCompletionModel::from_stream_turns([
         vec![MockStreamEvent::Error(
-            rig_agent::test_utils::MockError::http(
+            tabit_engine::test_utils::MockError::http(
                 400,
                 "prompt is too long: 19565 tokens > 16384 tokens maximum",
             ),
         )],
         vec![
             MockStreamEvent::text("## Goal\n- after the wall"),
-            MockStreamEvent::FinalResponse(rig_core::test_utils::mock_final(
-                rig_core::completion::Usage::default(),
+            MockStreamEvent::FinalResponse(tabit_providers::test_utils::mock_final(
+                tabit_providers::completion::Usage::default(),
             )),
         ],
     ]))
@@ -1139,7 +1145,7 @@ async fn an_unrepairable_in_stream_failure_fails_the_invocation() {
     // and the outcome carries the failure.
     let cell = cell_with_measured_dialogue(4, 9_000);
     let agent = AgentBuilder::new(MockCompletionModel::from_stream_turns([vec![
-        MockStreamEvent::Error(rig_agent::test_utils::MockError::http(
+        MockStreamEvent::Error(tabit_engine::test_utils::MockError::http(
             500,
             "upstream exploded",
         )),
@@ -1177,7 +1183,7 @@ async fn the_pre_request_leaf_compacts_when_condition_b_holds() {
         notice: None,
         ledger: std::sync::Arc::new(std::sync::Mutex::new(crate::stats::UsageLedger::default())),
     };
-    rig_agent::agent::PreRequestSource::at_door(&door).await;
+    tabit_engine::agent::PreRequestSource::at_door(&door).await;
     // The box ran through the leaf: the branch holds a compaction and
     // the walked context begins with the summary.
     let branch = read(&cell).active_branch();

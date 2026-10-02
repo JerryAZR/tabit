@@ -16,10 +16,10 @@ use std::sync::{Arc, Mutex};
 
 use crate::lock::lock;
 use crate::model::validate_selection;
-use rig_agent::agent::ModelHandle;
-use rig_core::client::CompletionClient;
-use rig_core::providers::{anthropic, openai};
 use tabit_config::{AuthConfig, Provider, TabitConfig, WireApi};
+use tabit_engine::agent::ModelHandle;
+use tabit_providers::client::CompletionClient;
+use tabit_providers::providers::{anthropic, openai};
 
 use crate::SessionError;
 use crate::session::ModelFactory;

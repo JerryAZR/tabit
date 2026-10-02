@@ -3,7 +3,14 @@
 This is the contract for anyone building a UI on top of the tabit
 backend: what the backend provides, what it expects from you, and the
 invariants your UI can rely on. Read this document alone; you should
-not need the codebase to design a frontend.
+not need the codebase to design a frontend. It is also the frontend
+protocol's one home — contract and design record both (owner ruling
+2026-09-26; the extension protocol's superset lives in EXTENSIONS.md).
+
+The protocol's **changelog** lives at the bottom of this doc: every
+`PROTOCOL_VERSION` bump or frontend-observable change (wire or
+behavior) gets an entry in the same commit. (The rule rode the
+deleted GUI's CHANGELOG.md until 2026-09; this doc is its home.)
 
 This doc owns the **mechanics** — wire format, lifecycle, the event
 vocabulary's semantics, invariants. The interpretation layer — how to
@@ -11,7 +18,7 @@ render a specific tool's `details` cargo, the interaction template
 payloads — lives in **TOOLS.md**, its companion since the shapes grew
 past one doc (2026-09 ruling).
 
-Wire shapes below are the **v16 contract**. v3 was the multi-session
+Wire shapes below are the **v20 contract**. v3 was the multi-session
 host — session-addressed commands, `new_session`/`open_session` on the
 channel, the `"main"` stream alias retired (the stream stamp is the
 session id). v4 made backend-level frames **unstamped** (§6) and
@@ -36,10 +43,95 @@ into the invocation envelope — `compaction_begin` → `compaction_step` × N �
 attempts; v16 made the session's world visible — `session_opened` and the
 catalog rows carry `cwd` (rows also `path`), and `compact.directives` became
 real free text (appended to the summarization instruction for that
-invocation). Each version landed as one
-protocol-version bump with no compatibility period; always check the
-ack's `protocol_version`. (`tabit-core --list` prints a human table —
+invocation); v17 added `interaction_settled { id }` — the settle close
+for interaction cards (§8); v18 rode the routing generalization —
+stamped events may carry `origin` (the speaking extension, on
+re-emitted emissions), and `interaction_response.session` became
+optional (omitted only on the backend's routed-back answers to
+extension asks; frontends keep echoing the card's stamp); within v18,
+event frames may also carry `ttl` — the node net's internal hop budget,
+serialized verbatim because a node does not know (and must not know)
+who reads its stdio: the consumer ignores the field (its absence means
+an older backend); v19 made children **report first** — the first line
+on any child pipe is the child's self-report
+(`report { protocol_version }`), the initialize/ack handshake is gone
+(the spawner is the version check and owns the kill), and a resumed
+boot auto-replays (§3); v20 made `skills_available` **session-level** —
+stamped with the session's stream and announced as each session
+becomes visible, so frontends fold skills per stream and a subagent
+child in another directory announces its own catalog (§6). Each
+version landed as one protocol-version bump with no compatibility
+period; always check the report's `protocol_version`. (`tabit-core --list` prints a human table —
 there is no JSON listing edge.)
+
+## Getting started: your first frontend
+
+The sections below are the contract; this is the path through it —
+the order you actually build in. Wire lines are shown as the JSONL
+you read and write on the child's stdio (one frame per line; the
+`type` tag is the frame's identity throughout).
+
+1. **Spawn the backend.** `tabit-core --json`, spawned by you, in
+   the project directory (sessions live under its
+   `.tabit/sessions`; config resolves from the same world — the
+   setup guide below is what a config-less first run sends). Session
+   flags you may add: `--continue` (resume the newest stored
+   session), `--session <path>`, `--model provider/model`,
+   `--max-turns <n>`, `--ephemeral` (in memory, nothing persists).
+   You own the lifecycle: you picked the binary, you kill it.
+2. **Read the first line — the report.**
+   `{"type":"report","protocol_version":20}`. Protocol facts only.
+   **You are the version check**: a version you do not speak is
+   yours to kill and clean up (§3). After the report there is no
+   handshake state — your commands may flow from your first line
+   onward.
+3. **Collect the boot's addresses.** The boot announcements follow
+   (common order, not a contract — build on stamps and kinds, never
+   position): `session_opened` carries the boot session's id (your
+   command address), then its `skills_available`, then the
+   backend-level `sessions_available` and `extensions_available`
+   catalogs, then — for a resumed boot — the replay bracket
+   (`replay_begin` … `replay_end`).
+4. **Send your first message.**
+   `{"type":"message","session":"<the id>","text":"hello"}`. Idle,
+   it starts a run (acknowledged in milliseconds by `user_message`);
+   mid-run, it steers at the next turn boundary (acknowledged by
+   `message_queued`). Everything the run does arrives as stamped
+   events on the session's stream: `text_delta`/`reasoning_delta`,
+   `tool_call`/`tool_result` pairs, turn brackets,
+   `completion_call` (per-turn usage), and exactly one terminal —
+   `run_finished`/`run_failed`/`run_aborted`. §6 is the vocabulary;
+   §4 is the model behind it.
+5. **Render by identity, not order.** Dispatch on each frame's
+   `type` and stream stamp. The backend's stdout is protocol —
+   never mine it for diagnostics; capture its **stderr** instead
+   (that is the crash-report path, §3.7).
+6. **Answer cards.** A permission gate or an extension asking the
+   user crosses as `interaction_request { id, ui_type, payload }` —
+   render the template (TOOLS.md), then answer with
+   `{"type":"interaction_response","session":"<id>","id":"<the
+   request id>","payload":{"selected":["Allow"]}}`. §8 is the card
+   law; the settle close (`interaction_settled`) follows.
+7. **Drive the rest through commands.** `abort` (running: preempts
+   and stops the subtree), `new_session`/`open_session` (the
+   multi-session host), `checkout` (rewind/branch), `model`
+   (switch), `compact` (manual compaction) — the full table with
+   their timing laws is §5. Subagent children are command-addressed
+   the same way: any id you saw stamped on a frame is an address.
+8. **Shut down by closing stdin.** Close stdin and the backend
+   dies: an in-flight run aborts (its terminal still flushes),
+   queued messages discard, the process exits. Exit codes: `0`
+   broken pipe, `1` startup failure (the report, then one unstamped
+   `error` event carrying the reason — display it; a config reason
+   carries the first-run setup guide), `101` an internal crash
+   (display the stderr report — that is what the user sends back).
+
+The tabit-core source is itself a frontend of the simplest kind:
+`crates/tabit-core/src/print.rs` drives exactly this loop in one
+file (one message, rendered events, cards answered from stdin), and
+`crates/tabit-app/examples/host_cards.rs` is the same shape reduced
+to a page. Building in-process instead? That is EMBEDDING.md's
+world, not this one.
 
 ## 1. Architecture: two processes, one pipe
 
@@ -54,10 +146,10 @@ tabit-core --json [--continue | --session <path>] [--model <ref>]
   ignore (never protocol data) — but capture it for crash reports.
 - **One backend process hosts many sessions.** The spawn flags select
   the **boot session** — `--continue` resumes the project's newest
-  (nothing to resume → fresh, ack `resumed: false` — §3.1),
+  (nothing to resume → fresh, announce `resumed: false` — §3.1),
   `--session <path>` a specific file, neither a fresh one — and the
-  backend announces the catalog (`sessions_available`) after the
-  handshake. Creating, listing, opening, and switching sessions are
+  backend announces the catalog (`sessions_available`) right after
+  its report. Creating, listing, opening, and switching sessions are
   channel commands (`new_session`, `open_session`; §5) — never process
   tricks. One connection per backend process (ruled scope).
 - **Spawn environment.** Sessions live at `<cwd>/.tabit/sessions`
@@ -68,7 +160,7 @@ tabit-core --json [--continue | --session <path>] [--model <ref>]
   sessions created later in the same process). The backend binary is
   `tabit-core` — installed alongside the frontend (a sibling binary),
   so "can't find the backend" is not a failure mode in the supported
-  flow (`TABIT_CORE_BIN` remains a development override).
+  flow.
 - **Local or remote, same edge.** Locally the backend is a child
   process; remotely it is the same child spawned on the far side of
   `ssh` with stdio forwarded. Nothing in the protocol distinguishes
@@ -102,16 +194,15 @@ arrive as events. Input tolerance: blank lines are skipped, a trailing
 size limit** — tool output can be large; buffer accordingly.
 
 ```
-→ {"type":"initialize","protocol_version":15,"replay":true}
-← {"type":"initialize_ack","protocol_version":15,"session_id":"019…"}
+← {"type":"report","protocol_version":20}
 ← {"type":"session_opened","stream":"019…","id":"019…","path":"…",
    "model":{"provider":"…","model":"…","thinking_level":null},"resumed":true}
 ← {"type":"sessions_available","sessions":[
      {"id":"019…","created_at":"2026-08-22T…","entry_count":14}, … ]}
 ← {"type":"model_changed","stream":"019…","provider":"…","model":"…","thinking_level":null,"context_window":200000,"name":"…","cost":{"input":1.0,"output":4.0,"cache_read":0.1,"cache_write":0.4}}
-← {"type":"replay_started","stream":"019…","total":14}
+← {"type":"replay_begin","stream":"019…","total":14}
 ← … the transcript as finalized events …
-← {"type":"replay_done","stream":"019…"}
+← {"type":"replay_end","stream":"019…"}
 → {"type":"message","session":"019…","text":"who are you?"}
 ← {"type":"user_message","stream":"019…","entry_id":"019…","text":"who are you?"}
 ← {"type":"turn_started","stream":"019…","id":"019…","started_at_ms":1763312345678}
@@ -122,13 +213,13 @@ size limit** — tool output can be large; buffer accordingly.
 ```
 
 The example's send lands while the session is idle (after
-`replay_done`), so it is acknowledged directly by `user_message` — no
+`replay_end`), so it is acknowledged directly by `user_message` — no
 `message_queued` exists for idle sends (§5); a send while a run is
 live is the queued case.
 
 Every event frame is **flat**: the event's `type` and payload fields
 sit next to `stream`. The `stream` stamp is the **session id** that
-produced the event (the boot session's id is in the ack) — the
+produced the event (the boot session's id is in the announce) — the
 `"main"` alias is gone. Events from several open sessions interleave
 on the connection; attribute by stamp. A frame with **no `stream`** is
 a backend-level fact (§6 — the catalog, session
@@ -151,54 +242,68 @@ value, switch on `type` when recognized) and log the rest.
 
 ## 3. Handshake, lifecycle, exit codes
 
-1. Your **first line** must be
-   `initialize { protocol_version, replay? }` (`replay` defaults to
-   `false`). Match → `initialize_ack` with **protocol-level facts
-   only** (the version and the boot session's id — everything else
-   arrives by event, 2026-09 ruling: the boot session is announced
-   exactly like every other). The next frame is `session_opened`
-   with the boot's facts (id, path, active model, `resumed`), then
-   the session catalog, then the skills catalog (v8 — only when
-   discovery found something), then — if you asked — the replay
-   pass, then live traffic. `resumed: false` after you asked the
-   backend to resume means the store was empty and the backend
-   **started fresh — an absorbed miss, not an error**; show a small
-   note. Mismatch → `initialize_rejected { reason }` and the
-   process exits 1. A second `initialize` after a successful handshake
-   gets `protocol_error`; the connection stays open. Rejection
-   reasons come in two flavors: config/auth problems carry the
-   first-run setup guide (written for the user — display it);
-   everything else (session unreadable, model unbuildable) carries a
-   plain reason — do not treat it as a config problem.
-2. A command before `initialize`, an unparseable line, or an
-   empty/whitespace-only `message` text gets `protocol_error
-   { message }`; **the connection stays open**. `message` texts are
-   free-form otherwise (multi-line is fine — the wire is line-delimited
-   JSON, and JSON escapes embedded newlines).
-3. `protocol_error` / `initialize_rejected` reasons are free text for
-   humans — display them, never branch on them.
-4. To shut down: **close stdin**. Closing stdin is frontend death
+1. **The backend speaks first** (owner ruling 2026-09-25, the report
+   model): its very first line is `report { protocol_version }` —
+   protocol-level facts only, nothing else. **You** are the version
+   check: a backend whose report names a version you do not speak is
+   yours to kill and clean up (you own the lifecycle — you picked the
+   binary). There is no `initialize`, no ack, no handshake state:
+   after the report, everything is the event stream, and **your
+   commands may flow from your first line onward** — before or after
+   the report; the pipe buffers whatever arrives early. **There is no
+   "next frame" guarantee after the report**: the boot's own startup
+   sequence (`session_opened` with the boot's facts — the session ids
+   you address commands by arrive here, never in the report — then
+   the boot session's `skills_available` when its discovery found
+   something (v20, stamped with the boot's stream), then the
+   backend-level catalogs (`sessions_available`, then
+   `extensions_available`), then the replay pass for a resumed boot,
+   then live traffic) is today's common order, not a contract; other
+   participants' frames
+   (an extension's, origin-stamped) may interleave anywhere, in
+   arrival order. Build on the events' own identities (stamps,
+   kinds), never on their position after the report. `resumed: false`
+   after you asked the backend to resume means the store was empty
+   and the backend **started fresh — an absorbed miss, not an
+   error**; show a small note.
+2. **Startup failures** (config/auth problems, session unreadable,
+   model unbuildable) cross as the report, then one unstamped
+   `error { kind: session }` event carrying the reason, then the
+   process exits nonzero. Config/auth reasons carry the first-run
+   setup guide (written for the user — display it); everything else
+   is a plain reason. Recovery is manual: the user fixes the file and
+   you respawn the backend (config is not re-read per request by
+   design).
+3. **Replay is default-on for a resumed boot** (owner ruling
+   2026-09-25): a backend launched with `--continue`/`--session`
+   re-emits its resident chain automatically right after the startup
+   announcements — `replay_begin { total }`, the chain as finalized
+   live events, `replay_end` (the count is a progress denominator;
+   use it or ignore it). A fresh boot replays nothing. On request,
+   any time: `open_session` of an already-open session re-replays it
+   (the door's idempotent path).
+4. An unparseable line or an empty/whitespace-only `message` text
+   gets `protocol_error { message }`; **the connection stays open**.
+   `message` texts are free-form otherwise (multi-line is fine — the
+   wire is line-delimited JSON, and JSON escapes embedded newlines).
+5. `protocol_error` reasons are free text for humans — display them,
+   never branch on them.
+6. To shut down: **close stdin**. Closing stdin is frontend death
    (ruled 2026-08 — the core dies with the frontend, regardless of
    state): an in-flight run is **aborted** (its `run_aborted` terminal
    still flushes before the stream ends), queued messages are
    discarded, and the backend exits. Interrupted results synthesize
    on the next open, exactly like a crash; the log stays durable.
-5. **Exit codes: 101 is the one reliable crash signal.** `1` means
-   handshake rejection (including **first-run setup failures** — no
-   config file: the backend sends `initialize_rejected` whose reason
-   carries a setup guide, then exits; display the reason, it is written
-   for the user — and recovery is manual: the user fixes the file and
-   the frontend respawns the backend; config is not re-read per request
-   by design) or a pre-handshake exit with **no frames** — bad flags
-   only (stderr message; every session/model startup failure arrives
-   as a rejection frame instead, §3.1). `101` is an **internal
-   error**: the process crashed itself
-   — a panic in any task or thread ends the process, so a crashed
-   backend never lingers as a zombie. Display the stderr report and
-   ask the user to send it back. `0` covers one non-clean end: a broken
-   pipe. Otherwise **detect crashes as EOF without a terminal event
-   for the in-flight run**; capture stderr as the explanation — stderr
-   is the **internal**-failure path (panics, the report the user sends
+7. **Exit codes: 101 is the one reliable crash signal.** `1` means a
+   startup failure (the report and error event above; display the
+   reason) or a bad-flags exit with **no frames** (stderr message).
+   `101` is an **internal error**: the process crashed itself — a
+   panic in any task or thread ends the process, so a crashed backend
+   never lingers as a zombie. Display the stderr report and ask the
+   user to send it back. `0` covers one non-clean end: a broken pipe.
+   Otherwise **detect crashes as EOF without a terminal event for the
+   in-flight run**; capture stderr as the explanation — stderr is the
+   **internal**-failure path (panics, the report the user sends
    back); external errors arrive as events (§6) and never require
    mining stderr.
 
@@ -233,7 +338,7 @@ value, switch on `type` when recognized) and log the rest.
 
 All commands are total — there is no rejection. Outcomes are events.
 Session-scoped commands **always name their session** (the boot id is
-in the ack; sessions you learn from `sessions_available`/
+in the announce; sessions you learn from `sessions_available`/
 `session_opened` — subagent children included). A command naming an unknown or unloaded session
 yields `error { kind: session }` — an **unstamped, backend-level**
 frame (the routing failure belongs to no session; the message names
@@ -256,7 +361,7 @@ a frame.
 | `abort { session }` | any time | running: preempts (`run_aborted`); discards messages queued at abort time (`messages_discarded`, omitted when none) **and any pending checkout** (§7 — no `checked_out` follows it; reset pending-rewind UI here). **Subtree stop (v6):** aborting a session stops its in-flight subagent descendants (every descendant's terminal flushes on its own stream; instances are never destroyed) — the cascade rides the run token each tool already holds, and aborting a child by id stops that child's subtree and leaves the parent's run alive. Children with no active tool call (the future background mode) survive aborts. Post-abort messages queue normally and start the next run. Idle: no-op. |
 | `new_session` | any time | creates a fresh session (same config, tools, and `--model`/`--max-turns` as the boot); its `session_opened` follows — stamped with the new session's own stream, `resumed: false` (v10: one announcement shape for every path). Nothing replays (it is empty). Never waits on any session — lifecycle writes no session's file. |
 | `open_session { id }` | any time | loads the session if needed and streams a replay pass stamped with the id — the pass is the acknowledgment. Idempotent: an open session re-replays. Unknown id or unreadable file → unstamped, backend-level `error { kind: session }`. Creating, loading, and switching never wait on the session you are leaving; the one wait is the opened session's **own** in-flight run — its pass arrives at that run's terminal (its live streaming renders immediately; only committed history waits). |
-| `checkout { session, entry_id }` | any time | moves that session's chain to the entry (any entry in the file— an off-chain target is a branch switch); see §7. **On receipt:** the target is verified (unknown entry → immediate `error { kind: checkout }`, nothing else happens) and the still-pending messages are discarded (`messages_discarded`, handed back as drafts). The rewind itself: a run in flight is aborted first (`run_aborted` — the user rewinding has declared its continuation obsolete), then the rewind applies at the session's pause point; idle → applies immediately. |
+| `checkout { session, entry_id }` | any time | moves that session's chain to the entry (any entry in the file— an off-chain target is a branch switch); see §7. A target inside an open tool roundtrip (the assistant's tool-call entry, or a mid-batch result) is not a representable chain-end: it **resolves forward** to the first closed position — the batch's last tool result — and `checked_out` reports the landing, which may differ from the ask (2026-09; was: a loud refusal). **On receipt:** the target is verified (unknown entry → immediate `error { kind: checkout }`, nothing else happens) and the still-pending messages are discarded (`messages_discarded`, handed back as drafts). The rewind itself: a run in flight is aborted first (`run_aborted` — the user rewinding has declared its continuation obsolete), then the rewind applies at the session's pause point; idle → applies immediately. |
 | `model { session, provider, model, thinking_level? }` | any time | switches that session's model — the **register write**, never a chain move (§7). A **state write at receive**: the ref is validated against config (unknown provider/model → immediate `error { kind: model }`, nothing moves), then the entry and the live selection land at once and `model_changed` follows immediately — even mid-run (a run in flight finishes untouched on the model it bound at run open; the next run uses the new one). Not intent: abort never touches it, rapid switches each land (last wins). Durability: no later than the next turn (the write-behind log's prompt barrier flushes the buffer — this switch included — before any turn starts); a hard death in the window loses the switch, and resume announces the register that survived. |
 | `interaction_response { session, id, payload }` | after an `interaction_request` | answers a pending request; the payload is shaped by the asking template's convention (§8) — always an answer, never a dismissal. |
 | `compact { session, directives? }` | any time | **manual compaction (v7)**: runs the context-summarization pass now — the same machinery as the automatic doors, forced regardless of thresholds and guarded only by the short-history skip (a history shorter than the retained-tail budget → `compaction_failed { message }` saying so; nothing runs). Idle: runs at the session's next beat. Running: **parks** — compaction never aborts a run (it does not move the chain, nothing is made obsolete) — and runs when the run ends. Outcomes: the `compaction_*` bracket (§6). `directives` (v16) is the user's free-text guidance for this invocation — appended to the summarization instruction, never persisted, never replayed: "focus on details relevant to task X which we will start next". Abort clears a parked compact (drop-all-pending-intent — no bracket follows). |
@@ -269,13 +374,42 @@ state write that happens entirely at receive — no parking, no pause
 point — so send it any time and expect `model_changed` (or the error)
 back at once. A switch that validated but fails to construct in the
 environment surfaces as the next run's `run_failed` (the run's
-message names the provider) — the register keeps the choice; whether
-a picker needs a distinct "didn't take" signal is an open
-PROTOCOL.md note.
+message names the provider) — the register keeps the choice; whether a
+picker needs a distinct "didn't take" signal is an open question
+(§11).
+
+**Skill invocation in message text (manual invocation, 2026-09):** a
+message may carry the invocation tag `<skill name="commit"/>` — the
+exact self-closing form, any number of them, anywhere in the text.
+The UX is yours (typical: the user types `/commit`, confirms against
+`skills_available`, and you format the tag — keeping the user's edit
+painless); the backend expands at the message door: the text passes
+verbatim with the tags in place as anchors, and each resolvable tag's
+skill body is **appended after the message** (never in-place — a
+hundred-line body mid-sentence is unreadable), frontmatter stripped,
+in the same format the `skill` tool returns:
+
+```
+<skill name="commit">
+…SKILL.md body…
+
+[Skill base directory: …]
+</skill>
+```
+
+Unresolvable tags — no such skill in *that session's* catalog, or an
+unreadable file — are left as-is: the message is never rejected
+("write to /tmp, redirect errors to /dev/null" contains no tag and is
+never a fetch attempt). The `user_message` event, the log, and the
+model's request all carry the expanded text — what the model saw is
+what replay shows. No arguments by design (pi's prompt-template is
+the future direction if that ever changes), and the bare leading
+`/name` shorthand is not recognized (deferred until the tag path is
+stable).
 
 ## 6. Events
 
-`initialize_ack`, `initialize_rejected`, and `protocol_error` are
+The `report` (the backend's first line) and `protocol_error` are
 unstamped control frames; everything else is an event — stamped when
 a session produced it, **unstamped when the backend did** (the
 catalog, and every `kind: session` error — fold
@@ -293,6 +427,7 @@ those connection-level).
 | `reasoning_delta` | `turn_id`, `id`, `reasoning` | model reasoning; `id` correlates blocks within the turn (several may interleave; same-id deltas append). Full-text once per block id in replay. |
 | `tool_call` | `turn_id`, `name`, `call_id`, `internal_call_id`, `arguments` | the model issued a complete tool call, before execution. `arguments` is the raw JSON string, or `null` when unparseable. |
 | `interaction_request` | `id`, `ui_type`, `payload` | a tool gate (permission) or a tool body asks the user; `ui_type` names the widget and `payload` is its cargo (§8 templates own the shapes). Several may be open at once. Answer with `interaction_response`; a run terminal closes the unanswered (§8). |
+| `interaction_settled` | `id` | a pending request settled — answered, retracted, or dead (v17). Id-only, fire-and-forget; close the card. Terminals remain the belt-and-suspenders close (§8). |
 | `compaction_begin` | — | **(v15)** a compaction invocation began — the envelope for every compaction event until `compaction_end` or `compaction_failed`. No id: the stream stamp scopes it (invocations are serial per session), and events inside are contiguous and ordered. May arrive mid-run (between turns) or at idle. A door that finds nothing worth folding stays silent — no envelope. |
 | `compaction_delta` | `text` | a summary text delta inside the open pass (positional: deltas between steps belong to the pass that next commits; after a `compaction_retried`, the pending deltas were the discarded attempt's and drop). |
 | `compaction_step` | `id`, `usage`, `cost?` | **(v15)** one pass committed: the summary is durable as a compaction entry. `id` is the pass's entry id (born early, like turn ids) — a checkout anchor and the replay marker's correlation. `usage` is the summarization request's fresh report and `cost` its recorded dollars: spend that meters exactly like a `completion_call`'s — a frontend's totals are one fold over both event kinds. Multi-pass invocations emit one step per pass. |
@@ -333,15 +468,15 @@ consumes (its `details` cargo) is TOOLS.md's table of shapes.
 
 | event | payload | when |
 |---|---|---|
-| `sessions_available` | `sessions: [{ id, created_at, entry_count, path, cwd }]` | once, right after the ack's startup notes: every stored session, newest first. **Unstamped, backend-level.** Minimal by ruling — a plain object, fields grow when
+| `sessions_available` | `sessions: [{ id, created_at, entry_count, path, cwd }]` | once, after the boot session's announcements (notes, then its stamped `skills_available` when it has skills — §3.1's order): every stored session, newest first. **Unstamped, backend-level.** Minimal by ruling — a plain object, fields grow when
    needed (v16 added `path` and `cwd`: a frontend never lists the
    directory to learn either). A brand-new session has no file yet and is absent until it records. |
-| `skills_available` | `skills: [{ name, description, location, level }]` | **(v8)** once, right after `sessions_available`: every skill the four-source discovery merged (home `~/.agents`/`~/.tabit` + workspace `.agents`/`.tabit` skills dirs), the same facts the prompt catalog carries — `level` is `user` or `workspace` (which source won). **Unstamped, backend-level** (one process, one cwd, one skill set); only announced when at least one skill was discovered. Skill *invocation* is no new wire shape: the model calls the `skill` tool, an ordinary `tool_call`/`tool_result` pair on the asking session's stream. |
+| `skills_available` | `skills: [{ name, description, location, level }]` | **(v20) session-level**: stamped with the session's stream, announced right after each `session_opened` (boot, `new_session`, `open_session`) — every skill that session's own discovery merged (home `~/.agents`/`~/.tabit` + workspace `.agents`/`.tabit` skills dirs over the session's cwd, plus the process's extension contribution), the same facts that session's prompt catalog carries — `level` is `user` or `workspace` (which source won). Fold skills state **per stream** (v20): a subagent child is a full session host in its own cwd and announces its own stamped catalog, which must not clobber another session's list. Only announced when the session discovered at least one skill — with per-stream folding, absence is unambiguous. Skill *invocation* is no new wire shape: the model calls the `skill` tool, an ordinary `tool_call`/`tool_result` pair on the asking session's stream; the user invokes one manually with the message-text tag (§5). |
 | `extensions_available` | `extensions: [{ name, version, description?, dir, status, reason?, tools: [{ name, description }], hooks: [string] }]`, `conflicts: [{ kind, extension, tool, incumbent? }]` | **(v9)** once, right after `skills_available`: every discovered extension with its provenance (`dir`) and standing — `status` is `alive` or `dead` (a refused handshake, a failed scan, or death since; `reason` carries why). **Unstamped, backend-level** (one process, one extension host); only announced when at least one extension was discovered — a refusal counts as discovered. **A boot-time snapshot** (2026-09 ruling): a mid-run extension death does not re-announce — stderr carries the report and the catalog stands until the next backend start. `conflicts` are the boot's name-assembly reports: `kind: "replaces_core"` (an extension tool replaced the core tool of the same name — the signal is mandatory; how loudly you present it is your call) and `kind: "refused_peer"` (the newcomer was refused, `incumbent` names the extension that holds the name). Extension tool *invocation* is no new wire shape: an ordinary `tool_call`/`tool_result` pair, attributed by the model-facing name. |
-| `session_opened` | `id`, `path`, `cwd`, `model`, `resumed`, `parent?`, `parent_call?` | a session became visible in this backend — the boot (at spawn, right after the ack), a `new_session`, an `open_session`, **or a subagent child** (v5). `cwd` (v16) is the session's working
+| `session_opened` | `id`, `path`, `cwd`, `model`, `resumed`, `parent?`, `parent_call?` | a session became visible in this backend — the boot (at spawn, right after the report), a `new_session`, an `open_session`, **or a subagent child** (v5). `cwd` (v16) is the session's working
 directory — the boot's is the backend's cwd, a child's is its spawn
-cwd. **One announcement shape for every path** (2026-09 ruling — the ack carries protocol-level facts only; the boot is not a special case). Stamped with the session's own stream. Selection notes, if any, follow on the same stream. v5: `path` is **empty for an ephemeral session** (in memory only — nothing to open or replay; subagent children are ephemeral today), and `parent` names the spawning session for a subagent child — absent for every user-facing session. A frontend branches on `parent`: user sessions update their session facts, children render nested (or not at all) — a child announcement must never overwrite the active session's facts. The child's whole run (its `user_message`, deltas, `tool_call`s, terminal) streams on its own stamp; the spawner's transcript sees only the subagent `tool_call`/`tool_result` pair. `parent_call` (v7, additive) is the spawning tool call's `internal_call_id`: the announce pairs the child with the **exact** open `tool_call` event — exact under concurrent subagent calls, where arrival order cannot disambiguate. Absent whenever `parent` is. |
-| `checked_out` | `entry_id`, `base_id` | checkout succeeded. `base_id` is `null` today: drop everything and rebuild from the replay pass that follows. A non-null `base_id` is the reserved suffix mode (keep through `base_id`, apply the pass) — treat any non-null value as "rebuild from the pass" and you stay correct. |
+cwd. **One announcement shape for every path** (2026-09 ruling — the report carries protocol-level facts only; the boot is not a special case). Stamped with the session's own stream. Selection notes, if any, follow on the same stream. v5: `path` is **empty for an ephemeral session** (in memory only — nothing to open or replay; subagent children are ephemeral today), and `parent` names the spawning session for a subagent child — absent for every user-facing session. A frontend branches on `parent`: user sessions update their session facts, children render nested (or not at all) — a child announcement must never overwrite the active session's facts. The child's whole run (its `user_message`, deltas, `tool_call`s, terminal) streams on its own stamp; the spawner's transcript sees only the subagent `tool_call`/`tool_result` pair. `parent_call` (v7, additive) is the spawning tool call's `internal_call_id`: the announce pairs the child with the **exact** open `tool_call` event — exact under concurrent subagent calls, where arrival order cannot disambiguate. Absent whenever `parent` is. |
+| `checked_out` | `entry_id`, `base_id` | checkout succeeded — `entry_id` is **where the chain ends** (the landing): a mid-roundtrip ask resolved forward to the batch's last tool result, so it may differ from what you sent. `base_id` is `null` today: drop everything and rebuild from the replay pass that follows. A non-null `base_id` is the reserved suffix mode (keep through `base_id`, apply the pass) — treat any non-null value as "rebuild from the pass" and you stay correct. |
 | `model_changed` | `provider`, `model`, `thinking_level`, `context_window?`, `name?`, `cost?` | the session's **active model** — a session preference: the file's last `model_change`, latest in time wins (a rewind never moves it). Announced live whenever the session becomes visible: ahead of every replay pass (boot, `open_session`, re-replay, after `checked_out`) — idempotent, the value repeats — and at every `model` command (a state write at receive; §5). **Never inside a pass** (state is announced, not reconstructed). The ack's `model` is the boot session's register. v11: the announcement also carries the model record resolved against config — `context_window` (tokens; a context meter's denominator), `name` (a display name; fall back to the model id), and `cost` (`{ input, output, cache_read, cache_write }`, USD per million tokens). Each field is optional and **absent means the config does not state it** (never zero); a register stale against an edited config announces the ids with no facts, and the next validated switch repairs it. |
 
 **Errors: one generic carrier with a `kind`.** Anything that goes
@@ -359,7 +494,7 @@ report (§3.5); you never mine it for user-facing meaning.
 | `persist_degraded` | `pending` | the write-behind log could not flush: `pending` entries are committed in memory but not on disk (disk full is the usual cause). Every later commit retries; nothing is lost unless the process is force-stopped while degraded (then the pending entries go — model output and register records; a stuck start's own messages come back as drafts when the run is refused). Nag about disk space. |
 | `persist_recovered` | — | the pending entries reached the disk. |
 
-**Write-behind persistence (shipped, PROTOCOL.md flag 8).** Commits are
+**Write-behind persistence (shipped).** Commits are
 memory-first: the resident state (tree, head, context) is the
 in-session truth and the file is its write-behind mirror — always a
 clean prefix of commit order. Entering a run, the buffer retries
@@ -379,8 +514,8 @@ above — full-text deltas, same ids as live)
 
 | event | payload | when |
 |---|---|---|
-| `replay_started` | `total` | a replay pass begins (startup with `replay: true`, or after `checked_out`). `total` = **events** to come between the brackets (the progress denominator). |
-| `replay_done` | — | the pass ends; live traffic (or quiescence) follows. |
+| `replay_begin` | `total` | a replay pass begins (a resumed boot's automatic pass, an `open_session` re-replay, or after `checked_out`). `total` = **events** to come between the brackets (the progress denominator). |
+| `replay_end` | — | the pass ends; live traffic (or quiescence) follows. |
 
 `usage` objects are protocol-owned:
 `{ input_tokens, output_tokens, total_tokens, cached_input_tokens,
@@ -399,13 +534,14 @@ rewind; the register, not the branch, owns attribution.
 
 ## 7. Replay and checkout: how transcript state moves
 
-**Startup replay.** Send `initialize { protocol_version, replay: true
-}`. After the ack: the session's `model_changed` announcement (§6),
-then `replay_started { total }` → the active branch's
-nodes as finalized events in branch order (`user_message` per user
-node; per assistant node: `turn_started`, full-text deltas, its
-`tool_call`s and `tool_result`s, `completion_call`, `turn_committed`)
-→ `replay_done`. Branch
+**Startup replay.** A resumed boot replays automatically (owner
+ruling 2026-09-25): right after the startup announcements, the
+session's `model_changed` (§6), then `replay_begin { total }` → the
+active branch's nodes as finalized events in branch order
+(`user_message` per user node; per assistant node: `turn_started`,
+full-text deltas, its `tool_call`s and `tool_result`s,
+`completion_call`, `turn_committed`) → `replay_end`. On request, any
+time: `open_session` of an already-open session re-replays it. Branch
 siblings are excluded by construction; ids are the log's ids, identical
 to what a live consumer of the same history saw; no `model_changed`
 ever appears inside the brackets (state is announced live, not
@@ -416,8 +552,8 @@ the roundtrip closed).
 
 **Switching sessions.** Send `open_session { id }`. The full-re-render
 rule (ruled; pi-proven): clear your view of the target session
-optimistically, then apply the pass that follows (`replay_started` →
-finalized events → `replay_done`, stamped with the id). It is the same
+optimistically, then apply the pass that follows (`replay_begin` →
+finalized events → `replay_end`, stamped with the id). It is the same
 shape as startup replay — one transcript-rebuild path in your code,
 and the seam a future streamed suffix replaces. Switching never waits
 on the session you are leaving; if the opened session's own run is in
@@ -441,7 +577,7 @@ code path as every pass), then the replay brackets.
 
 1. **Drop everything you hold for that session** (`base_id` is `null`
    — full re-render, the same rule as switching sessions) and apply
-   the `replay_started` … `replay_done` pass: the rewound chain
+   the `replay_begin` … `replay_end` pass: the rewound chain
    through its **tip** (the tip may sit past `entry_id` by
    repair entries — the honesty note from startup replay).
 2. The aborted run's own epilogue preceded the rewind: its
@@ -494,7 +630,7 @@ flowing while a pass is parked, and at the session's beat the pass is
 served **before** the next message batch— a read requested after a
 message still answers ahead of it. A message's inclusion in a pass is
 decided solely by whether it drained before the beat (drained → in
-the pass; queued → it renders live right after `replay_done`).
+the pass; queued → it renders live right after `replay_end`).
 
 **Valid cut points** (ruled). The atomic unit is the tool roundtrip:
 an assistant turn and its complete result batch commit and rewind
@@ -519,8 +655,7 @@ wire marker.
 One generic ask, v4-shipped: any backend asker — a tool gate
 (permission), a tool body (ask-the-user tools), a hook — questions
 the user through one frame pair, routed by id, payloads opaque to the
-core (the core's interaction vocabulary is routing only; PROTOCOL.md's
-interaction-generalization ruling is the design record). Concurrent
+core (the core's interaction vocabulary is routing only). Concurrent
 chains may hold several open requests at once; answer them in any
 order.
 
@@ -533,7 +668,10 @@ order.
 ```
 
 - `interaction_request { id, ui_type, payload }` — an event, stamped
-  with the asking session's stream. `id` is backend-minted (UUIDv7,
+  with the asking session's stream — which may be a session you have
+  not seen announced (an extension's hidden child asking through its
+  owner): render the card anyway; the stamp is attribution, not a
+  promise the session is known. `id` is backend-minted (UUIDv7,
   born at acknowledgment); `ui_type` names the widget; `payload` is
   the asker's cargo.
 - `interaction_response { session, id, payload }` — a command,
@@ -557,15 +695,19 @@ order.
 - A `free_text` answer is delivered to the model when present (a
   denial reason shapes the retry), not just logged.
 
-**Closing rule:** a run terminal (`run_finished` / `run_aborted` /
-`run_failed`) closes every pending request — drop the cards, no
-response needed. There is no close event and none is needed: an
-unanswered request's death always coincides with a run terminal (a
-question lives inside its tool's execution, and the run always ends
-in exactly one terminal). A response racing a terminal (stale id,
-dead asker) is a logged no-op on the backend — send it, never block
-on the race. Requests never replay; the durable record of an
-interaction is the tool result — the answer or denial the model saw.
+**Closing rule:** a request settles exactly once — the first
+`interaction_response` to arrive lands and every racing duplicate is a
+logged no-op on the backend (send it, never block on the race); the
+run terminals (`run_finished` / `run_aborted` / `run_failed`) close
+every still-pending request. Every settle site also emits
+`interaction_settled { id }` (v17) — fire-and-forget, id-only (the
+answer itself is indirectly visible wherever its asker surfaces it,
+the tool result typically). With one frontend the terminals sufficed
+as the close signal; with more channels able to answer (co-frontends),
+a card can die long before any terminal, and this event is how the
+other holders learn to drop it. Requests never settle twice and never
+replay; the durable record of an interaction is the tool result — the
+answer or denial the model saw.
 
 ## 9. Invariants you may rely on
 
@@ -590,10 +732,11 @@ interaction is the tool result — the answer or denial the model saw.
   arbitrarily — attribute by stamp, never by position.
 - **Idle/running is derivable**: running from the first `user_message`
   of a run until its terminal; idle otherwise. Startup (after
-  `replay_done`) is idle. A queued-while-idle message keeps you idle
+  `replay_end`) is idle. A queued-while-idle message keeps you idle
   until it drains.
-- **Recovery is replay.** After a backend crash or restart, the same
-  initialize-with-replay gives you the active chain with the same ids.
+- **Recovery is replay.** After a backend crash or restart, a
+  resumed boot's automatic pass gives you the active chain with the
+  same ids.
   Only pending messages are lost (they were never history — salvage as
   drafts before restarting if you want them); committed-but-unflushed
   entries can be lost to a force-stop (the write-behind window — model
@@ -638,6 +781,10 @@ interaction is the tool result — the answer or denial the model saw.
    responses are logged no-ops; requests never replay.
 3. **Subagent streams.** Sibling `stream` ids and their event subset —
    reserved, unspecified.
+4. **The picker's "didn't take" signal.** A `model` switch that
+   validated but failed to construct surfaces only as the next run's
+   `run_failed` (§5) — whether a picker needs a distinct signal is
+   unsettled.
 
 Settled since the review: bad-flag exits stay
 exit-1-with-stderr-no-frames while session/model startup failures
@@ -647,4 +794,39 @@ pin); cut points follow the roundtrip-unit rule
 non-terminal errors ride the generic `error { kind }` carrier (§6).
 Model discovery stays config-side (`--model` refs resolve at startup;
 no discovery command is shipped). The write-behind log with its prompt
-barrier shipped (§6; PROTOCOL.md flag 8).
+barrier shipped (§6).
+
+## Changelog
+
+Every `PROTOCOL_VERSION` bump or frontend-observable change (wire
+or behavior) gets an entry here in the same commit. (History before
+v19 rode the deleted GUI's CHANGELOG.md — git history holds it.)
+
+- **v19 (2026-09)** — the report model: the backend's first line is
+  its self-report (`report { protocol_version }`); the spawner is
+  the version check and owns the kill; client lines are bare
+  commands from the first line; startup failures are the report,
+  one unstamped `error { kind: session }`, and a nonzero exit;
+  replay is default-on for resumed boots (`replay_begin { total }`
+  … `replay_end`), on request via `open_session` of an open
+  session.
+- **v20 (2026-09)** — `skills_available` is session-level: stamped
+  with the session's stream, announced per session as it becomes
+  visible (was: one unstamped backend-level catalog at startup).
+  Frontends fold skills state per stream; a child's catalog no
+  longer touches another session's list.
+- **2026-09 (no bump — checkout execution semantics)** — a
+  `checkout` target inside an open tool roundtrip (the assistant's
+  tool-call entry, or a mid-batch result) resolves **forward** to the
+  first closed position — the batch's last tool result — instead of
+  failing; `checked_out.entry_id` reports the landing, which may
+  differ from the ask. The unknown-entry immediate error is
+  unchanged (§5).
+- **2026-09 (no bump — message-text semantics, no wire shape)** —
+  manual skill invocation: a message may carry the invocation tag
+  `<skill name="…"/>`; the backend expands at the message door,
+  appending each resolvable tag's skill body after the message (the
+  `skill` tool's result format, frontmatter stripped; tags stay in
+  place as anchors). Unresolvable tags pass through untouched —
+  messages are never rejected for them. No arguments; the bare
+  leading `/name` shorthand is not recognized. See §5.

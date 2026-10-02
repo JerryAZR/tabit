@@ -57,7 +57,7 @@ reason = "Special device files are safe to write to"
 [[permissions.write.overrides]]
 path = ["{{HOME}}/**"]
 action = "ask"
-reason = "Writing to home directory requires confirmation"
+reason = "Writing outside working directory requires confirmation"
 
 [[permissions.write.overrides]]
 path = ["{{CWD}}/**", "{{TMPDIR}}/**", "/tmp/**"]

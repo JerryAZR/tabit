@@ -15,47 +15,150 @@ Positioning (owner ruling 2026-09): tabit is a **study/research project in
 agent architecture, not a pi competitor**. pi is the feature reference and
 survey source, never the target — don't chase parity for its own sake, and
 don't add machinery because pi has it. The reasons to exist: the native Rust
-stack, the egui GUI as a first-class frontend, planned in-process subagents,
-and a design we fully own.
+stack, the frozen-wire node model every tabit process shares (frontends,
+subagents, and extensions are all nodes over one substrate), the TUI-first
+frontend track, and a design we fully own.
+
+## The node model (2026-09 ruling)
+
+Every tabit process is a **node** with one bidirectional interface:
+it serves the process that spawned it over a frozen pipe, and may
+spawn nodes that serve it. A subagent is a node, a frontend is a
+node, an extension is a node — the vocabulary is shared, the
+mechanisms are shared. Process management is a tree (spawn,
+ownership, lifecycle — the spawner decides); **dataflow is a net**
+over those edges: a node's events fan to all its subscribers, never
+"the one and only frontend"; commands arrive from any link; asks
+are answered by id from any channel — first arrival wins, late
+answers are tolerated no-ops. **Mechanisms shared between core and
+the SDK live in `tabit-wire` — the one crate below both, and the
+only home for them** (`asks.rs` — the one pending-answer registry
+every node instantiates; `client.rs` — the one child-management
+mechanism; `process.rs` — the child substrate). Core never depends
+on `tabit-ext-sdk`: the SDK is the guest authoring library, and
+anything the host needs from it is node-mechanics that belongs in
+the wire.
+
+**Child management is one mechanism with two policies.** A node's
+child frames arrive through the shared client's pump and fan to
+local consumers and upstream relay, with the settle fold watching
+the same stream — all of it `tabit-wire`'s `ChildHandle` (pump,
+tap, fold). Core's bridge is the fixed policy (learn + relay
+always on; the fold consumes the terminal, most frames ignored);
+the SDK's wrapper is the general policy (registered handlers via
+the shared router; relay opt-in — the SDK's "frontend" is
+its parent node). What differs between the two drivers is policy,
+never mechanism.
 
 Current workspace layout:
 
-- `crates/rig-core` — provider API clients, streaming, tools (providers kept:
+- `crates/tabit-providers` — provider API clients, streaming, tools (providers kept:
   **anthropic + openai** + the shared openai-compatible engine in
   `providers/internal`)
-- `crates/rig-agent` — agent loop / runtime, plus the host-service
+- `crates/tabit-engine` — agent loop / runtime, plus the host-service
   capabilities (`tool/services.rs`: `HostServices` — the extension
   envelope's ask + `model_prompt`, carried by contexts like
   `UserInteraction`)
-- `crates/rig-derive` — `#[rig_tool]` proc macros
-- `crates/rig` — facade crate re-exporting the three above
-- `crates/tabit-protocol` — the frontend protocol vocabulary (commands,
-  stamped events, handshake frames; `FRONTEND.md` is the contract)
+- `crates/tabit-derive` — `#[rig_tool]` proc macros
+- `crates/tabit-rig` — facade crate re-exporting the three above
+- `crates/tabit-protocol` — the shared vocabulary crate (commands,
+  stamped events, handshake frames; `FRONTEND.md` is the contract),
+  plus `points` — the hook-point declarations (the per-point ruling,
+  2026-09: each point names its wire name, its answer type, and its
+  neutral; the SDK and the host serialize the same types, no
+  hand-kept wire mirror)
 - `crates/tabit-config` — provider/model configuration plus the
   settings layers (`settings.toml`: the extension disable list —
   packages mount by default; the built-in gate opt-out
   (`[gate] enabled = false`) — the gate mounts by default; user +
-  workspace union, `$TABIT_SETTINGS` replaces the user file; see
-  `ROADMAP.md`)
+  workspace union, `$TABIT_SETTINGS` replaces the user file; the
+  same replace pattern for providers: `$TABIT_CONFIG` replaces the
+  home `providers.toml` (set but missing is an error, never a
+  fallthrough), `$TABIT_CONFIG_EXTRA` appends one more candidate;
+  see `ROADMAP.md`)
 - `crates/tabit-log` — the durable-conversation layer between
   providers and agents: the session log (the entry vocabulary and
   tree, format-versioned), the write-behind writer, the parser, the
   context manager (the resident tree + the model-facing history
   view), the delta-token regime compaction reads — engine-free,
-  consumed by rig-agent and tabit-session
+  consumed by tabit-engine and tabit-session
+- `crates/tabit-wire` — the frozen wire's client role and the node
+  runtime every tabit process is (routing layer + functional layer,
+  the 2026-09 architecture): `node.rs` is the node — the three
+  tables and their one law each (events by kind and locality + the
+  learning table, commands by learning table or by type, asks by id
+  — `Channel` the routable primitive: the in-process layer, the
+  process's stdio, a spawned node's stdio; every subscription
+  states its locality — Local, Remote, or Both (owner ruling
+  2026-09-25): locality is a fact of the dispatch site (the node's
+  two doors, `emit` and `intake`), never a frame field, so a pipe's
+  crossing policy is plain subscription config — the
+  additional-receiver override this replaces was the workaround the
+  origin-blind fan forced); verbatim crossing is channel
+  machinery alone — the forwarding law: a callback forwarding an
+  ask re-stamps it (the arriving ask consumed at this node, a new
+  ask minted, the linkage held in the callback, never on the wire);
+  identity is the CHANNEL's property, never a subscription
+  parameter (owner ruling 2026-09-25: a plain callback is code, not
+  a participant — nothing dies with it, no dedup keys on it; the
+  death sweep and the one-participant-one-kind dedup are the channel
+  flavor's, keyed on the channel's owner); `router.rs` is THE
+  event router (register by kind or wildcard, dispatch, retract by
+  owner — each callback owns its own dispatch); `asks.rs`
+  is THE pending-question registry (one entry per round-trip: an
+  owner key plus a delivery closure over answered-or-orphaned —
+  answers are races, the first wins; an entry owing no settle
+  obligation closes on its answer — the answer is its settle);
+  `client.rs` spawns a tabit-core child
+  in `--json` role (the child-role CLI knobs as one builder; the
+  bounded boot — the report's version check at the report, the
+  first stamped announce under one bound; `on_node` is THE lane
+  mount — the client's own pump arms the child's lane at the
+  report and intakes every stamped arrival through it, one mount
+  for the bridge and the SDK's owned children) and
+  speaks the frontend protocol to it — the bounded report wait, the
+  frame pump, the reaper; `process.rs` (moved
+  from tabit-ext) is the substrate every spawning site shares
+  (tree-kill wrapping, the stderr ring, the grace reaper,
+  `spawn_line_writer` — THE pipe pump: one ordered queue, one
+  exclusive writer, every tokio pipe site's outbound lines).
+  Consumers:
+  the subagent bridge, the extension host, and the extension SDK;
+  the wire's serve side is the session host's functional layer on
+  its node (`tabit-session`'s edge + endpoint)
 - `crates/tabit-session` — persistent sessions over the outer loop (native
   only: filesystem-backed; the rig crates keep wasm support), the
   compaction box (`src/compaction/`: the pass machinery, the doors, the
   dials file — every threshold and prompt text as data), the
   skills module (`src/skills.rs`: four-source discovery, the prompt
-  catalog, the confined `skill` tool), plus the
+  catalog, the confined `skill` tool, plus manual invocation — the
+  `<skill name=.../>` tag in a user message appends the skill body at
+  the mailbox door, the one funnel every message enters; FRONTEND.md
+  is the contract), plus the
+  serve side of the frozen wire as a functional layer on the node
+  (`src/endpoint.rs`: the session host — workers route by the node's
+  learning table, lifecycle by type, interaction cards by the ask
+  table; `src/edge.rs`: the json stdio edge — the report written
+  synchronously before any task starts, one feed, the writer ending
+  on the stream's end token), the
   subagent framework (`subagent.rs`: `SpawnContext` — spawn/drive a
-  subprocess child, the one substrate; `subprocess.rs`: the bridge —
-  self-spawn in `--json` child role with the OS-enforced cwd and the
-  ruled abort shape; `routing.rs`: the ChildRouter — route-all line
-  forwarding, learned tables, abort's subtree broadcast; the
-  `subagent` tool is the opinionated example shape extensions
-  override — ROADMAP item 5)
+  subprocess child, the one substrate; the tool policy crossing
+  (owner ruling 2026-09-27): the spawner forwards allow/deny lists —
+  the blacklist extended with `subagent`/`followup`, the recursion
+  guard, never a baked-in role check — and the child filters its own
+  toolset (include/exclude-if-it-exists; an allow matching nothing
+  is a legal tool-less child); `subprocess.rs`: the bridge —
+  the session adapter over `tabit-wire`'s client (the child's lane
+  on the node: stamped arrivals intake — one act serves the fan,
+  the grandchild learning, and the ask route home; the exit
+  retracts the lane), the drive fold, the ruled abort shape; the
+  `subagent` tool is the
+  opinionated example shape extensions override) plus the subagent
+  pool (`subagent_pool.rs`: completed children park under petname
+  ids, the `followup` tool addresses them by id over the same pipe —
+  one session's memory continues; the pool is session-scoped and
+  ages entries at the parent's turn boundary, five unused turns,
+  never wall-clock)
 - `crates/tabit-tools` — coding tools (`read`, `write`, `edit`, `bash`
   — chosen at registration: verified Git Bash, else PowerShell on
   Windows) as
@@ -65,54 +168,114 @@ Current workspace layout:
 - `crates/tabit-gate` — the default permission gate: pi-sanity's
   heuristic policy ported verbatim (static checks, allow-when-unsure —
   a careless-mistake catcher, never a security boundary; brush-parser
-  replaces the unbash parser) as a pure core crate. The `AgentHook`
+  replaces the unbash parser) as a pure core crate. One rule book per
+  process, loaded at start, and the book carries the world it was
+  expanded against (`SanityConfig::context`, owner ruling 2026-09-27):
+  a check is normalize-then-match — no per-check context construction,
+  no repo probing (`{{REPO}}` falls back to cwd; the TS check-time git
+  probe is the port's deliberate deletion). The world is the process
+  cwd for every session a node hosts — resume included (owner ruling
+  2026-09-27: the session header records no cwd since log format 6.2;
+  a resumed session adopts the caller's cwd, so a moved project
+  resumes where it now lives and gate, skills, preamble, and tools
+  share one world). The `AgentHook`
   member, the `native:select_one` ask, and the settings.toml
-  `[gate] enabled = false` opt-out assemble in the `tabit-core`
-  binary — `tabit-session` stays a mechanism with no policy
-- `crates/tabit-ext-install` — extension installation (ROADMAP item
-  9, task 6): npm (plain registry HTTP)/git/path sources,
+  `[gate] enabled = false` opt-out assemble in `tabit-app` (the
+  composition root; extracted from the binary 2026-09) —
+  `tabit-session` stays a mechanism with no policy
+- `crates/tabit-ext-install` — extension installation (EXTENSIONS.md
+  is the record): npm (plain registry HTTP)/git/path sources,
   stage-validate-place installs, name-only `requires` pulls, list,
   and the refusal uninstall — the directory is the single truth (no
   registry, no lockfile)
-- `crates/tabit-ext` — the extension host (ROADMAP item 9): manifest
+- `crates/tabit-ext` — the extension host (the manifest's
+  `disables` list names core tools to remove — the names join the
+  `--without` deny list at the assembly, nothing separate):
+  manifest
   discovery (`tabit.json` under the extensions root), the frozen
-  JSONL extension pipe (initialize/ack, the tool lane, the
-  interaction lift), the supervisor (launch over the
+  JSONL extension pipe (the extension's self-report first, the
+  host's facts after it, the tool lane, the flat
+  grammar), the supervisor (launch over the
   disable-filtered scan, handshake, supervise,
   mark-dead-and-report — no mid-run respawn; the tool-call dispatch
-  surface for proxy tools); the shared
-  child-process substrate (tree-kill wrapping, the stderr ring, the
-  command writer, the grace reaper — `src/process.rs`) lives here and
-  serves the subagent bridge too; the hook lane forwards
+  surface for proxy tools); the child-process substrate it spawns on
+  lives in `tabit-wire` (moved 2026-09 — every spawning site shares
+  it); the hook lane forwards
   engine hook events over the same pipe (policy fails open on a dead
   extension)
 - `crates/tabit-ext-sdk` — the extension SDK, the guest side of the
-  same pipe: the dispatcher owning the loop (ack, tool-call dispatch
-  to bodies, result serialization, ask lifts) so authors write tool
-  bodies only; hand-rolled frames sharing no code with the host —
-  the protocol doc's reference consumer. Ships the example
+  same pipe: authors register tools, consultations, and watched event
+  kinds; the SDK is the guest's functional layer over its node (the
+  2026-09 port: the private dispatcher and local ask registries are
+  gone — the loop is the dialect's parse cascade into the node's
+  intake, arriving calls and hooks are held on the ask table and
+  answered through it, watches are subscriptions, the author's
+  ask/emit/command ride the node's ask, emission fan, and outbound
+  command; owned children are lanes — the transit entry is the
+  relay, the card surface is one declared policy per mode (owner
+  ruling, second round: the lift and its settle are one unit —
+  the shipped lift subscribes the stdio to the card PAIR at the
+  remote door, the ingress law keeping a host-mirrored card from
+  bouncing back and tripping the mint law; the answerer mode hears
+  the pair and crosses nothing), death sweeps
+  the child's everything; the stdio subscribes every kind from the
+  local door — own speech crosses, arrivals do not) — so the author
+  surface stays
+  purely functional: one context per handler (command, emit, ask,
+  complete, the cancelled poll). The SDK is async (owner ruling
+  2026-09): bodies are futures, asks await their promises natively,
+  cancellation is the wire's own CancellationToken — the shared
+  recipe's leash primitive (the host's Cancel frame fires the
+  invocation's token, `Ctx::cancelled` polls it, owned children
+  ride it as their abort leash — the same type the session's tools
+  pass, nothing bridged), every invocation is its own task, and the
+  pipe's one writer is the wire's line pump. Shares
+  the host's wire types (the 2026-09 sharing ruling: one wire, one
+  set of shapes; EXTENSIONS.md stays the contract for other
+  languages, the conformance tests keep crate and docs honest).
+  Ships the example
   extensions (`echo-ext`, `shadow-ext`, the clash pair, `lmstudio-ext` —
   the provider relay speaking LM Studio's native REST API behind a
   `providers.toml` fragment; `autotitle-ext` — the `model_prompt`
-  attribution demo) as its bins — `gate-ext` was deleted 2026-09
+  attribution demo, `child-ext` — the owned-children demo) as its
+  bins — `gate-ext` was deleted 2026-09
   (the gate returns as the built-in `tabit-gate`; examples will ride
   the extension SDK when it is developed)
-- `crates/tabit-gui` — the egui frontend (`tabit-gui` binary; spawns
-  a `tabit-core --json` child, resolved as its sibling binary or via
-  `TABIT_CORE_BIN`; reducer/view contract in ROADMAP item 7).
-  Its `CHANGELOG.md` is the frontend protocol's changelog —
-  every `PROTOCOL_VERSION` bump or frontend-observable change (wire
-  or behavior) gets an entry in the same commit; FRONTEND.md stays
-  the frozen mechanics contract, TOOLS.md its companion for the
-  built-in tool `details` shapes and interaction templates)
+- `crates/tabit-app` — the composition root as a library: the
+  opinionated assembly an embedder mounts to build their own agent
+  app over the stack (extracted from the binary 2026-09 so the
+  stack is reusable above Session without copying glue).
+  `AppOptions` is the library's input shape (the assembly fields
+  only — the binary converts from argv); the surface is
+  `core_tools` (the default toolset), `world_registry` +
+  `mount_world` (the extension world's two halves), the gate hook
+  (`PermissionGate`), `assemble`/`host_data` (the session builders
+  behind the host), `host_node` (the process's one net),
+  `install_root`, and `serve_json_stdio` — the frozen wire's stdio
+  serving as one never-returning call (the binary's `--json` arm,
+  and an embedder's child-role entry: dispatch it in your main and
+  the subagent self-spawn works for your binary too). EMBEDDING.md
+  is the embedder contract; the crate's two examples are its tiers,
+  compile-pinned. tabit-session stays mechanism with no policy —
+  this crate is the policy's linkable home
 - `crates/tabit-core` — the backend binary (`tabit-core`): headless,
   no UI and no frontend references — frontends spawn it, never the
-  other way. Print mode (`-p <PROMPT>`, `--rewind <n>`) and JSON
-  mode (`--json` — the stdio protocol edge) over the session host
-  (create / `--continue` / `--session <path>` / `--list`). The
+  other way. argv in (`cli.rs` converts to `tabit_app::AppOptions`),
+  two I/O arms out. Print mode (`-p <PROMPT>`, `--rewind <n>`) and
+  JSON mode (`--json` — the stdio protocol edge) over the session
+  host (create / `--continue` / `--session <path>` / `--list`); both
+  session modes ride tabit-app's same extension world (owner ruling
+  2026-09-27: `world_registry`/`mount_world` — an
+  installed package exists in every mode; no mode-specific
+  surprises), differing only at the I/O arm: print reads no wire
+  frames (Esc/card answers on plain stdin) and stdout carries
+  exactly the response text — one buffered copy printed at the run
+  terminal, every other rendering on stderr — while the child-role
+  flags (`--parent`, `--parent-call`, `--ephemeral`) cross to print
+  too (a one-shot print child is a natural spawn shape). The
   `tabit` name is reserved for the frontend that ships primary
-  (2026-09: the TUI candidates outpace the GUI; no in-repo binary
-  carries it yet)
+  (2026-09: the egui GUI deleted, the TUI candidates lead; no
+  in-repo binary carries the name yet)
 
 ## Design rules
 
@@ -156,8 +319,8 @@ Current workspace layout:
 8. **Canonical surfaces.** Tabit's tools are contextual
    `#[rig_tool]`s (they take `#[rig(context)] &mut ToolContext` —
    the session cwd, the run token, capabilities); `PortableTool`
-   remains rig-core's surface for non-contextual tools. Erasure into
-   `DynamicTool` goes through `rig_agent::tool::dynamic_contextual`
+   remains tabit-providers's surface for non-contextual tools. Erasure into
+   `DynamicTool` goes through `tabit_engine::tool::dynamic_contextual`
    (one implementation). OpenAI code targets
    the Responses API; chat completions is the compat-gateway wire format.
    Tool-call arguments parse strictly — truncated JSON is an error, never a
@@ -173,7 +336,7 @@ Current workspace layout:
    work" with a dirty hack. Stop, then summarize for the user: the goal,
    the problem, and why it is hard — and ask for a design discussion first.
 10. **All-MIT.** The GPL split existed only to admit the claurst TUI
-    harvest; that frontend is dead (see ROADMAP item 7), so nothing in the
+    harvest; that frontend is dead (ROADMAP's not-planned), so nothing in the
     workspace is GPL and nothing will be. Frontends stay leaf consumers of
     the protocol (dependencies run frontend → backend only) — architecture
     hygiene, not license law.
@@ -266,8 +429,8 @@ consistency, never design fit (see the gate bullet below).
   failing tests with panic blocks, compile errors) with cargo's own
   exit codes; `--gate` runs all three legs, and any extra args pass
   through to cargo test (e.g. `-p crate filter`, or
-  `--target-dir target-test` when the GUI holds a lock on
-  `target\debug`). Prefer it over hand-rolled `cargo test | grep`
+  `--target-dir target-test` when a running binary holds a lock
+  on `target\debug`). Prefer it over hand-rolled `cargo test | grep`
   pipelines.
 - Cassettes are byte-sensitive (LF endings enforced via `.gitattributes`).
 - CI rides the latest stable toolchain; keep the local one current
@@ -287,9 +450,15 @@ consistency, never design fit (see the gate bullet below).
 
 ## Not planned
 
+- The egui GUI: **deleted** (2026-09, owner ruling) — the paused
+  frontend's sync twin kept surfacing as the exception on every
+  review, so the tree is gone. The TUI candidates lead (ROADMAP's
+  frontend item); a future frontend that runs no tokio extracts a sync
+  core into `tabit-wire`'s client rather than growing a twin.
+
 - WebSocket streaming: **removed** — HTTP SSE only.
 - Companion crates (bedrock, gemini-grpc, vector stores, …), `discord-bot`,
-  `rmcp` (the rig-agent `rmcp` module is **kept, feature-gated, off by
+  `rmcp` (the tabit-engine `rmcp` module is **kept, feature-gated, off by
   default** — MCP is a bad protocol, but some services are only
   reachable through it; whether tabit ships an MCP client is a later
   decision, low priority).
@@ -300,6 +469,17 @@ consistency, never design fit (see the gate bullet below).
 - Vendor instruction files (CLAUDE.md etc.): **AGENTS.md only**.
 - Instruction-file directory walking: home (`~/.tabit/AGENTS.md` with a
   `~/.agents/AGENTS.md` fallback) and cwd only — no upward/child scans.
+- Dedicated search tools (grep/glob shapes): **not planned** — the
+  agent searches through `bash` with piping and filtering; no second
+  tool surface for what the shell already does (owner ruling, stated
+  multiple times, recorded here 2026-09-26 so it stops being
+  re-derived against reference agents' inventories).
 
 ## Open items for the owner
 
+(none — the skills_available session-level item landed 2026-09 with
+protocol v20: one discovery per session build, `skills_available`
+stamped with the session's stream and announced as each session
+becomes visible, frontends folding per stream; children are full
+session hosts, so a subagent in another directory announces and runs
+its own catalog; extension listings stay backend-level, display-only)

@@ -1,0 +1,621 @@
+//! The routing layer's real-pipe net: a stub node — the wire-level
+//! test double, a process running the node runtime with a trivial
+//! functional layer — spawned over real stdio, the same laws the
+//! in-process net (`src/node_tests.rs`) pins, now over pipes. The
+//! test binary re-execs itself in the child role: `TABIT_STUB_NODE`
+//! selects the stub test, every other test returns immediately in
+//! the child.
+
+#![cfg_attr(
+    test,
+    allow(
+        clippy::err_expect,
+        clippy::expect_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::panic_in_result_fn,
+        clippy::unreachable,
+        clippy::unwrap_used
+    )
+)]
+
+use std::io::{BufRead, Write};
+use std::process::{Command, Stdio};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
+
+use serde_json::{Value, json};
+use tabit_protocol::{EventFrame, SessionCommand, SessionEvent, StreamId};
+use tabit_wire::client::ChildSpec;
+use tabit_wire::client::Settlement;
+use tabit_wire::node::Locality;
+use tabit_wire::node::{Channel, Inbound, Node, parse_shared};
+
+fn stub_mode() -> bool {
+    std::env::var("TABIT_STUB_NODE").is_ok()
+}
+
+/// Poll until the check holds, bounded — pipe answers cross
+/// processes; the test must not hang on a silent one.
+fn wait_for(check: impl Fn() -> bool) -> bool {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline {
+        if check() {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    false
+}
+
+/// The stub node's role: run the node runtime over stdio with a
+/// trivial functional layer — announce the session at startup (the
+/// parent learns), answer every arriving ask (the promise
+/// round-trip's far end), and echo every session-addressed message
+/// (the learning walk's proof). EOF on stdin is the end.
+#[test]
+fn stub_node_role() {
+    if !stub_mode() {
+        return; // the parent side's run; only children take the role
+    }
+    let node = Arc::new(Node::new("stub"));
+
+    // Everything the stub emits relays upstream, one pipe out.
+    let to_parent = Channel::line("parent", {
+        let stdout = std::io::stdout();
+        move |line: &str| {
+            let mut handle = stdout.lock();
+            let _ = writeln!(handle, "{line}");
+            let _ = handle.flush();
+        }
+    });
+    node.subscribe_channel_all(Locality::Both, &to_parent);
+
+    // The layer: its mailbox is the learned route for the stub's own
+    // session (the startup emission teaches it), and a received
+    // message echoes as an event.
+    let self_channel: Arc<OnceLock<Channel>> = Arc::new(OnceLock::new());
+    let holder = self_channel.clone();
+    let echo_node = node.clone();
+    let layer = Channel::local(
+        "stub-layer",
+        move |_frame: &EventFrame| {},
+        move |command: &SessionCommand| {
+            let SessionCommand::Message { session, text } = command else {
+                return;
+            };
+            if let Some(layer) = holder.get() {
+                echo_node.emit(
+                    layer,
+                    EventFrame {
+                        stream: Some(StreamId::new(session.clone())),
+                        origin: None,
+                        ttl: None,
+                        event: SessionEvent::error_session(format!("stub got: {text}")),
+                    },
+                );
+            }
+        },
+    );
+    let _ = self_channel.set(layer.clone());
+
+    // The auto-answer: every arriving ask is answered.
+    let answer_node = node.clone();
+    let answer_upstream = to_parent.clone();
+    node.subscribe(
+        "interaction_request",
+        Locality::Both,
+        move |frame: &EventFrame| {
+            let SessionEvent::InteractionRequest { id, .. } = &frame.event else {
+                return;
+            };
+            answer_node.intake(
+                &answer_upstream,
+                Inbound::Command(SessionCommand::InteractionResponse {
+                    session: None,
+                    id: id.clone(),
+                    payload: json!({"text": "from the stub"}),
+                }),
+            );
+        },
+    );
+
+    // Startup announcement: the parent learns the stub's session.
+    node.emit(
+        &layer,
+        EventFrame {
+            stream: Some(StreamId::new("stub-sess")),
+            origin: None,
+            ttl: None,
+            event: SessionEvent::error_session("stub session opened".to_string()),
+        },
+    );
+
+    // The pump: stdin lines in, through the intake, until EOF.
+    let stdin = std::io::stdin();
+    for line in stdin.lock().lines() {
+        let Ok(line) = line else { break };
+        if let Some(inbound) = parse_shared(&line) {
+            node.intake(&to_parent, inbound);
+        }
+    }
+}
+
+/// The parent side of the real-pipe net: a node, the spawned stub,
+/// and the recorder of everything the parent hears. Dropping it
+/// reaps the stub.
+struct PipeNet {
+    parent: Arc<Node>,
+    saw: Arc<Mutex<Vec<String>>>,
+    child: std::process::Child,
+}
+
+impl Drop for PipeNet {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+fn spawn_stub() -> PipeNet {
+    let parent = Arc::new(Node::new("parent"));
+    let saw: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+
+    // The recorder: everything the parent hears, as its wire line.
+    let sink = saw.clone();
+    parent.subscribe_all(Locality::Both, move |frame: &EventFrame| {
+        sink.lock()
+            .expect("test lock")
+            .push(tabit_protocol::to_wire_line(frame));
+    });
+
+    let mut child = Command::new(std::env::current_exe().expect("this binary"))
+        .env("TABIT_STUB_NODE", "1")
+        .args(["--exact", "stub_node_role", "--nocapture"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("the stub spawns");
+    let stdin = child.stdin.take().expect("the stub's stdin");
+    let stdout = child.stdout.take().expect("the stub's stdout");
+
+    // The parent's route to the stub: shared-grammar lines down its
+    // stdin. Downstream deliveries are subscription-driven — the
+    // stub "watches" the ask kind — while answers and commands
+    // route by the tables (route-all downstream would echo-loop:
+    // the stub relays everything back up).
+    let stub_at_parent = {
+        let stdin = Mutex::new(stdin);
+        Channel::line("stub", move |line: &str| {
+            let mut handle = stdin.lock().expect("stdin");
+            let _ = writeln!(handle, "{line}");
+            let _ = handle.flush();
+        })
+    };
+    parent.subscribe_channel("interaction_request", Locality::Both, &stub_at_parent);
+
+    // The reader: the stub's stdout lines arrive through the intake.
+    let reader_node = parent.clone();
+    let reader_channel = stub_at_parent.clone();
+    std::thread::spawn(move || {
+        let stdin = std::io::BufReader::new(stdout);
+        for line in stdin.lines() {
+            let Ok(line) = line else { break };
+            if let Some(inbound) = parse_shared(&line) {
+                reader_node.intake(&reader_channel, inbound);
+            }
+        }
+    });
+
+    PipeNet { parent, saw, child }
+}
+
+/// Laws 1, 2, 4, and 5 over real pipes: the stub's startup emission
+/// arrives attributed and teaches the parent; a session-addressed
+/// command walks to the stub and its echo walks back; an ask
+/// round-trips to the stub's auto-answer and the promise resolves.
+#[test]
+fn the_net_laws_hold_over_real_pipes() {
+    if stub_mode() {
+        return; // the child's run of this same test
+    }
+    let net = spawn_stub();
+
+    // Law 1: the startup announcement arrived. It is stamped — so it
+    // crosses verbatim (attribution is for unstamped emissions, the
+    // in-process net's law).
+    assert!(
+        wait_for(|| {
+            net.saw
+                .lock()
+                .expect("test lock")
+                .iter()
+                .any(|seen| seen.contains("stub session opened") && seen.contains("stub-sess"))
+        }),
+        "the startup emission arrived: {:?}",
+        net.saw.lock().expect("test lock")
+    );
+
+    // Law 2's walk: a message to the stub's learned session reaches
+    // the stub, and its echo event walks back up.
+    net.parent.intake(
+        &Channel::local("frontend", |_| {}, |_| {}),
+        Inbound::Command(SessionCommand::Message {
+            session: "stub-sess".to_string(),
+            text: "over the pipe".to_string(),
+        }),
+    );
+    assert!(
+        wait_for(|| {
+            net.saw
+                .lock()
+                .expect("test lock")
+                .iter()
+                .any(|seen| seen.contains("stub got: over the pipe"))
+        }),
+        "the command walked down and the echo walked up: {:?}",
+        net.saw.lock().expect("test lock")
+    );
+
+    // Laws 4 and 5: the ask crosses the pipe; the stub answers; the
+    // promise resolves; the settle announces.
+    let awaiter = net.parent.ask(
+        "frontend",
+        Some(&StreamId::new("stub-sess")),
+        "native:select_any",
+        json!({"body": "asked over a pipe"}),
+    );
+    let answered = Arc::new(Mutex::new(None::<Value>));
+    let sink = answered.clone();
+    std::thread::spawn(move || {
+        *sink.lock().expect("test lock") = awaiter.blocking_recv().ok();
+    });
+    assert!(
+        wait_for(|| {
+            *answered.lock().expect("test lock") == Some(json!({"text": "from the stub"}))
+        }),
+        "the ask round-tripped the pipe: {:?} / {:?}",
+        answered.lock().expect("test lock"),
+        net.saw.lock().expect("test lock")
+    );
+    assert!(
+        wait_for(|| net
+            .saw
+            .lock()
+            .expect("test lock")
+            .iter()
+            .any(|seen| seen.contains("interaction_settled"))),
+        "the settle announced: {:?}",
+        net.saw.lock().expect("test lock")
+    );
+
+    // Loop liveness: the mirror (ask kind down) against the stub's
+    // relay-everything-up must not echo — the ingress law holds it.
+    // One ask crosses the pipe exactly once each way, and stays that
+    // way (the first review's suite was green with a livelock
+    // hiding in exactly this wiring).
+    let requests = || {
+        net.saw
+            .lock()
+            .expect("test lock")
+            .iter()
+            .filter(|seen| seen.contains("interaction_request"))
+            .count()
+    };
+    std::thread::sleep(Duration::from_millis(150));
+    let first_count = requests();
+    std::thread::sleep(Duration::from_millis(150));
+    assert_eq!(
+        requests(),
+        first_count,
+        "no echo growth: the net is stable after the settle"
+    );
+}
+
+/// The built example's path — a sibling of this test binary under
+/// the active target dir (robust to `--target-dir` overrides).
+/// Panics when the example was not built: a silent skip once let
+/// whole suites pass unbuilt (the extension suites' convention —
+/// "workspace binary not built — run the workspace gate").
+fn stub_exe(example: &str) -> std::path::PathBuf {
+    let exe = std::env::current_exe().expect("the test binary's path");
+    let name = if cfg!(windows) {
+        format!("{example}.exe")
+    } else {
+        example.to_string()
+    };
+    let examples = exe
+        .parent()
+        .and_then(|parent| parent.parent())
+        .expect("the deps dir beside the test binary")
+        .join("examples");
+    let stub = examples.join(name);
+    assert!(
+        stub.is_file(),
+        "workspace example `{example}` not built — run the workspace suite"
+    );
+    stub
+}
+
+fn stub_child_exe() -> std::path::PathBuf {
+    stub_exe("stub_child")
+}
+
+/// The client's mount invariant, deterministically exposed: a child
+/// whose first stamped frame shares the pipe read with the handshake
+/// ack must still see that frame reach the node's fan. The
+/// caller-assembled mount this test once reproduced (a OnceLock lane
+/// set after `spawn` returned) dropped the burst — the pump read and
+/// tapped it inside the same buffer the ack came in, before the
+/// caller's set could run, three runs out of three. The fix is the
+/// mount's home: [`ChildSpec::on_node`] arms the lane inside the
+/// pump at the handshake's resolution, so nothing can beat it.
+#[test]
+fn the_childs_burst_frame_reaches_the_mounted_lane() {
+    let stub = stub_child_exe();
+    let parent: Arc<Node> = Arc::new(Node::new("parent"));
+    let saw: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let sink = saw.clone();
+    parent.subscribe_all(Locality::Both, move |frame: &EventFrame| {
+        sink.lock().expect("test lock").push(format!(
+            "{}@{}",
+            frame.event.tag(),
+            frame
+                .stream
+                .as_ref()
+                .map(|s| s.as_str())
+                .unwrap_or_default()
+        ));
+    });
+
+    let spec = ChildSpec::new(stub, std::env::temp_dir()).on_node(parent.clone());
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("the test runtime");
+    // Everything inside one block_on: the current-thread runtime must
+    // stay driven for the pump to poll while the test waits.
+    let (reached, report) = runtime.block_on(async move {
+        let mut handle = spec.spawn().await.expect("spawn");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let reached = loop {
+            if saw
+                .lock()
+                .expect("test lock")
+                .iter()
+                .any(|seen| seen.contains("error") && seen.ends_with("stub-sess"))
+            {
+                break true;
+            }
+            if Instant::now() > deadline {
+                break false;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        };
+        handle.close();
+        let _ = handle.wait_exit().await;
+        (reached, saw.lock().expect("test lock").clone())
+    });
+    assert!(
+        reached,
+        "the burst frame reached the node's fan: {report:?}"
+    );
+}
+
+/// The report model's spawner-side check (owner ruling 2026-09-25):
+/// the child's first line is its report; a version the spawner does
+/// not speak is a kill — the error names both versions, and nothing
+/// of the child's (mismatched) traffic reaches the net.
+#[test]
+fn a_mismatched_report_is_a_kill() {
+    let stub = stub_exe("stub_mismatch");
+    let parent: Arc<Node> = Arc::new(Node::new("parent"));
+    let saw: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let sink = saw.clone();
+    parent.subscribe_all(Locality::Both, move |frame: &EventFrame| {
+        sink.lock()
+            .expect("test lock")
+            .push(frame.event.tag().to_string());
+    });
+    let spec = ChildSpec::new(stub, std::env::temp_dir()).on_node(parent.clone());
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("the test runtime");
+    let error = runtime.block_on(async move {
+        match spec.spawn().await {
+            Ok(mut handle) => {
+                handle.close();
+                let _ = handle.wait_exit().await;
+                panic!("a mismatched child is a kill, not a live handle");
+            }
+            Err(error) => error,
+        }
+    });
+    assert!(
+        error.contains("reported protocol version"),
+        "the error names the version: {error}"
+    );
+    assert!(
+        saw.lock().expect("test lock").is_empty(),
+        "none of the mismatched child's traffic reached the net"
+    );
+}
+
+/// The settle fold's one-shot disposition, driven over a real pipe:
+/// the task crosses, the run's stamped events and terminal collect
+/// into the settlement, and the completed terminal CLOSES the child
+/// (the stub exits at the stdin EOF the close produces).
+#[test]
+fn the_settle_fold_collects_the_run_and_closes_at_completed() {
+    let stub = stub_exe("stub_settle");
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("the test runtime");
+    let (settlement, crash) = runtime.block_on(async move {
+        let mut handle = ChildSpec::new(stub, std::env::temp_dir())
+            .spawn()
+            .await
+            .expect("spawn");
+        let settlement = handle.run("the task".to_string(), None).await;
+        handle.wait_exit().await;
+        (settlement, handle.crash_report())
+    });
+    let Settlement::Completed { output, events } = settlement else {
+        panic!("the stub's run finishes: {settlement:?}");
+    };
+    assert!(output.contains("done: the task"), "output: {output}");
+    // The announce burst + two steps + the terminal itself.
+    assert_eq!(events.len(), 4, "the fold collected the run: {events:?}");
+    assert!(
+        matches!(events.last(), Some(SessionEvent::RunFinished { output, .. }) if output.contains("done: the task")),
+        "the terminal is the last collected event: {events:?}"
+    );
+    assert!(
+        crash.contains("exit code"),
+        "the completed terminal closed the child: {crash}"
+    );
+}
+
+/// The keep-open disposition (the subagent pool's): the completed
+/// terminal returns WITHOUT closing stdin — the same child serves a
+/// second task over the same pipe — while a failure terminal closes
+/// as usual, even under `settle_open`.
+#[test]
+fn settle_open_parks_a_completed_child_and_closes_a_failed_one() {
+    let stub = stub_exe("stub_settle");
+    let bound = Duration::from_secs(5);
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("the test runtime");
+    let (first, second, failed, crash) = runtime.block_on(async move {
+        let mut handle = ChildSpec::new(stub, std::env::temp_dir())
+            .spawn()
+            .await
+            .expect("spawn");
+        handle.prompt("one".to_string());
+        let first = tokio::time::timeout(bound, handle.settle_open(None))
+            .await
+            .expect("the first settle_open is bounded");
+        // The park proof: the SAME pipe serves the next task.
+        handle.prompt("two".to_string());
+        let second = tokio::time::timeout(bound, handle.settle_open(None))
+            .await
+            .expect("the second settle_open is bounded");
+        handle.prompt("fail".to_string());
+        let failed = tokio::time::timeout(bound, handle.settle_open(None))
+            .await
+            .expect("the failing settle_open is bounded");
+        handle.wait_exit().await;
+        (first, second, failed, handle.crash_report())
+    });
+    let Settlement::Completed { output, .. } = first else {
+        panic!("the first run completes: {first:?}");
+    };
+    assert!(output.contains("done: one"), "output: {output}");
+    let Settlement::Completed { output, .. } = second else {
+        panic!("the parked child served the second task over the same pipe: {second:?}");
+    };
+    assert!(output.contains("done: two"), "output: {output}");
+    let Settlement::FailedWith { message, .. } = failed else {
+        panic!("the failure terminal: {failed:?}");
+    };
+    assert!(message.contains("boom at: fail"), "message: {message}");
+    assert!(
+        crash.contains("exit code"),
+        "a failed run closes even under settle_open: {crash}"
+    );
+}
+
+/// The crash-synthesis path: a child that dies mid-run — no terminal
+/// crosses the pipe — settles as `Crashed` carrying a synthesized
+/// `run_failed` (the crash report: exit status and stderr tail)
+/// appended to the events collected so far, shaped exactly as the
+/// drivers already keep.
+#[test]
+fn a_child_dying_mid_run_settles_as_a_synthesized_crash() {
+    let stub = stub_exe("stub_settle");
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("the test runtime");
+    let (settlement, crash) = runtime.block_on(async move {
+        let mut handle = ChildSpec::new(stub, std::env::temp_dir())
+            .spawn()
+            .await
+            .expect("spawn");
+        let settlement = handle.run("die".to_string(), None).await;
+        handle.wait_exit().await;
+        (settlement, handle.crash_report())
+    });
+    let Settlement::Crashed { events } = settlement else {
+        panic!("the dying child settles as a crash: {settlement:?}");
+    };
+    // The announce burst + the one step + the synthesized terminal.
+    assert_eq!(
+        events.len(),
+        3,
+        "the fold collected up to the death: {events:?}"
+    );
+    assert!(
+        matches!(events.last(), Some(SessionEvent::RunFailed { message, kind, .. })
+            if message.contains("exit code") && kind == "engine"),
+        "the synthesized terminal carries the crash report: {events:?}"
+    );
+    assert!(
+        crash.contains("exit code"),
+        "the death itself is recorded: {crash}"
+    );
+}
+
+/// The abort leash: cancelling mid-run forwards `Abort`, closes
+/// stdin, and settles `Aborted` immediately — a courtesy with a
+/// deadline, never a wait on the child's cooperation. The parked
+/// child ends at the stdin EOF the close produces.
+#[test]
+fn cancelling_the_leash_settles_aborted_without_waiting_on_the_child() {
+    use tokio_util::sync::CancellationToken;
+
+    let stub = stub_exe("stub_settle");
+    let bound = Duration::from_secs(5);
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("the test runtime");
+    let (settlement, crash) = runtime.block_on(async move {
+        let mut handle = ChildSpec::new(stub, std::env::temp_dir())
+            .spawn()
+            .await
+            .expect("spawn");
+        handle.prompt("hang".to_string());
+        let token = CancellationToken::new();
+        let leash = token.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            leash.cancel();
+        });
+        let settlement = tokio::time::timeout(bound, handle.settle(Some(token)))
+            .await
+            .expect("the abort settles within the bound");
+        handle.wait_exit().await;
+        (settlement, handle.crash_report())
+    });
+    let Settlement::Aborted { output, events } = settlement else {
+        panic!("the cancelled run settles aborted: {settlement:?}");
+    };
+    assert!(
+        output.is_empty(),
+        "the courtesy abort carries no output: {output}"
+    );
+    assert!(
+        !events.is_empty(),
+        "what crossed before the cancel is kept: {events:?}"
+    );
+    assert!(
+        crash.contains("exit code"),
+        "the parked child ended at the EOF the close produced: {crash}"
+    );
+}

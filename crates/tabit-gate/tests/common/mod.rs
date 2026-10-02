@@ -78,6 +78,9 @@ pub fn empty_config() -> SanityConfig {
         tools: ToolsConfig {
             rules: HashMap::new(),
         },
+        // A hand-built config's world: the standalone process-cwd
+        // context (the same one the loader would bake).
+        context: tabit_gate::path_permission::default_context(),
         ask_timeout: None,
     }
 }
