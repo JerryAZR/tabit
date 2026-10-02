@@ -1,8 +1,9 @@
 /**
- * A protocol-faithful mock `tabit --json` for offline verification: same
- * handshake, same event vocabulary, same ordering rules (steer
- * boundaries, abort-before-terminal discards, interaction closing at run
- * terminals). Spoken as a child process (`bun src/mock-backend.ts
+ * A protocol-faithful mock `tabit-core --json` for offline verification:
+ * same report model (v19 — the backend speaks first, there is no
+ * initialize handshake), same event vocabulary, same ordering rules (steer
+ * boundaries, abort-before-terminal discards, interaction closing via
+ * `interaction_settled` (v17) with run terminals as the net). Spoken as a child process (`node src/mock-backend.ts
  * --scenario X`) so the TUI-side tests exercise the real spawn/pipe/Ctrl+C
  * shape, not an in-process shortcut.
  *
@@ -17,7 +18,7 @@
 
 import * as readline from "node:readline";
 
-import { PROTOCOL_VERSION } from "./protocol";
+import { PROTOCOL_VERSION } from "./protocol.ts";
 
 const scenario = process.argv.includes("--scenario") ? process.argv[process.argv.indexOf("--scenario") + 1] : "basic";
 
@@ -177,7 +178,7 @@ async function toolsRun(session: string): Promise<void> {
 			free_text: true,
 		},
 	});
-	await waitForResponse(request);
+	await waitForResponse(session, request);
 	emitEvent(session, {
 		type: "tool_result",
 		turn_id: turn,
@@ -289,7 +290,7 @@ async function askRun(session: string): Promise<void> {
 		ui_type: "native:select_any",
 		payload: { title: "Name the release", body: "zero options — type the answer", options: [], free_text: true },
 	});
-	const answer = (await waitForResponse(request)) as { selected?: string[]; text?: string } | undefined;
+	const answer = (await waitForResponse(session, request)) as { selected?: string[]; text?: string } | undefined;
 	emitEvent(session, {
 		type: "tool_result",
 		turn_id: turn,
@@ -310,10 +311,10 @@ async function askRun(session: string): Promise<void> {
 	running = false;
 }
 
-const pendingResponses = new Map<string, (payload: unknown) => void>();
-function waitForResponse(id: string): Promise<unknown> {
+const pendingResponses = new Map<string, { stream: string; resolve: (payload: unknown) => void }>();
+function waitForResponse(stream: string, id: string): Promise<unknown> {
 	return new Promise(resolve => {
-		pendingResponses.set(id, resolve);
+		pendingResponses.set(id, { stream, resolve });
 	});
 }
 
@@ -352,10 +353,109 @@ function takeQueued(): { id: string; text: string } | undefined {
 }
 
 // ---------------------------------------------------------------------------
+// Boot (v19): the report is the first line, unprompted; the boot session's
+// announcements follow — its stamped session_opened, its stamped skills
+// catalog (v20, only-when-found), the backend-level catalogs, the resolved
+// model record. Commands may flow from the frontend's first line on.
+// ---------------------------------------------------------------------------
+
+emitNow({ type: "report", protocol_version: PROTOCOL_VERSION });
+emitEvent(BOOT, {
+	type: "session_opened",
+	id: BOOT,
+	path: "",
+	cwd: process.cwd(),
+	model: { provider: "mock", model: "mock-model", thinking_level: null },
+	resumed: false,
+});
+emitEvent(BOOT, {
+	type: "skills_available",
+	skills: [
+		{ name: "commit", description: "draft a commit message", location: "~/.agents/skills", level: "user" },
+		{ name: "review", description: "review a diff", location: ".agents/skills", level: "workspace" },
+	],
+});
+emitNow({
+	type: "sessions_available",
+	sessions: [{ id: BOOT, created_at: new Date().toISOString(), entry_count: 0, path: "", cwd: process.cwd() }],
+});
+emitNow({
+	type: "extensions_available",
+	extensions: [
+		{
+			name: "release",
+			version: "0.1.0",
+			description: "release helpers",
+			dir: "~/.tabit/extensions/release",
+			status: "alive",
+			tools: [
+				{ name: "edit", description: "the extension's own edit" },
+				{ name: "release-ask", description: "ask the user for the release name" },
+			],
+			hooks: [],
+		},
+		{
+			name: "broken",
+			version: "0.2.0",
+			dir: "~/.tabit/extensions/broken",
+			status: "dead",
+			reason: "handshake refused: unknown hook point",
+			tools: [],
+			hooks: [],
+		},
+	],
+	conflicts: [{ kind: "replaces_core", extension: "release", tool: "edit" }],
+});
+emitEvent(BOOT, {
+	type: "model_changed",
+	provider: "mock",
+	model: "mock-model",
+	thinking_level: null,
+	// v11 facts: the resolved record (context meter denominator,
+	// display name, per-million rates).
+	context_window: 200000,
+	name: "Mock Model",
+	cost: { input: 1, output: 4, cache_read: 0.1, cache_write: 0.4 },
+});
+
+if (scenario === "replay") {
+	// The resumed-boot replay pass (v19: default-on for a resumed boot —
+	// no request flag exists anymore). A realistic pass (the shape
+	// replay.rs emits): committed brackets with full-text deltas, tool
+	// pairs — and NO run terminals, the detail the running-state gate
+	// exists for.
+	emitEvent(BOOT, { type: "replay_begin", total: 2 });
+	emitEvent(BOOT, { type: "user_message", text: "resume me", entry_id: nextId("entry-") });
+	const turn = nextId("turn-");
+	emitEvent(BOOT, { type: "turn_started", id: turn, started_at_ms: ts() });
+	emitEvent(BOOT, { type: "reasoning_delta", turn_id: turn, id: "r1", reasoning: "thinking it over " });
+	emitEvent(BOOT, { type: "text_delta", turn_id: turn, text: "Resumed history, turn one. " });
+	emitEvent(BOOT, {
+		type: "tool_call",
+		turn_id: turn,
+		name: "read",
+		call_id: "call-read-1",
+		internal_call_id: "int-read-1",
+		arguments: JSON.stringify({ path: "AGENTS.md" }),
+	});
+	emitEvent(BOOT, { type: "completion_call", turn_id: turn, usage: usage(100, 30), cost: cost(100, 30) });
+	emitEvent(BOOT, { type: "turn_committed", id: turn, completed_at_ms: ts() });
+	emitEvent(BOOT, {
+		type: "tool_result",
+		turn_id: turn,
+		entry_id: nextId("entry-"),
+		name: "read",
+		internal_call_id: "int-read-1",
+		content: "the file's contents",
+		status: { status: "success" },
+	});
+	emitEvent(BOOT, { type: "replay_end" });
+}
+
+// ---------------------------------------------------------------------------
 // Command intake
 // ---------------------------------------------------------------------------
 
-let initialized = false;
 const crashArmed = scenario === "crash";
 let crashed = false;
 
@@ -368,111 +468,6 @@ stdin.on("line", line => {
 		frame = JSON.parse(trimmed);
 	} catch {
 		emitNow({ type: "protocol_error", message: `unparseable line: ${trimmed.slice(0, 80)}` });
-		return;
-	}
-	if (frame.type === "initialize") {
-		if (initialized) {
-			emitNow({ type: "protocol_error", message: "already initialized" });
-			return;
-		}
-		initialized = true;
-		emitNow({ type: "initialize_ack", protocol_version: PROTOCOL_VERSION, session_id: BOOT });
-		emitEvent(BOOT, {
-			type: "session_opened",
-			id: BOOT,
-			path: "",
-			cwd: process.cwd(),
-			model: { provider: "mock", model: "mock-model", thinking_level: null },
-			resumed: false,
-		});
-		emitNow({
-			type: "sessions_available",
-			sessions: [{ id: BOOT, created_at: new Date().toISOString(), entry_count: 0, path: "", cwd: process.cwd() }],
-		});
-		// v8/v9 startup catalogs, only-when-found (the mock models a
-		// discovery that found something, so the handlers get exercised).
-		emitNow({
-			type: "skills_available",
-			skills: [
-				{ name: "commit", description: "draft a commit message", location: "~/.agents/skills", level: "user" },
-				{ name: "review", description: "review a diff", location: ".agents/skills", level: "workspace" },
-			],
-		});
-		emitNow({
-			type: "extensions_available",
-			extensions: [
-				{
-					name: "release",
-					version: "0.1.0",
-					description: "release helpers",
-					dir: "~/.tabit/extensions/release",
-					status: "alive",
-					tools: [
-						{ name: "edit", description: "the extension's own edit" },
-						{ name: "release-ask", description: "ask the user for the release name" },
-					],
-					hooks: [],
-				},
-				{
-					name: "broken",
-					version: "0.2.0",
-					dir: "~/.tabit/extensions/broken",
-					status: "dead",
-					reason: "handshake refused: unknown hook point",
-					tools: [],
-					hooks: [],
-				},
-			],
-			conflicts: [{ kind: "replaces_core", extension: "release", tool: "edit" }],
-		});
-		emitEvent(BOOT, {
-			type: "model_changed",
-			provider: "mock",
-			model: "mock-model",
-			thinking_level: null,
-			// v11 facts: the resolved record (context meter denominator,
-			// display name, per-million rates).
-			context_window: 200000,
-			name: "Mock Model",
-			cost: { input: 1, output: 4, cache_read: 0.1, cache_write: 0.4 },
-		});
-		if (frame.replay) {
-			emitEvent(BOOT, { type: "replay_started", total: scenario === "replay" ? 2 : 0 });
-			if (scenario === "replay") {
-				// A realistic pass (the shape replay.rs emits): committed
-				// brackets with full-text deltas, tool pairs — and NO run
-				// terminals, the detail the running-state gate exists for.
-				emitEvent(BOOT, { type: "user_message", text: "resume me", entry_id: nextId("entry-") });
-				const turn = nextId("turn-");
-				emitEvent(BOOT, { type: "turn_started", id: turn, started_at_ms: ts() });
-				emitEvent(BOOT, { type: "reasoning_delta", turn_id: turn, id: "r1", reasoning: "thinking it over " });
-				emitEvent(BOOT, { type: "text_delta", turn_id: turn, text: "Resumed history, turn one. " });
-				emitEvent(BOOT, {
-					type: "tool_call",
-					turn_id: turn,
-					name: "read",
-					call_id: "call-read-1",
-					internal_call_id: "int-read-1",
-					arguments: JSON.stringify({ path: "AGENTS.md" }),
-				});
-				emitEvent(BOOT, { type: "completion_call", turn_id: turn, usage: usage(100, 30), cost: cost(100, 30) });
-				emitEvent(BOOT, { type: "turn_committed", id: turn, completed_at_ms: ts() });
-				emitEvent(BOOT, {
-					type: "tool_result",
-					turn_id: turn,
-					entry_id: nextId("entry-"),
-					name: "read",
-					internal_call_id: "int-read-1",
-					content: "the file's contents",
-					status: { status: "success" },
-				});
-			}
-			emitEvent(BOOT, { type: "replay_done" });
-		}
-		return;
-	}
-	if (!initialized) {
-		emitNow({ type: "protocol_error", message: "command before initialize" });
 		return;
 	}
 	switch (frame.type) {
@@ -529,10 +524,13 @@ stdin.on("line", line => {
 			return;
 		}
 		case "interaction_response": {
-			const resolve = pendingResponses.get(String(frame.id));
-			if (resolve) {
+			const pending = pendingResponses.get(String(frame.id));
+			if (pending) {
 				pendingResponses.delete(String(frame.id));
-				resolve(frame.payload);
+				pending.resolve(frame.payload);
+				// v17: the settle close follows the answer — fire-and-forget,
+				// stamped like the request it closes.
+				emitEvent(pending.stream, { type: "interaction_settled", id: String(frame.id) });
 			}
 			return;
 		}

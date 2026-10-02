@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 /**
  * The entry: resolve the backend command, build root + mode, run. Crash
  * handling is the report loop — exit 101 (internal error) or any
@@ -10,19 +11,19 @@ import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
-import pkg from "../package.json";
-import { Backend } from "./backend";
-import { InteractiveMode } from "./mode";
-import { PROTOCOL_VERSION } from "./protocol";
-import { AltRoot } from "./root";
-import { log } from "./log";
+import pkg from "../package.json" with { type: "json" };
+import { Backend } from "./backend.ts";
+import { InteractiveMode } from "./mode.ts";
+import { PROTOCOL_VERSION } from "./protocol.ts";
+import { AltRoot } from "./root.ts";
+import { log } from "./log.ts";
 
 /**
  * Backend resolution — the zero-tuning ladder (the GUI's `backend.rs`
  * shape): `--mock[=scenario]` (dev-only) → `-c`/`--continue` → `--bin
- * <path>` → `TABIT_BIN` → the executable's own directory (the **packaged
+ * <path>` → `TABIT_CORE_BIN` → the executable's own directory (the **packaged
  * sibling** — how the shipped platform package resolves) → this repo's
- * cargo outputs (dev) → `tabit` on PATH.
+ * cargo outputs (dev) → `tabit-core` on PATH.
  *
  * Launch semantics (owner rule): no args starts a **new** session;
  * continuation is explicit via `-c`/`--continue`, which resumes the
@@ -50,7 +51,7 @@ export function resolveBackendCommand(
 		const value = argv[binFlag + 1];
 		if (value !== undefined) return { bin: value, args: base };
 	}
-	const envBin = process.env.TABIT_BIN;
+	const envBin = process.env.TABIT_CORE_BIN;
 	if (envBin !== undefined && envBin !== "") return { bin: envBin, args: base };
 	const exe = process.platform === "win32" ? "tabit-core.exe" : "tabit-core";
 	const candidates = [
@@ -123,6 +124,14 @@ async function main(): Promise<void> {
 					root.dispose();
 					process.exit(0);
 				}
+				// v19: a backend-internal wind-down resolves the connection —
+				// stdout EOF and a clean exit, no error. Treat it as the
+				// disconnect it is, not a crash (FRONTEND.md §3).
+				if (exit.code === 0) {
+					root.dispose();
+					process.stderr.write("the backend ended the connection\n");
+					process.exit(0);
+				}
 				die(`the tabit backend died unexpectedly (code ${exit.code ?? "none"})\n\n${exit.stderrTail.join("\n")}\n`, 1);
 			},
 		},
@@ -130,7 +139,7 @@ async function main(): Promise<void> {
 
 	mode = new InteractiveMode(backend, root);
 	root.bind(mode, () => backend.shutdown());
-	mode.onFatal = reason => die(`the backend rejected the handshake:\n\n${reason}\n`, 1);
+	mode.onFatal = reason => die(`${reason}\n`, 1);
 	mode.onQuit = () => backend.shutdown();
 
 	root.tui.start();

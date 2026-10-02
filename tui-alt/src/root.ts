@@ -25,23 +25,23 @@ import {
 	type Component,
 } from "@earendil-works/pi-tui";
 
-import { AssistantBlock } from "./components/assistant-block";
-import { FooterBar } from "./footer/footer-bar";
-import { NoteBlock } from "./components/note-block";
-import { PendingQueue } from "./components/pending-queue";
-import { ReasoningBlock } from "./components/reasoning-block";
-import { StatusBar } from "./components/status-bar";
-import { ToolBlock } from "./components/tool-block";
-import { UserBlock } from "./components/user-block";
-import { TranscriptRegistry } from "./components/transcript-registry";
-import { TreeCardView } from "./components/tree-card";
-import { cardViewFor } from "./card-view";
-import { InputController } from "./input-controller";
-import { AtPathCompletionProvider } from "./path-completion";
-import { APP_KEYBINDING_IDS, applyKeybindings, loadTuiToml } from "./keybindings";
-import type { FooterFacts, InteractionCard, ModeView, PendingMessage, SkillInfo } from "./mode";
-import type { InteractiveMode } from "./mode";
-import { editorTheme } from "./theme";
+import { AssistantBlock } from "./components/assistant-block.ts";
+import { FooterBar } from "./footer/footer-bar.ts";
+import { NoteBlock } from "./components/note-block.ts";
+import { PendingQueue } from "./components/pending-queue.ts";
+import { ReasoningBlock } from "./components/reasoning-block.ts";
+import { StatusBar } from "./components/status-bar.ts";
+import { ToolBlock } from "./components/tool-block.ts";
+import { UserBlock } from "./components/user-block.ts";
+import { TranscriptRegistry } from "./components/transcript-registry.ts";
+import { TreeCardView } from "./components/tree-card.ts";
+import { cardViewFor } from "./card-view.ts";
+import { InputController } from "./input-controller.ts";
+import { AtPathCompletionProvider } from "./path-completion.ts";
+import { APP_KEYBINDING_IDS, applyKeybindings, loadTuiToml } from "./keybindings.ts";
+import type { FooterFacts, InteractionCard, ModeView, PendingMessage, SkillInfo } from "./mode.ts";
+import type { InteractiveMode } from "./mode.ts";
+import { editorTheme } from "./theme.ts";
 
 /** The type column in the `/` dropdown: fixed-width so descriptions align. */
 const TYPE_COLUMN = { command: "command", skill: "skill  " } as const;

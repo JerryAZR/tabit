@@ -5,11 +5,12 @@
  * marks, cursor, status line).
  */
 
-import { describe, expect, test } from "bun:test";
+import assert from "node:assert/strict";
+import { describe, test } from "node:test";
 
-import { TreeCardView } from "../src/components/tree-card";
-import { applyKeybindings } from "../src/keybindings";
-import { SessionTree } from "../src/session-tree";
+import { TreeCardView } from "../src/components/tree-card.ts";
+import { applyKeybindings } from "../src/keybindings.ts";
+import { SessionTree } from "../src/session-tree.ts";
 
 // Rows resolve the select actions through the global registry — installed
 // in production by root.bind. Install the defaults here.
@@ -61,16 +62,16 @@ describe("TreeCardView", () => {
 			},
 			[UP, ENTER], // move off the head (to t2), rewind there
 		);
-		expect(rewound.events).toEqual([{ kind: "checkout", entryId: "t2" }]);
+		assert.deepStrictEqual(rewound.events, [{ kind: "checkout", entryId: "t2" }]);
 
 		const closed = driven(tree => {
 			grow(tree);
 			tree.checkout("e1");
 		}, [ESCAPE]);
-		expect(closed.events).toEqual([{ kind: "close" }]);
+		assert.deepStrictEqual(closed.events, [{ kind: "close" }]);
 
 		const alreadyHere = driven(grow, [DOWN, DOWN, DOWN, ENTER]); // cursor to t2, the head
-		expect(alreadyHere.events).toEqual([{ kind: "close" }]);
+		assert.deepStrictEqual(alreadyHere.events, [{ kind: "close" }]);
 	});
 
 	test("cursor wraps both ways; arrows page", () => {
@@ -78,16 +79,16 @@ describe("TreeCardView", () => {
 			grow(tree);
 			tree.checkout("e1");
 		}, [UP, ENTER]); // from the head (e1, index 0) wrap to t2 (last row)
-		expect(wrapped.events).toEqual([{ kind: "checkout", entryId: "t2" }]);
+		assert.deepStrictEqual(wrapped.events, [{ kind: "checkout", entryId: "t2" }]);
 
 		const paged = driven(tree => {
 			grow(tree);
 			tree.checkout("e1");
 		}, [LEFT, ENTER]); // page up clamps at 0 — still e1, the head → close
-		expect(paged.events).toEqual([{ kind: "close" }]);
+		assert.deepStrictEqual(paged.events, [{ kind: "close" }]);
 
 		const pageDown = driven(grow, [LEFT, RIGHT, ENTER]); // 0 → page → clamp to t2 (the head) → close
-		expect(pageDown.events).toEqual([{ kind: "close" }]);
+		assert.deepStrictEqual(pageDown.events, [{ kind: "close" }]);
 	});
 
 	test("rows paint the tree language: cursor, active-path dot, typed content", () => {
@@ -97,24 +98,27 @@ describe("TreeCardView", () => {
 			tree.addUser("e3", "fresh start"); // branch: e3 on path, old tail off it
 		}, []);
 		const rows = view.lines.filter(line => line.includes("user:") || line.includes("assistant:"));
-		expect(rows).toHaveLength(5);
+		assert.strictEqual(rows.length, 5);
 		// The head's subtree first; the active-path rows carry the accent dot.
-		expect(rows[0]).toContain("user: ");
-		expect(rows[0]).toContain("first question");
-		expect(rows[0]!).toContain("\x1b[36m• ");
+		assert.ok(rows[0].includes("user: "));
+		assert.ok(rows[0].includes("first question"));
+		assert.ok(rows[0]!.includes("\x1b[36m• "));
 		// Off-path rows carry no dot.
-		expect(rows[2]).not.toContain("• ");
+		assert.ok(!rows[2].includes("• "));
 		// The cursor leads the first row; the second (a branch child) leads
 		// with its unselected gutter and a `├─` connector.
-		expect(rows[0]!.startsWith(" ❯ ")).toBe(true);
-		expect(rows[1]).toContain("├─");
+		assert.strictEqual(rows[0]!.startsWith(" ❯ "), true);
+		assert.ok(rows[1].includes("├─"));
 		// Status line with the count and the hint.
-		expect(view.lines.some(line => line.includes("(1/5)") && line.includes("enter rewinds"))).toBe(true);
+		assert.strictEqual(view.lines.some(line => line.includes("(1/5)") && line.includes("enter rewinds")), true);
 	});
 
 	test("an empty session renders a quiet card; enter does nothing", () => {
 		const empty = driven(() => {}, [ENTER, ESCAPE]);
-		expect(empty.events).toEqual([{ kind: "close" }]);
-		expect(empty.lines).toEqual([expect.stringContaining("─"), expect.stringContaining("empty"), expect.stringContaining("─")]);
+		assert.deepStrictEqual(empty.events, [{ kind: "close" }]);
+		assert.strictEqual(empty.lines.length, 3);
+		assert.ok(empty.lines[0].includes("─"));
+		assert.ok(empty.lines[1].includes("empty"));
+		assert.ok(empty.lines[2].includes("─"));
 	});
 });

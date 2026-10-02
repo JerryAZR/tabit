@@ -1,4 +1,4 @@
-import type { FooterBadgeFactory } from "../registry";
+import type { FooterBadgeFactory } from "../registry.ts";
 
 /** Session spend: the v13 recorded dollars, displayed as recorded — never
  *  re-derived from rates or tokens. Three significant digits, not fixed

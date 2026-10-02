@@ -1,5 +1,5 @@
-import type { FooterBadgeFactory } from "../registry";
-import { formatTokenCount } from "../format";
+import type { FooterBadgeFactory } from "../registry.ts";
+import { formatTokenCount } from "../format.ts";
 
 /**
  * The usage badge: the session's token breakdown, labeled — token usage

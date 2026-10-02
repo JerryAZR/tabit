@@ -10,3 +10,7 @@
 # local dogfooding sessions (tabit CLI run inside this repo)
 /.tabit/
 .zcode/
+
+# tui-alt (Node/TypeScript)
+node_modules/
+tui-alt/dist/

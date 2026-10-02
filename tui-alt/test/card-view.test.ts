@@ -5,11 +5,12 @@
  * Key data below is what a terminal sends for each key.
  */
 
-import { describe, expect, test } from "bun:test";
+import assert from "node:assert/strict";
+import { describe, test } from "node:test";
 
-import { cardViewFor, type Answer } from "../src/card-view";
-import { applyKeybindings } from "../src/keybindings";
-import type { InteractionCard } from "../src/mode";
+import { cardViewFor, type Answer } from "../src/card-view.ts";
+import { applyKeybindings } from "../src/keybindings.ts";
+import type { InteractionCard } from "../src/mode.ts";
 
 // The card resolves clearNote through the global registry — installed in
 // production by root.bind. Install the defaults here.
@@ -48,13 +49,13 @@ function typed(view: { handleInput(data: string): void }, text: string): void {
 
 describe("ChoiceCardView (select_one)", () => {
 	test("enter answers the option under the cursor; arrows move it", () => {
-		expect(driven(selectOne, [ENTER])).toEqual([{ selected: ["Allow"], text: null }]);
-		expect(driven(selectOne, [DOWN, DOWN, ENTER])).toEqual([{ selected: ["Block"], text: null }]);
+		assert.deepStrictEqual(driven(selectOne, [ENTER]), [{ selected: ["Allow"], text: null }]);
+		assert.deepStrictEqual(driven(selectOne, [DOWN, DOWN, ENTER]), [{ selected: ["Block"], text: null }]);
 	});
 
 	test("space is inert on single-select; digits jump the cursor", () => {
-		expect(driven(selectOne, [" ", DOWN, ENTER])).toEqual([{ selected: ["Allow always"], text: null }]);
-		expect(driven(selectOne, ["3", ENTER])).toEqual([{ selected: ["Block"], text: null }]);
+		assert.deepStrictEqual(driven(selectOne, [" ", DOWN, ENTER]), [{ selected: ["Allow always"], text: null }]);
+		assert.deepStrictEqual(driven(selectOne, ["3", ENTER]), [{ selected: ["Block"], text: null }]);
 	});
 
 	test("tab enters note mode (free_text only), typing collects, enter rides the note", () => {
@@ -65,7 +66,7 @@ describe("ChoiceCardView (select_one)", () => {
 		view.handleInput(TAB);
 		typed(view, "no spaces ok");
 		view.handleInput(ENTER);
-		expect(answers).toEqual([{ selected: ["Block"], text: "no spaces ok" }]);
+		assert.deepStrictEqual(answers, [{ selected: ["Block"], text: "no spaces ok" }]);
 	});
 
 	test("arrows exit note mode first, then move the cursor; ctrl+u clears the note", () => {
@@ -77,7 +78,7 @@ describe("ChoiceCardView (select_one)", () => {
 		typed(view, "reason ");
 		view.handleInput(UP); // exits note mode AND moves the cursor: Block → Allow always
 		view.handleInput(ENTER);
-		expect(answers).toEqual([{ selected: ["Allow always"], text: "reason " }]);
+		assert.deepStrictEqual(answers, [{ selected: ["Allow always"], text: "reason " }]);
 
 		const cleared: AnswerRecord[] = [];
 		const view2 = cardViewFor(selectOne, (selected, text) => cleared.push({ selected, text }));
@@ -86,26 +87,26 @@ describe("ChoiceCardView (select_one)", () => {
 		view2.handleInput(CTRL_U);
 		typed(view2, "final");
 		view2.handleInput(ENTER);
-		expect(cleared).toEqual([{ selected: ["Allow"], text: "final" }]);
+		assert.deepStrictEqual(cleared, [{ selected: ["Allow"], text: "final" }]);
 	});
 
 	test("tab without free_text does nothing", () => {
 		const noNote: InteractionCard = { ...selectOne, freeText: false };
-		expect(driven(noNote, [TAB, "x", ENTER])).toEqual([{ selected: ["Allow"], text: null }]);
+		assert.deepStrictEqual(driven(noNote, [TAB, "x", ENTER]), [{ selected: ["Allow"], text: null }]);
 	});
 });
 
 describe("ChoiceCardView (select_any)", () => {
 	test("space toggles the set; enter answers the toggled-on set ignoring the cursor", () => {
-		expect(driven(selectAny, [" ", DOWN, DOWN, " ", ENTER])).toEqual([{ selected: ["a", "c"], text: null }]);
-		expect(driven(selectAny, [" ", " ", ENTER])).toEqual([{ selected: [], text: null }]);
+		assert.deepStrictEqual(driven(selectAny, [" ", DOWN, DOWN, " ", ENTER]), [{ selected: ["a", "c"], text: null }]);
+		assert.deepStrictEqual(driven(selectAny, [" ", " ", ENTER]), [{ selected: [], text: null }]);
 	});
 });
 
 describe("NoteCardView (the zero-option free-text ask)", () => {
 	test("typing is the answer; enter sends it, ctrl+u clears", () => {
-		expect(driven(pureNote, ["h", "i", ENTER])).toEqual([{ selected: [], text: "hi" }]);
-		expect(driven(pureNote, ["h", "i", CTRL_U, ENTER])).toEqual([{ selected: [], text: null }]);
+		assert.deepStrictEqual(driven(pureNote, ["h", "i", ENTER]), [{ selected: [], text: "hi" }]);
+		assert.deepStrictEqual(driven(pureNote, ["h", "i", CTRL_U, ENTER]), [{ selected: [], text: null }]);
 	});
 });
 
@@ -115,11 +116,11 @@ describe("rendering", () => {
 		view.handleInput(" ");
 		view.handleInput(DOWN);
 		const idle = view.render(60).join("\n");
-		expect(idle).toContain("[×] 1. a");
-		expect(idle).toContain("❯ ");
-		expect(idle).not.toContain("note:");
+		assert.ok(idle.includes("[×] 1. a"));
+		assert.ok(idle.includes("❯ "));
+		assert.ok(!idle.includes("note:"));
 
 		view.handleInput(TAB);
-		expect(view.render(60).join("\n")).toContain("note:");
+		assert.ok(view.render(60).join("\n").includes("note:"));
 	});
 });

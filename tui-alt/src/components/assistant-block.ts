@@ -10,8 +10,8 @@
 
 import { Markdown } from "@earendil-works/pi-tui";
 
-import { TranscriptBlock } from "./transcript-block";
-import { markdownTheme } from "../theme";
+import { TranscriptBlock } from "./transcript-block.ts";
+import { markdownTheme } from "../theme.ts";
 
 export class AssistantBlock extends TranscriptBlock {
 	readonly #markdown = new Markdown("", 1, 0, markdownTheme);

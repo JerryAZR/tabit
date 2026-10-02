@@ -9,9 +9,9 @@
 
 import { Text, type Component } from "@earendil-works/pi-tui";
 
-import { dim } from "../theme";
-import type { FooterFacts } from "../mode";
-import { FOOTER_BADGES, type FooterBadge } from "./registry";
+import { dim } from "../theme.ts";
+import type { FooterFacts } from "../mode.ts";
+import { FOOTER_BADGES, type FooterBadge } from "./registry.ts";
 
 const SEPARATOR = dim("  ·  ");
 

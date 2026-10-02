@@ -4,9 +4,10 @@
  * the pi-ordered flattening (head's subtree first among siblings).
  */
 
-import { describe, expect, test } from "bun:test";
+import assert from "node:assert/strict";
+import { describe, test } from "node:test";
 
-import { SessionTree } from "../src/session-tree";
+import { SessionTree } from "../src/session-tree.ts";
 
 describe("SessionTree", () => {
 	test("a live chain: each entry parents on the previous, rows flatten in order", () => {
@@ -16,18 +17,18 @@ describe("SessionTree", () => {
 		tree.appendTurnText("t1", "On it. ");
 		tree.appendTurnText("t1", "Running the tests.");
 		tree.addTool("e2", "i1", "bash", "1 file changed");
-		expect(tree.headId).toBe("e2");
+		assert.strictEqual(tree.headId, "e2");
 		const rows = tree.rows();
-		expect(rows.map(row => row.id)).toEqual(["e1", "t1", "e2"]);
+		assert.deepStrictEqual(rows.map(row => row.id), ["e1", "t1", "e2"]);
 		// A single chain stays flat and connector-free — pi renders
 		// `├─` only where a parent actually branches; a chain is a list.
-		expect(rows.map(row => row.indent)).toEqual([0, 0, 0]);
-		expect(rows.map(row => row.showConnector)).toEqual([false, false, false]);
-		expect(rows.map(row => row.isLast)).toEqual([true, true, true]);
+		assert.deepStrictEqual(rows.map(row => row.indent), [0, 0, 0]);
+		assert.deepStrictEqual(rows.map(row => row.showConnector), [false, false, false]);
+		assert.deepStrictEqual(rows.map(row => row.isLast), [true, true, true]);
 		// The whole chain is the active path; e2 is the head.
-		expect(rows.map(row => row.onActivePath)).toEqual([true, true, true]);
-		expect(rows.find(row => row.id === "e1")!.preview).toBe("fix the gate");
-		expect(rows.find(row => row.id === "t1")!.preview).toBe("On it. Running the tests.");
+		assert.deepStrictEqual(rows.map(row => row.onActivePath), [true, true, true]);
+		assert.strictEqual(rows.find(row => row.id === "e1")!.preview, "fix the gate");
+		assert.strictEqual(rows.find(row => row.id === "t1")!.preview, "On it. Running the tests.");
 	});
 
 	test("tool rows show the call, learned from the paired tool_call event", () => {
@@ -39,8 +40,8 @@ describe("SessionTree", () => {
 		// An unknown call id degrades to the bare name.
 		tree.addTool("e3", "i2", "read", "contents");
 		const rows = tree.rows();
-		expect(rows.find(row => row.id === "e2")!.preview).toBe(`bash cmd: cargo test`);
-		expect(rows.find(row => row.id === "e3")!.preview).toBe("read");
+		assert.strictEqual(rows.find(row => row.id === "e2")!.preview, `bash cmd: cargo test`);
+		assert.strictEqual(rows.find(row => row.id === "e3")!.preview, "read");
 	});
 
 	test("turn previews only grow while the turn is open — replay never doubles them", () => {
@@ -53,7 +54,7 @@ describe("SessionTree", () => {
 		tree.closeTurn();
 		tree.openTurn("t1");
 		tree.appendTurnText("t1", " — and this delta never happened");
-		expect(tree.rows().find(row => row.id === "t1")!.preview).toBe("first pass");
+		assert.strictEqual(tree.rows().find(row => row.id === "t1")!.preview, "first pass");
 	});
 
 	test("turn_retried drops the turn and its tool results; the head falls back", () => {
@@ -64,12 +65,12 @@ describe("SessionTree", () => {
 		tree.noteToolCall("i1", "bash", null);
 		tree.addTool("e2", "i1", "bash", "…");
 		tree.retryTurn("t1");
-		expect(tree.size).toBe(1);
-		expect(tree.rows().map(row => row.id)).toEqual(["e1"]);
-		expect(tree.headId).toBe("e1");
+		assert.strictEqual(tree.size, 1);
+		assert.deepStrictEqual(tree.rows().map(row => row.id), ["e1"]);
+		assert.strictEqual(tree.headId, "e1");
 		// The retry appends to the surviving parent, not to a dropped node.
 		tree.openTurn("t2");
-		expect(tree.rows().map(row => row.id)).toEqual(["e1", "t2"]);
+		assert.deepStrictEqual(tree.rows().map(row => row.id), ["e1", "t2"]);
 	});
 
 	test("checkout moves the head; the next entry branches off it", () => {
@@ -82,15 +83,15 @@ describe("SessionTree", () => {
 		tree.appendTurnText("t2", "answer two");
 		// Rewind to e1 and continue: the old tail stays, a new branch grows.
 		tree.checkout("e1");
-		expect(tree.headId).toBe("e1");
+		assert.strictEqual(tree.headId, "e1");
 		tree.addUser("e3", "fresh start");
 		const rows = tree.rows();
-		expect(rows.map(row => row.id)).toEqual(["e1", "e3", "t1", "e2", "t2"]);
+		assert.deepStrictEqual(rows.map(row => row.id), ["e1", "e3", "t1", "e2", "t2"]);
 		// The head's subtree sorts first among e1's children.
-		expect(rows.map(row => row.onActivePath)).toEqual([true, true, false, false, false]);
-		expect(rows.find(row => row.id === "t2")!.isHead).toBe(false);
+		assert.deepStrictEqual(rows.map(row => row.onActivePath), [true, true, false, false, false]);
+		assert.strictEqual(rows.find(row => row.id === "t2")!.isHead, false);
 		// The branch point indents, and so does the first generation after it.
-		expect(rows.map(row => row.indent)).toEqual([0, 1, 1, 2, 2]);
+		assert.deepStrictEqual(rows.map(row => row.indent), [0, 1, 1, 2, 2]);
 	});
 
 	test("post-checkout replay walks the shared prefix: heads resync, nothing re-parents", () => {
@@ -104,19 +105,19 @@ describe("SessionTree", () => {
 		tree.addUser("e1", "one");
 		tree.openTurn("t1");
 		tree.appendTurnText("t1", "answer one");
-		expect(tree.headId).toBe("t1");
-		expect(tree.size).toBe(3);
+		assert.strictEqual(tree.headId, "t1");
+		assert.strictEqual(tree.size, 3);
 		const rows = tree.rows();
 		// e2 is still in the store (the branch survives), just off-path.
-		expect(rows.map(row => row.id)).toEqual(["e1", "t1", "e2"]);
-		expect(rows.map(row => row.onActivePath)).toEqual([true, true, false]);
+		assert.deepStrictEqual(rows.map(row => row.id), ["e1", "t1", "e2"]);
+		assert.deepStrictEqual(rows.map(row => row.onActivePath), [true, true, false]);
 	});
 
 	test("compaction rows carry the token size", () => {
 		const tree = new SessionTree();
 		tree.addUser("e1", "hi");
 		tree.addCompaction("c1", 291000);
-		expect(tree.rows().find(row => row.id === "c1")!.preview).toBe("[compaction: 291k tokens]");
+		assert.strictEqual(tree.rows().find(row => row.id === "c1")!.preview, "[compaction: 291k tokens]");
 	});
 
 	test("previews are single-line by contract — turn text and tool args collapse", () => {
@@ -130,20 +131,20 @@ describe("SessionTree", () => {
 		tree.addTool("e2", "i1", "write", "ok");
 		const rows = tree.rows();
 		for (const row of rows) {
-			expect(row.preview.includes("\n")).toBe(false);
-			expect(row.preview.includes("\t")).toBe(false);
+			assert.strictEqual(row.preview.includes("\n"), false);
+			assert.strictEqual(row.preview.includes("\t"), false);
 		}
-		expect(rows.find(row => row.id === "t1")!.preview).toContain("Strategy (implemented from scratch; high-level");
-		expect(rows.find(row => row.id === "e2")!.preview).toBe(`write path: fastkernel.py, content: """ doc """ def r(...`);
+		assert.ok(rows.find(row => row.id === "t1")!.preview.includes("Strategy (implemented from scratch; high-level"));
+		assert.strictEqual(rows.find(row => row.id === "e2")!.preview, `write path: fastkernel.py, content: """ doc """ def r(...`);
 	});
 
 	test("reset empties everything (a new session)", () => {
 		const tree = new SessionTree();
 		tree.addUser("e1", "hi");
 		tree.reset();
-		expect(tree.size).toBe(0);
-		expect(tree.rows()).toEqual([]);
-		expect(tree.headId).toBeNull();
+		assert.strictEqual(tree.size, 0);
+		assert.deepStrictEqual(tree.rows(), []);
+		assert.strictEqual(tree.headId, null);
 	});
 
 	test("rows window past two levels: `│` continues under `├─`, stops under `└─`", () => {
@@ -158,19 +159,19 @@ describe("SessionTree", () => {
 		tree.openTurn("t3");
 		const rows = tree.rows();
 		// Head's subtree (e3) first, the abandoned branch after.
-		expect(rows.map(row => row.id)).toEqual(["e1", "e3", "t3", "t1", "e2", "t2"]);
+		assert.deepStrictEqual(rows.map(row => row.id), ["e1", "e3", "t3", "t1", "e2", "t2"]);
 		// Both of e1's children sit at a real branch point — connectors on.
 		const e3 = rows.find(row => row.id === "e3")!;
 		const t1 = rows.find(row => row.id === "t1")!;
-		expect(e3.showConnector).toBe(true);
-		expect(e3.isLast).toBe(false); // the live branch continues with `├─`
-		expect(t1.showConnector).toBe(true);
-		expect(t1.isLast).toBe(true); // the abandoned branch closes with `└─`
+		assert.strictEqual(e3.showConnector, true);
+		assert.strictEqual(e3.isLast, false); // the live branch continues with `├─`
+		assert.strictEqual(t1.showConnector, true);
+		assert.strictEqual(t1.isLast, true); // the abandoned branch closes with `└─`
 		// e3's descendants: `│` in e3's column (its `├─` is open).
 		const t3 = rows.find(row => row.id === "t3")!;
-		expect(t3.gutters).toEqual([{ position: 0, show: true }]);
+		assert.deepStrictEqual(t3.gutters, [{ position: 0, show: true }]);
 		// t1's descendants: blank in t1's column (its `└─` ends the line).
 		const e2 = rows.find(row => row.id === "e2")!;
-		expect(e2.gutters).toEqual([{ position: 0, show: false }]);
+		assert.deepStrictEqual(e2.gutters, [{ position: 0, show: false }]);
 	});
 });

@@ -10,9 +10,9 @@
 
 import { MouseRegion, wrapTextWithAnsi, type Component } from "@earendil-works/pi-tui";
 
-import { TranscriptBlock } from "./transcript-block";
-import { marker } from "../symbols";
-import { thinkingText } from "../theme";
+import { TranscriptBlock } from "./transcript-block.ts";
+import { marker } from "../symbols.ts";
+import { thinkingText } from "../theme.ts";
 
 export class ReasoningBlock extends TranscriptBlock {
 	readonly #region: MouseRegion;

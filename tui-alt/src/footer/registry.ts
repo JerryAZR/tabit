@@ -21,12 +21,12 @@
  * stays additive. Nothing here assumes the mode is the only facts source.
  */
 
-import type { FooterFacts } from "../mode";
-import { createContextBadge } from "./badges/context";
-import { createCostBadge } from "./badges/cost";
-import { createModelBadge } from "./badges/model";
-import { createStateBadge } from "./badges/state";
-import { createUsageBadge } from "./badges/usage";
+import type { FooterFacts } from "../mode.ts";
+import { createContextBadge } from "./badges/context.ts";
+import { createCostBadge } from "./badges/cost.ts";
+import { createModelBadge } from "./badges/model.ts";
+import { createStateBadge } from "./badges/state.ts";
+import { createUsageBadge } from "./badges/usage.ts";
 
 /** What the container hands each badge at construction. Grows only when a
  *  badge genuinely needs a new capability — never as a facts back door. */

@@ -6,8 +6,8 @@
 
 import { Container, Text, type Component } from "@earendil-works/pi-tui";
 
-import { marker } from "../symbols";
-import type { PendingMessage } from "../mode";
+import { marker } from "../symbols.ts";
+import type { PendingMessage } from "../mode.ts";
 
 export class PendingQueue implements Component {
 	readonly #container = new Container();

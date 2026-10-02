@@ -16,8 +16,8 @@
 
 import { getKeybindings, truncateToWidth, type Component } from "@earendil-works/pi-tui";
 
-import { accent, dim, success, toolMuted, warn } from "../theme";
-import type { SessionTree, TreeRow } from "../session-tree";
+import { accent, dim, success, toolMuted, warn } from "../theme.ts";
+import type { SessionTree, TreeRow } from "../session-tree.ts";
 
 export interface TreeCardHooks {
 	onCheckout(entryId: string): void;
@@ -30,59 +30,62 @@ const MAX_VISIBLE_ROWS = 15;
 export class TreeCardView implements Component {
 	readonly focusable = true;
 	#cursor = 0;
+	readonly #tree: SessionTree;
+	readonly #hooks: TreeCardHooks;
+	readonly #requestRender: () => void;
 
-	constructor(
-		private readonly tree: SessionTree,
-		private readonly hooks: TreeCardHooks,
-		private readonly requestRender: () => void,
-	) {}
+	constructor(tree: SessionTree, hooks: TreeCardHooks, requestRender: () => void) {
+		this.#tree = tree;
+		this.#hooks = hooks;
+		this.#requestRender = requestRender;
+	}
 
 	handleInput(data: string): void {
 		const kb = getKeybindings();
-		const total = this.tree.size;
+		const total = this.#tree.size;
 		if (total === 0) {
-			if (kb.matches(data, "tui.select.cancel")) this.hooks.onClose();
+			if (kb.matches(data, "tui.select.cancel")) this.#hooks.onClose();
 			return;
 		}
 		if (kb.matches(data, "tui.select.up")) {
 			this.#cursor = this.#cursor === 0 ? total - 1 : this.#cursor - 1;
-			this.requestRender();
+			this.#requestRender();
 			return;
 		}
 		if (kb.matches(data, "tui.select.down")) {
 			this.#cursor = this.#cursor === total - 1 ? 0 : this.#cursor + 1;
-			this.requestRender();
+			this.#requestRender();
 			return;
 		}
 		if (kb.matches(data, "tui.editor.cursorLeft")) {
 			this.#cursor = Math.max(0, this.#cursor - MAX_VISIBLE_ROWS);
-			this.requestRender();
+			this.#requestRender();
 			return;
 		}
 		if (kb.matches(data, "tui.editor.cursorRight")) {
 			this.#cursor = Math.min(total - 1, this.#cursor + MAX_VISIBLE_ROWS);
-			this.requestRender();
+			this.#requestRender();
 			return;
 		}
 		if (kb.matches(data, "tui.select.cancel")) {
-			this.hooks.onClose();
+			this.#hooks.onClose();
 			return;
 		}
 		if (kb.matches(data, "tui.select.confirm")) {
-			const rows = this.tree.rows();
+			const rows = this.#tree.rows();
 			const row = rows[this.#cursor];
 			if (row === undefined) return;
 			// The head is where the session already stands — pi closes with
 			// "Already at this point" rather than sending a no-op command.
-			if (!row.isHead) this.hooks.onCheckout(row.id);
-			else this.hooks.onClose();
+			if (!row.isHead) this.#hooks.onCheckout(row.id);
+			else this.#hooks.onClose();
 		}
 	}
 
 	invalidate(): void {}
 
 	render(width: number): string[] {
-		const rows = this.tree.rows();
+		const rows = this.#tree.rows();
 		const rule = dim("─".repeat(Math.max(1, width)));
 		if (rows.length === 0) {
 			return [rule, dim(" session tree — empty"), rule];

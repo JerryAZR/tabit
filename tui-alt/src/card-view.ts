@@ -19,9 +19,9 @@
 
 import { getKeybindings, matchesKey, type Component } from "@earendil-works/pi-tui";
 
-import { dim } from "./theme";
+import { dim } from "./theme.ts";
 
-import type { InteractionCard } from "./mode";
+import type { InteractionCard } from "./mode.ts";
 
 export type Answer = (selected: string[], text: string | null) => void;
 
@@ -43,11 +43,13 @@ class ChoiceCardView implements Component {
 	readonly #toggled = new Set<number>();
 	#note = "";
 	#noteMode = false;
+	readonly #card: InteractionCard;
+	readonly #onAnswer: Answer;
 
-	constructor(
-		private readonly card: InteractionCard,
-		private readonly onAnswer: Answer,
-	) {}
+	constructor(card: InteractionCard, onAnswer: Answer) {
+		this.#card = card;
+		this.#onAnswer = onAnswer;
+	}
 
 	handleInput(data: string): void {
 		const kb = getKeybindings();
@@ -60,7 +62,7 @@ class ChoiceCardView implements Component {
 		}
 		if (matchesKey(data, "down")) {
 			this.#noteMode = false;
-			this.#cursor = Math.min(this.card.options.length - 1, this.#cursor + 1);
+			this.#cursor = Math.min(this.#card.options.length - 1, this.#cursor + 1);
 			return;
 		}
 		if (this.#noteMode) {
@@ -90,20 +92,20 @@ class ChoiceCardView implements Component {
 			this.answer();
 			return;
 		}
-		if ((kb.matches(data, "tui.input.tab") || matchesKey(data, "escape")) && this.card.freeText) {
+		if ((kb.matches(data, "tui.input.tab") || matchesKey(data, "escape")) && this.#card.freeText) {
 			this.#noteMode = true; // cursor and toggles preserved
 			return;
 		}
-		if (this.card.freeText && kb.matches(data, "tui.app.clearNote")) {
+		if (this.#card.freeText && kb.matches(data, "tui.app.clearNote")) {
 			this.#note = "";
 			return;
 		}
-		if (data === " " && this.card.uiType === "native:select_any") {
+		if (data === " " && this.#card.uiType === "native:select_any") {
 			this.#toggled.has(this.#cursor) ? this.#toggled.delete(this.#cursor) : this.#toggled.add(this.#cursor);
 			return;
 		}
 		const digit = Number(data);
-		if (Number.isInteger(digit) && digit >= 1 && digit <= this.card.options.length) {
+		if (Number.isInteger(digit) && digit >= 1 && digit <= this.#card.options.length) {
 			this.#cursor = digit - 1;
 		}
 	}
@@ -112,21 +114,21 @@ class ChoiceCardView implements Component {
 
 	private answer(): void {
 		const selected =
-			this.card.uiType === "native:select_one"
-				? [this.card.options[this.#cursor]!]
-				: [...this.#toggled].sort((a, b) => a - b).map(index => this.card.options[index]!);
-		this.onAnswer(selected, this.#note === "" ? null : this.#note);
+			this.#card.uiType === "native:select_one"
+				? [this.#card.options[this.#cursor]!]
+				: [...this.#toggled].sort((a, b) => a - b).map(index => this.#card.options[index]!);
+		this.#onAnswer(selected, this.#note === "" ? null : this.#note);
 	}
 
 	render(width: number): string[] {
 		const rule = dim("─".repeat(Math.max(1, width)));
-		const lines: string[] = [rule, ` ${this.card.title}`];
-		for (const bodyLine of this.card.body.split("\n")) lines.push(` ${bodyLine}`);
+		const lines: string[] = [rule, ` ${this.#card.title}`];
+		for (const bodyLine of this.#card.body.split("\n")) lines.push(` ${bodyLine}`);
 		// pi's SelectList row language: the cursor prefix is the selection
 		// indicator — no toggle boxes on single-select (space is inert
 		// there; the toggled set exists only for select_any).
-		const multi = this.card.uiType === "native:select_any";
-		this.card.options.forEach((option, index) => {
+		const multi = this.#card.uiType === "native:select_any";
+		this.#card.options.forEach((option, index) => {
 			const cursor = index === this.#cursor ? "❯ " : "  ";
 			const mark = multi ? (this.#toggled.has(index) ? "[×] " : "[ ] ") : "";
 			lines.push(` ${cursor}${mark}${index + 1}. ${option}`);
@@ -143,17 +145,18 @@ class ChoiceCardView implements Component {
 class NoteCardView implements Component {
 	readonly focusable = true;
 	#note = "";
+	readonly #card: InteractionCard;
+	readonly #onAnswer: Answer;
 
-	constructor(
-		private readonly card: InteractionCard,
-		private readonly onAnswer: Answer,
-	) {}
-
+	constructor(card: InteractionCard, onAnswer: Answer) {
+		this.#card = card;
+		this.#onAnswer = onAnswer;
+	}
 
 	handleInput(data: string): void {
 		const kb = getKeybindings();
 		if (kb.matches(data, "tui.input.submit")) {
-			this.onAnswer([], this.#note === "" ? null : this.#note);
+			this.#onAnswer([], this.#note === "" ? null : this.#note);
 			return;
 		}
 		if (kb.matches(data, "tui.app.clearNote")) {
@@ -171,8 +174,8 @@ class NoteCardView implements Component {
 
 	render(width: number): string[] {
 		const rule = dim("─".repeat(Math.max(1, width)));
-		const lines: string[] = [rule, ` ${this.card.title}`];
-		for (const bodyLine of this.card.body.split("\n")) lines.push(` ${bodyLine}`);
+		const lines: string[] = [rule, ` ${this.#card.title}`];
+		for (const bodyLine of this.#card.body.split("\n")) lines.push(` ${bodyLine}`);
 		lines.push(` ${this.#note}▏`);
 		lines.push(" enter sends · ctrl+u clears");
 		lines.push(rule);

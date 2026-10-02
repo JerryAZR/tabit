@@ -1,9 +1,11 @@
 /**
- * The backend child process: spawn `tabit --json`, run the handshake, own
- * the pipes. The Node-port of the GUI's `backend.rs` (the reference
+ * The backend child process: spawn `tabit-core --json`, read its report,
+ * own the pipes. The Node-port of the GUI's `backend.rs` (the reference
  * leaf-consumer): the frontend owns the process lifecycle for recovery
  * only — crash isolation is the point, and stdin close is the contractual
- * shutdown (FRONTEND.md §3.4).
+ * shutdown (FRONTEND.md §3.4). v19 (the report model): the backend speaks
+ * first — its `report` line crosses unprompted, there is no initialize
+ * handshake, and client lines are bare commands from the first line on.
  *
  * Windows specifics (TUI-RESEARCH §2/§6): `windowsHide` suppresses the
  * console flash (the GUI's CREATE_NO_WINDOW analog) and `detached` puts
@@ -15,14 +17,14 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import * as readline from "node:readline";
 
-import { parseServerFrame, PROTOCOL_VERSION, toWireLine, type ClientFrame, type ParsedServerFrame } from "./protocol";
+import { parseServerFrame, toWireLine, type ClientFrame, type ParsedServerFrame } from "./protocol.ts";
 
 // Lines of stderr kept for crash reports — enough for a full internal-
 // error report (message plus backtrace), bounded against runaway output.
 const STDERR_RING = 200;
 
 export interface BackendOptions {
-	/** Path to the `tabit` executable (resolution order: flag > TABIT_BIN > PATH). */
+	/** Path to the `tabit-core` executable (resolution order: flag > TABIT_CORE_BIN > sibling > PATH). */
 	bin: string;
 	/** Extra args for the backend (default: `--json` — a new session; the
 	 *  caller adds `--continue` for explicit resumption). */
@@ -102,11 +104,7 @@ export class Backend {
 			detached: true,
 			windowsHide: true,
 		});
-		const backend = new Backend(child, events);
-		// The handshake is the first line (FRONTEND.md §3); the replay pass
-		// rebuilds our transcript, so we always ask for it.
-		backend.send({ type: "initialize", protocol_version: PROTOCOL_VERSION, replay: true });
-		return backend;
+		return new Backend(child, events);
 	}
 
 	/** One command line in. Fire-and-forget: outcomes arrive as events. */

@@ -6,8 +6,8 @@
  * in error color even collapsed.
  */
 
-import { parseToolArgs, registerToolCardRenderer, type ToolRenderInput } from "./registry";
-import { toolAccent, toolError, toolMuted, toolOutput, toolTitle, toolBold } from "../theme";
+import { parseToolArgs, registerToolCardRenderer, type ToolRenderInput } from "./registry.ts";
+import { toolAccent, toolError, toolMuted, toolOutput, toolTitle, toolBold } from "../theme.ts";
 
 registerToolCardRenderer("write", {
 	call: input => {

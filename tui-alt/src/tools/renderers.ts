@@ -7,10 +7,10 @@
  * Import order is the registration: each import self-registers.
  */
 
-import "./edit";
-import "./read";
-import "./write";
-import "./bash";
+import "./edit.ts";
+import "./read.ts";
+import "./write.ts";
+import "./bash.ts";
 
-export { rendererFor, defaultCall, defaultResult } from "./registry";
-export type { ToolCardRenderer, ToolRenderInput } from "./registry";
+export { rendererFor, defaultCall, defaultResult } from "./registry.ts";
+export type { ToolCardRenderer, ToolRenderInput } from "./registry.ts";

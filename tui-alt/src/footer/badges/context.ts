@@ -1,6 +1,6 @@
-import type { FooterBadgeFactory } from "../registry";
-import { formatTokenCount } from "../format";
-import { error, warn } from "../../theme";
+import type { FooterBadgeFactory } from "../registry.ts";
+import { formatTokenCount } from "../format.ts";
+import { error, warn } from "../../theme.ts";
 
 /** The context meter, the other agents' shape: bar, percent, absolute —
  *  `ctx: █████░░░░░ 28.0% (291k/1M)`. Warn-colored past pi's proven

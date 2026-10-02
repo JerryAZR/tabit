@@ -19,12 +19,17 @@
  * Stream routing is announcement-driven (SUBAGENTS.md): frames whose stamp
  * is not the active session are child traffic — logged, not rendered until
  * focus switching lands (M2). Nothing gates on prior knowledge of a stream.
+ * The report model (v19): the backend speaks first (`report`), there is no
+ * handshake ack, and the routing key arrives ON the boot's stamped
+ * `session_opened` — so the foreign-stamp drop stands down until that
+ * announcement lands (before it, the boot's stream is the only one that
+ * exists).
  */
 
-import { log } from "./log";
-import { SessionTree } from "./session-tree";
-import { PROTOCOL_VERSION } from "./protocol";
-import type { ModelCost, ParsedServerFrame, ServerControlFrame, SessionEvent, Usage } from "./protocol";
+import { log } from "./log.ts";
+import { SessionTree } from "./session-tree.ts";
+import { PROTOCOL_VERSION } from "./protocol.ts";
+import type { ModelCost, ParsedServerFrame, ServerControlFrame, SessionEvent, Usage } from "./protocol.ts";
 
 export interface PendingMessage {
 	id: string;
@@ -176,7 +181,8 @@ export class InteractiveMode {
 	readonly #cards = new Map<string, InteractionCard>();
 	readonly #deltas: PendingDelta[] = [];
 	#flushTimer: ReturnType<typeof setTimeout> | undefined;
-	/** Set on `initialize_rejected`; the entry turns it into the exit path. */
+	/** Set for fatal backend reports (version mismatch, startup failure);
+	 *  the entry turns it into the exit path. */
 	onFatal: ((reason: string) => void) | undefined;
 	/** Set by the entry: the graceful shutdown path (`/exit`, `/quit`). */
 	onQuit: (() => void) | undefined;
@@ -303,10 +309,21 @@ export class InteractiveMode {
 			this.#view.addNote(`unknown frame${parsed.type ? ` (${parsed.type})` : ""} — logged, connection kept`, "warn");
 			return;
 		}
+		// A backend-level error before the boot session opened is the
+		// startup-failure shape (v19): the report, this one unstamped error
+		// carrying the reason (config problems carry the setup guide), then
+		// a nonzero exit. Display the reason and die — respawn is the fix.
+		if (parsed.stream === undefined && parsed.event.type === "error" && this.#session === undefined) {
+			this.onFatal?.(parsed.event.message);
+			return;
+		}
 		// Child traffic: the announcement (session_opened with a parent)
-		// renders a note; everything else on a foreign stamp logs only.
-		if (parsed.stream !== undefined && parsed.stream !== this.#session) {
-			log(`child stream ${parsed.stream}: ${parsed.event.type}`);
+		// renders a note; everything else on a foreign stamp logs only. The
+		// drop stands down until the boot's session_opened lands — the
+		// routing key arrives on that stamped frame itself (v19), and
+		// before it the boot's stream is the only one that exists.
+		if (this.#session !== undefined && parsed.stream !== undefined && parsed.stream !== this.#session) {
+			log(`child stream ${parsed.stream}${parsed.origin ? ` (origin ${parsed.origin})` : ""}: ${parsed.event.type}`);
 			return;
 		}
 		const event = parsed.event;
@@ -315,23 +332,16 @@ export class InteractiveMode {
 	}
 
 	#handleControl(frame: ServerControlFrame): void {
-		if (frame.type === "initialize_ack") {
-			// The contract's exact-match rule, frontend side: an ack from a
-			// backend speaking any other version means our event vocabulary
-			// is wrong for this pipe — fail loud, never limp on unknown frames.
+		if (frame.type === "report") {
+			// The report model (v19): the backend speaks first and WE are the
+			// version check — a report naming any other version means our event
+			// vocabulary is wrong for this pipe. Fail loud, never limp on
+			// unknown frames; the entry's exit kills the mismatched child.
 			if (frame.protocol_version !== PROTOCOL_VERSION) {
 				this.onFatal?.(
 					`protocol version mismatch: backend speaks v${frame.protocol_version}, this frontend speaks v${PROTOCOL_VERSION}`,
 				);
-				return;
 			}
-			// One ack per connection; the boot session's facts arrive on its
-			// own session_opened — this only gives us the routing key.
-			this.#session ??= frame.session_id;
-			return;
-		}
-		if (frame.type === "initialize_rejected") {
-			this.onFatal?.(frame.reason);
 			return;
 		}
 		this.#view.addNote(`protocol error: ${frame.message}`, "error");
@@ -510,14 +520,14 @@ export class InteractiveMode {
 			this.#view.addNote(`error (${event.kind}): ${event.message}`, "error");
 		},
 		// --- replay ------------------------------------------------------------------
-		replay_started: () => {
+		replay_begin: () => {
 			this.#flush();
 			this.#replaying = true;
 			this.#deltas.length = 0;
 			this.#tree.closeTurn();
 			this.#view.beginReplay();
 		},
-		replay_done: () => {
+		replay_end: () => {
 			this.#replaying = false;
 			this.#view.endReplay();
 		},
@@ -532,6 +542,9 @@ export class InteractiveMode {
 			this.#view.addNote(`${event.sessions.length} session(s) on disk`, "info");
 		},
 		skills_available: event => {
+			// v20: stamped with the session's stream, announced as each session
+			// becomes visible. The foreign-stamp drop keeps a child's catalog
+			// off this list; session switches clear in session_opened.
 			this.#skills = event.skills.map(skill => ({ name: skill.name, description: skill.description ?? "" }));
 			this.#view.setSkills(this.#skills);
 			this.#view.addNote(`${event.skills.length} skill(s) loaded: ${event.skills.map(s => s.name).join(", ")}`, "info");
@@ -572,6 +585,11 @@ export class InteractiveMode {
 			this.#cacheHitRate = undefined;
 			this.#cost = undefined;
 			this.#contextUsed = undefined;
+			// v20: skills are per-session — announced only when discovery found
+			// at least one, so absence is unambiguous and the old session's list
+			// must not survive into this one.
+			this.#skills = [];
+			this.#view.setSkills(this.#skills);
 			this.#tree.reset();
 			this.#emitFooter();
 			// Boot facts have landed — the connection is no longer "connecting".
@@ -596,6 +614,12 @@ export class InteractiveMode {
 			}
 			this.#cards.set(card.id, card);
 			this.#view.showCard(card);
+		},
+		interaction_settled: event => {
+			// v17: the settle close — the request was answered, retracted, or
+			// its channel died. Id-only, fire-and-forget; unknown ids (already
+			// answered here) are no-ops. Run terminals stay the safety net (§8).
+			if (this.#cards.delete(event.id)) this.#view.closeCard(event.id, undefined);
 		},
 		// --- compaction -------------------------------------------------------------
 		// v15 envelope: begin → delta × N → (step × N → retried?)* → end/failed.

@@ -6,10 +6,12 @@
  * wire-order guarantee is assertable.
  */
 
-import { describe, expect, test } from "bun:test";
+import assert from "node:assert/strict";
+import { describe, test } from "node:test";
+import { setTimeout as sleep } from "node:timers/promises";
 
-import { InteractiveMode, type BackendLink, type FooterFacts, type InteractionCard, type ModeView, type PendingMessage, type SkillInfo } from "../src/mode";
-import { parseServerFrame, type ParsedServerFrame } from "../src/protocol";
+import { InteractiveMode, type BackendLink, type FooterFacts, type InteractionCard, type ModeView, type PendingMessage, type SkillInfo } from "../src/mode.ts";
+import { parseServerFrame, PROTOCOL_VERSION, type ParsedServerFrame } from "../src/protocol.ts";
 
 const SESSION = "0199aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const CHILD = "0199bbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
@@ -23,7 +25,10 @@ class FakeBackend implements BackendLink {
 		this.sent.push({ kind: "abort", session });
 	}
 	compact(session: string, directives?: string): void {
-		this.sent.push({ kind: "compact", session, directives });
+		// The real Backend omits the field when no directives are given
+		// (`...(directives !== undefined ? { directives } : {})`) — the
+		// double mirrors the wire, so deep equality stays honest.
+		this.sent.push({ kind: "compact", session, ...(directives !== undefined ? { directives } : {}) });
 	}
 	checkout(session: string, entryId: string): void {
 		this.sent.push({ kind: "checkout", session, entryId });
@@ -131,80 +136,93 @@ function harness() {
 	return { backend, view, mode, feed, control };
 }
 
-function ack(control: (frame: Extract<ParsedServerFrame, { kind: "control" }>["frame"]) => void, session = SESSION): void {
-	control({ type: "initialize_ack", protocol_version: 16, session_id: session });
+function boot(
+	control: (frame: Extract<ParsedServerFrame, { kind: "control" }>["frame"]) => void,
+	feed: (event: Record<string, unknown>, stream?: string | undefined) => void,
+	session = SESSION,
+): void {
+	// The report model (v19): the backend speaks first, and the routing key
+	// arrives ON the boot's stamped session_opened — no handshake ack exists.
+	control({ type: "report", protocol_version: PROTOCOL_VERSION });
+	feed({ type: "session_opened", id: session, path: "", cwd: "", model: { provider: "p", model: "m1" }, resumed: false }, session);
+}
+
+/** The recorded-dollars assertions: absent stays absent, present is close. */
+function costCloseTo(actual: number | undefined, expected: number): void {
+	assert.ok(actual !== undefined, "expected a recorded cost");
+	assert.ok(Math.abs(actual - expected) < 1e-9, `${actual} not close to ${expected}`);
 }
 
 describe("InteractiveMode", () => {
-	test("ack mints the routing key; submits address the active session", () => {
-		const { backend, view, mode, control } = harness();
-		expect(view.status).toBe("connecting…");
-		control({ type: "initialize_ack", protocol_version: 16, session_id: SESSION });
+	test("the boot's session_opened mints the routing key; submits address the active session", () => {
+		const { backend, view, mode, feed, control } = harness();
+		assert.strictEqual(view.status, "connecting…");
+		boot(control, feed);
 		mode.submit("hello");
-		expect(backend.sent).toEqual([{ kind: "message", session: SESSION, text: "hello" }]);
-		// Pre-ack submits have no session to address — dropped, not sent.
+		assert.deepStrictEqual(backend.sent, [{ kind: "message", session: SESSION, text: "hello" }]);
+		// Pre-boot submits have no session to address — dropped, not sent.
 		const fresh = harness();
 		fresh.mode.submit("lost");
-		expect(fresh.backend.sent).toEqual([]);
+		assert.deepStrictEqual(fresh.backend.sent, []);
 	});
 
 	test("a live run: liveness on user_message, coalesced deltas, tool lifecycle, per-turn usage", async () => {
 		const { view, mode, feed, control } = harness();
-		ack(control);
+		boot(control, feed);
 		feed({ type: "session_opened", id: SESSION, path: "/w", model: { provider: "p", model: "m1" }, resumed: false });
 		feed({ type: "model_changed", provider: "p", model: "m1", thinking_level: null, context_window: 200000, name: "Model One", cost: { input: 1, output: 4, cache_read: 0.1, cache_write: 0.4 } });
-		expect(view.footer?.path).toBe("/w"); // the editor's completion root
+		assert.strictEqual(view.footer?.path, "/w"); // the editor's completion root
 		feed({ type: "user_message", entry_id: "e1", text: "hi" });
-		expect(view.footer?.running).toBe(true);
-		expect(view.status).toBe("working — esc interrupts");
-		expect(view.users).toEqual([{ entryId: "e1", text: "hi" }]);
-		expect(view.footer?.modelName).toBe("Model One");
-		expect(view.footer?.contextWindow).toBe(200000);
-		expect(view.footer?.rates).toEqual({ input: 1, output: 4, cache_read: 0.1, cache_write: 0.4 });
+		assert.strictEqual(view.footer?.running, true);
+		assert.strictEqual(view.status, "working — esc interrupts");
+		assert.deepStrictEqual(view.users, [{ entryId: "e1", text: "hi" }]);
+		assert.strictEqual(view.footer?.modelName, "Model One");
+		assert.strictEqual(view.footer?.contextWindow, 200000);
+		assert.deepStrictEqual(view.footer?.rates, { input: 1, output: 4, cache_read: 0.1, cache_write: 0.4 });
 
 		feed({ type: "turn_started", id: "t1", started_at_ms: 1 });
 		feed({ type: "reasoning_delta", turn_id: "t1", id: "r1", reasoning: "think" });
 		feed({ type: "text_delta", turn_id: "t1", text: "Hel" });
 		feed({ type: "text_delta", turn_id: "t1", text: "lo" });
-		await Bun.sleep(45); // flush timer (33 ms)
-		expect(view.assistantText.get("t1")).toBe("Hello");
-		expect(view.reasoningText.get("t1:r1")).toBe("think");
+		await sleep(45); // flush timer (33 ms)
+		assert.strictEqual(view.assistantText.get("t1"), "Hello");
+		assert.strictEqual(view.reasoningText.get("t1:r1"), "think");
 
 		feed({ type: "tool_call", turn_id: "t1", name: "bash", call_id: "c1", internal_call_id: "i1", arguments: "{\"cmd\":\"ls\"}" });
-		expect(view.tools.get("i1")).toMatchObject({ name: "bash", args: "{\"cmd\":\"ls\"}" });
+		assert.partialDeepStrictEqual(view.tools.get("i1"), { name: "bash", args: "{\"cmd\":\"ls\"}" });
 		feed({ type: "tool_result", turn_id: "t1", entry_id: "e2", name: "bash", internal_call_id: "i1", content: "ok", status: { status: "success" }, details: { trivial: true } });
-		expect(view.tools.get("i1")).toMatchObject({ content: "ok", ok: true, details: { trivial: true } });
+		assert.partialDeepStrictEqual(view.tools.get("i1"), { content: "ok", ok: true, details: { trivial: true } });
 
 		// v12/v13: the per-turn report is the summing home — the run
 		// terminal carries no usage at all.
 		feed({ type: "completion_call", turn_id: "t1", usage: { input_tokens: 10, output_tokens: 5, total_tokens: 15, cached_input_tokens: 3, cache_creation_input_tokens: 2 }, cost: 0.00003 });
-		expect(view.footer?.inputTokens).toBe(10);
-		expect(view.footer?.outputTokens).toBe(5);
-		expect(view.footer?.cachedInputTokens).toBe(3);
-		expect(view.footer?.cacheCreationTokens).toBe(2);
-		expect(view.footer?.cost).toBeCloseTo(0.00003);
+		assert.strictEqual(view.footer?.inputTokens, 10);
+		assert.strictEqual(view.footer?.outputTokens, 5);
+		assert.strictEqual(view.footer?.cachedInputTokens, 3);
+		assert.strictEqual(view.footer?.cacheCreationTokens, 2);
+		costCloseTo(view.footer?.cost, 0.00003);
 
 		feed({ type: "run_finished", output: "lo", durable: true, started_at_ms: 1, completed_at_ms: 2 });
-		expect(view.footer?.running).toBe(false);
-		expect(view.footer?.inputTokens).toBe(10);
-		expect(mode.running).toBe(false);
+		assert.strictEqual(view.footer?.running, false);
+		assert.strictEqual(view.footer?.inputTokens, 10);
+		assert.strictEqual(mode.running, false);
 	});
 
 	test("the session log path fact: real path flows, ephemeral stays undefined", () => {
 		const { view, feed, control } = harness();
-		ack(control);
+		boot(control, feed);
 		feed({ type: "session_opened", id: SESSION, path: "C:\\proj\\.tabit\\s\\a.jsonl", model: { provider: "p", model: "m1" }, resumed: false });
-		expect(view.footer?.path).toBe("C:\\proj\\.tabit\\s\\a.jsonl"); // the log file — session UI data, not a cwd
+		assert.strictEqual(view.footer?.path, "C:\\proj\\.tabit\\s\\a.jsonl"); // the log file — session UI data, not a cwd
 
 		const ephemeral = harness();
-		ack(ephemeral.control);
+		boot(ephemeral.control, ephemeral.feed);
 		ephemeral.feed({ type: "session_opened", id: SESSION, path: "", model: { provider: "p", model: "m1" }, resumed: false });
-		expect(ephemeral.view.footer?.path).toBeUndefined();
+		assert.strictEqual(ephemeral.view.footer?.path, undefined);
 	});
 
 	test("usage accounting: sums across turns and terminals, absent costs stay absent, replay re-sums after reset", async () => {
 		const { view, feed, control } = harness();
-		ack(control);
+		boot(control, feed);
 		feed({ type: "session_opened", id: SESSION, path: "/w", model: { provider: "p", model: "m1" }, resumed: false });
 		const usage = (i: number, o: number, c = 0, w = 0) => ({
 			input_tokens: i,
@@ -220,75 +238,75 @@ describe("InteractiveMode", () => {
 		feed({ type: "user_message", entry_id: "e1", text: "again" });
 		feed({ type: "completion_call", turn_id: "t2", usage: usage(7, 2), cost: 0.0001 });
 		feed({ type: "run_aborted", output: "", started_at_ms: 1, completed_at_ms: 2 });
-		expect(view.footer?.inputTokens).toBe(137);
-		expect(view.footer?.outputTokens).toBe(27);
-		expect(view.footer?.cachedInputTokens).toBe(50);
-		expect(view.footer?.cacheCreationTokens).toBe(10);
-		expect(view.footer?.cost).toBeCloseTo(0.0003); // absent cost skipped, not zeroed
+		assert.strictEqual(view.footer?.inputTokens, 137);
+		assert.strictEqual(view.footer?.outputTokens, 27);
+		assert.strictEqual(view.footer?.cachedInputTokens, 50);
+		assert.strictEqual(view.footer?.cacheCreationTokens, 10);
+		costCloseTo(view.footer?.cost, 0.0003); // absent cost skipped, not zeroed
 
 		// A resume-style boot: facts reset, then the replay pass re-delivers
 		// the history's completion_calls through the same handler.
 		feed({ type: "session_opened", id: SESSION, path: "/w", model: { provider: "p", model: "m1" }, resumed: true });
-		expect(view.footer?.inputTokens).toBe(0);
-		expect(view.footer?.cost).toBeUndefined();
-		expect(view.footer?.resumed).toBe(true);
-		feed({ type: "replay_started", total: 1 });
+		assert.strictEqual(view.footer?.inputTokens, 0);
+		assert.strictEqual(view.footer?.cost, undefined);
+		assert.strictEqual(view.footer?.resumed, true);
+		feed({ type: "replay_begin", total: 1 });
 		feed({ type: "completion_call", turn_id: "t1", usage: usage(100, 20), cost: 0.0002 });
-		feed({ type: "replay_done" });
-		await Bun.sleep(45);
-		expect(view.footer?.inputTokens).toBe(100);
-		expect(view.footer?.outputTokens).toBe(20);
-		expect(view.footer?.cost).toBeCloseTo(0.0002);
+		feed({ type: "replay_end" });
+		await sleep(45);
+		assert.strictEqual(view.footer?.inputTokens, 100);
+		assert.strictEqual(view.footer?.outputTokens, 20);
+		costCloseTo(view.footer?.cost, 0.0002);
 	});
 
 	test("blocks appear in wire order: lazy creation, no pre-allocation at turn_started", async () => {
 		const { view, feed, control } = harness();
-		ack(control);
+		boot(control, feed);
 		feed({ type: "turn_started", id: "t9", started_at_ms: 1 });
 		feed({ type: "reasoning_delta", turn_id: "t9", id: "r9", reasoning: "R" });
 		feed({ type: "text_delta", turn_id: "t9", text: "a" });
 		feed({ type: "reasoning_delta", turn_id: "t9", id: "r9b", reasoning: "R2" });
 		feed({ type: "text_delta", turn_id: "t9", text: "b" });
-		await Bun.sleep(45);
-		expect(view.order).toEqual(["reasoning:r9", "text:t9", "reasoning:r9b", "text:t9"]);
-		expect(view.assistantText.get("t9")).toBe("ab");
-		expect(view.reasoningText.get("t9:r9")).toBe("R");
-		expect(view.reasoningText.get("t9:r9b")).toBe("R2");
+		await sleep(45);
+		assert.deepStrictEqual(view.order, ["reasoning:r9", "text:t9", "reasoning:r9b", "text:t9"]);
+		assert.strictEqual(view.assistantText.get("t9"), "ab");
+		assert.strictEqual(view.reasoningText.get("t9:r9"), "R");
+		assert.strictEqual(view.reasoningText.get("t9:r9b"), "R2");
 	});
 
 	test("steering: queued → drained by entry id; discard clears with a note", () => {
 		const { view, feed, control } = harness();
-		ack(control);
+		boot(control, feed);
 		feed({ type: "user_message", entry_id: "e0", text: "first" });
 		feed({ type: "message_queued", id: "q1", text: "steer one" });
 		feed({ type: "message_queued", id: "q2", text: "steer two" });
-		expect(view.pending.map(p => p.id)).toEqual(["q1", "q2"]);
+		assert.deepStrictEqual(view.pending.map(p => p.id), ["q1", "q2"]);
 		feed({ type: "user_message", entry_id: "q1", text: "steer one" });
-		expect(view.pending.map(p => p.id)).toEqual(["q2"]);
+		assert.deepStrictEqual(view.pending.map(p => p.id), ["q2"]);
 		feed({ type: "messages_discarded", messages: [{ id: "q2", text: "steer two" }] });
-		expect(view.pending).toEqual([]);
-		expect(view.notes.at(-1)?.kind).toBe("warn");
+		assert.deepStrictEqual(view.pending, []);
+		assert.strictEqual(view.notes.at(-1)?.kind, "warn");
 	});
 
 	test("turn_retried drops the turn's blocks and its buffered deltas", async () => {
 		const { view, feed, control } = harness();
-		ack(control);
+		boot(control, feed);
 		feed({ type: "turn_started", id: "t1", started_at_ms: 1 });
 		feed({ type: "text_delta", turn_id: "t1", text: "draft" });
 		feed({ type: "reasoning_delta", turn_id: "t1", id: "r1", reasoning: "hm" });
 		feed({ type: "tool_call", turn_id: "t1", name: "bash", call_id: "c1", internal_call_id: "i1", arguments: null });
 		feed({ type: "turn_retried", turn_id: "t1" });
 		// The retried turn's still-buffered deltas must never paint.
-		await Bun.sleep(45);
-		expect(view.removedTurns).toContain("t1");
-		expect(view.assistantText.get("t1")).toBeUndefined();
-		expect(view.reasoningText.get("t1:r1")).toBeUndefined();
-		expect(view.tools.has("i1")).toBe(false);
+		await sleep(45);
+		assert.ok((view.removedTurns).includes("t1"));
+		assert.strictEqual(view.assistantText.get("t1"), undefined);
+		assert.strictEqual(view.reasoningText.get("t1:r1"), undefined);
+		assert.strictEqual(view.tools.has("i1"), false);
 	});
 
 	test("the slash space: /compact rides the wire; /help lists; /exit quits; skills never send", () => {
 		const { backend, view, mode, feed, control } = harness();
-		ack(control);
+		boot(control, feed);
 		let quit = 0;
 		mode.onQuit = () => quit++;
 		mode.setKeybindings([{ action: "interrupt", keys: ["escape", "ctrl+c"], description: "Interrupt the running turn" }]);
@@ -299,50 +317,67 @@ describe("InteractiveMode", () => {
 				{ name: "tests-quality-checklist", description: "A checklist for tests", location: "l2", level: "user" },
 			],
 		});
-		expect(view.skills.map(s => s.name)).toEqual(["code-quality-checklist", "tests-quality-checklist"]);
+		assert.deepStrictEqual(view.skills.map(s => s.name), ["code-quality-checklist", "tests-quality-checklist"]);
 
 		mode.submit("/compact");
-		expect(backend.sent).toEqual([{ kind: "compact", session: SESSION }]);
+		assert.deepStrictEqual(backend.sent, [{ kind: "compact", session: SESSION }]);
 
 		mode.submit("/help");
 		const info = view.notes.filter(n => n.kind === "info").map(n => n.text);
-		expect(info.some(t => t.includes("/compact"))).toBe(true);
-		expect(info.some(t => t.includes("escape / ctrl+c"))).toBe(true);
+		assert.strictEqual(info.some(t => t.includes("/compact")), true);
+		assert.strictEqual(info.some(t => t.includes("escape / ctrl+c")), true);
 
 		mode.submit("/exit");
 		mode.submit("/quit");
-		expect(quit).toBe(2);
-		expect(backend.sent).toHaveLength(1); // quitting is local, never a wire frame
+		assert.strictEqual(quit, 2);
+		assert.strictEqual((backend.sent).length, 1); // quitting is local, never a wire frame
 
 		mode.submit("/code-quality-checklist");
-		expect(backend.sent).toHaveLength(1); // no wire invocation for skills
-		expect(view.notes.at(-1)?.kind).toBe("warn");
-		expect(view.notes.at(-1)?.text).toContain("not invocable");
+		assert.strictEqual((backend.sent).length, 1); // no wire invocation for skills
+		assert.strictEqual(view.notes.at(-1)?.kind, "warn");
+		assert.ok((view.notes.at(-1)?.text ?? "").includes("not invocable"));
 
 		mode.submit("/no-such-command");
 		mode.submit("/compact focus on the auth module"); // v16: guidance rides as directives
-		expect(backend.sent[1]).toEqual({ kind: "compact", session: SESSION, directives: "focus on the auth module" });
-		expect(view.notes.filter(n => n.kind === "warn")).toHaveLength(2);
+		assert.deepStrictEqual(backend.sent[1], { kind: "compact", session: SESSION, directives: "focus on the auth module" });
+		assert.strictEqual((view.notes.filter(n => n.kind === "warn")).length, 2);
 	});
 
 	test("the command table is the one home: the dropdown list and interpreter cannot diverge", () => {
 		const { mode, feed, control } = harness();
-		ack(control);
+		boot(control, feed);
 		// Static commands first, none display-only — each carries its behavior.
 		const before = mode.slashCommands();
-		expect(before.map(c => c.name)).toEqual(["compact", "help", "tree", "exit", "quit"]);
-		expect(before.some(c => c.displayOnly)).toBe(false);
+		assert.deepStrictEqual(before.map(c => c.name), ["compact", "help", "tree", "exit", "quit"]);
+		assert.strictEqual(before.some(c => c.displayOnly), false);
 
 		// Skills join the same table as display-only entries.
 		feed({ type: "skills_available", skills: [{ name: "my-skill", description: "d", location: "l", level: "user" }] });
 		const after = mode.slashCommands();
-		expect(after).toHaveLength(6);
-		expect(after.find(c => c.name === "my-skill")).toMatchObject({ displayOnly: true });
+		assert.strictEqual((after).length, 6);
+		assert.partialDeepStrictEqual(after.find(c => c.name === "my-skill"), { displayOnly: true });
+	});
+
+	test("skills fold per stream (v20): a session switch clears the catalog, a child's never clobbers it", () => {
+		const { view, feed, control } = harness();
+		boot(control, feed);
+		feed({ type: "skills_available", skills: [{ name: "commit", description: "d", location: "l", level: "user" }] });
+		assert.deepStrictEqual(view.skills.map(s => s.name), ["commit"]);
+
+		// A subagent child announces its own catalog on its own stamp — it
+		// must not touch the active session's list.
+		feed({ type: "skills_available", skills: [{ name: "child-skill", description: "d", location: "l", level: "user" }] }, CHILD);
+		assert.deepStrictEqual(view.skills.map(s => s.name), ["commit"]);
+
+		// v20 announces only when discovery found something — absence is
+		// unambiguous, so the next session clears until its catalog lands.
+		feed({ type: "session_opened", id: SESSION, path: "/w", model: { provider: "p", model: "m1" }, resumed: false });
+		assert.deepStrictEqual(view.skills, []);
 	});
 
 	test("select_one cards answer exactly once, with the label; run terminals close leftovers", () => {
 		const { backend, view, mode, feed, control } = harness();
-		ack(control);
+		boot(control, feed);
 		feed({ type: "user_message", entry_id: "e1", text: "go" });
 		feed({
 			type: "interaction_request",
@@ -350,122 +385,158 @@ describe("InteractiveMode", () => {
 			ui_type: "native:select_one",
 			payload: { title: "Allow bash?", body: "ls -la", options: [{ label: "Allow" }, { label: "Deny" }], free_text: true },
 		});
-		expect(view.cards).toHaveLength(1);
-		expect(view.cards[0]).toMatchObject({ id: "ask1", options: ["Allow", "Deny"], freeText: true });
+		assert.strictEqual((view.cards).length, 1);
+		assert.partialDeepStrictEqual(view.cards[0], { id: "ask1", options: ["Allow", "Deny"], freeText: true });
 
 		mode.answerCard("ask1", ["Allow"], "needs an excluded path");
-		expect(backend.sent).toEqual([{ kind: "interaction_response", session: SESSION, id: "ask1", payload: { selected: ["Allow"], text: "needs an excluded path" } }]);
-		expect(view.closed).toEqual([{ id: "ask1", note: undefined }]);
+		assert.deepStrictEqual(backend.sent, [{ kind: "interaction_response", session: SESSION, id: "ask1", payload: { selected: ["Allow"], text: "needs an excluded path" } }]);
+		assert.deepStrictEqual(view.closed, [{ id: "ask1", note: undefined }]);
 		mode.answerCard("ask1", ["Allow"], null); // stale answer: no second send
-		expect(backend.sent).toHaveLength(1);
+		assert.strictEqual((backend.sent).length, 1);
 
 		feed({ type: "interaction_request", id: "ask2", ui_type: "native:select_one", payload: { title: "t", body: "b", options: [{ label: "A" }] } });
 		feed({ type: "run_finished", output: "", durable: true, started_at_ms: 1, completed_at_ms: 2 });
-		expect(view.closed.some(c => c.id === "ask2" && c.note === "run finished")).toBe(true);
+		assert.strictEqual(view.closed.some(c => c.id === "ask2" && c.note === "run finished"), true);
+	});
+
+	test("interaction_settled closes the card (v17); already-answered and unknown ids are no-ops", () => {
+		const { view, mode, feed, control } = harness();
+		boot(control, feed);
+		feed({ type: "user_message", entry_id: "e1", text: "go" });
+		feed({
+			type: "interaction_request",
+			id: "ask1",
+			ui_type: "native:select_one",
+			payload: { title: "Allow bash?", body: "ls", options: [{ label: "Allow" }, { label: "Deny" }] },
+		});
+		assert.strictEqual((view.cards).length, 1);
+
+		// The settle close (answered elsewhere, retracted, dead channel):
+		// the card drops long before any run terminal.
+		feed({ type: "interaction_settled", id: "ask1" });
+		assert.deepStrictEqual(view.closed, [{ id: "ask1", note: undefined }]);
+		assert.strictEqual(mode.hasOpenCard, false);
+
+		// A settle for an id we don't hold (e.g. answered here first) is a no-op.
+		feed({ type: "interaction_settled", id: "ask1" });
+		assert.strictEqual((view.closed).length, 1);
 	});
 
 	test("unknown card shapes render a cannot-answer notice, never an answer", () => {
 		const { backend, view, feed, control } = harness();
-		ack(control);
+		boot(control, feed);
 		feed({ type: "interaction_request", id: "x1", ui_type: "ext:foo:widget", payload: { anything: true } });
 		feed({ type: "interaction_request", id: "x2", ui_type: "native:select_any", payload: { title: "t", options: [] } });
-		expect(view.cards).toHaveLength(0);
-		expect(view.notes.filter(n => n.text.startsWith("cannot answer card"))).toHaveLength(2);
-		expect(backend.sent).toEqual([]);
+		assert.strictEqual((view.cards).length, 0);
+		assert.strictEqual((view.notes.filter(n => n.text.startsWith("cannot answer card"))).length, 2);
+		assert.deepStrictEqual(backend.sent, []);
 	});
 
 	test("the replay pass renders through the same handlers without liveness", async () => {
 		const { view, feed, control } = harness();
-		ack(control);
-		feed({ type: "replay_started", total: 6 });
+		boot(control, feed);
+		feed({ type: "replay_begin", total: 6 });
 		feed({ type: "user_message", entry_id: "e1", text: "old" });
-		expect(view.footer?.running ?? false).toBe(false); // suppressed inside brackets
+		assert.strictEqual(view.footer?.running ?? false, false); // suppressed inside brackets
 		feed({ type: "turn_started", id: "t1", started_at_ms: 1 });
 		feed({ type: "text_delta", turn_id: "t1", text: "archived answer" });
 		feed({ type: "completion_call", turn_id: "t1", usage: { input_tokens: 9, output_tokens: 4, total_tokens: 13, cached_input_tokens: 0, cache_creation_input_tokens: 0 } });
-		feed({ type: "replay_done" });
-		await Bun.sleep(45);
-		expect(view.replayBegun).toBe(1);
-		expect(view.replayEnded).toBe(1);
-		expect(view.assistantText.get("t1")).toBe("archived answer");
-		expect(view.footer?.inputTokens).toBe(9); // history's usage rides the same handler
+		feed({ type: "replay_end" });
+		await sleep(45);
+		assert.strictEqual(view.replayBegun, 1);
+		assert.strictEqual(view.replayEnded, 1);
+		assert.strictEqual(view.assistantText.get("t1"), "archived answer");
+		assert.strictEqual(view.footer?.inputTokens, 9); // history's usage rides the same handler
 	});
 
 	test("child-stream frames log without view noise", () => {
 		const { view, feed, control } = harness();
-		ack(control);
+		boot(control, feed);
 		const before = view.users.length;
 		feed({ type: "user_message", entry_id: "cx", text: "child prompt" }, CHILD);
-		expect(view.users.length).toBe(before);
+		assert.strictEqual(view.users.length, before);
 	});
 
 	test("unknown frame types surface as notes; the connection is kept", () => {
 		const { mode, view } = harness();
 		mode.handleFrame(parseServerFrame(JSON.stringify({ type: "future_thing", x: 1 }))!);
-		expect(view.notes.some(n => n.text.includes("future_thing"))).toBe(true);
+		assert.strictEqual(view.notes.some(n => n.text.includes("future_thing")), true);
 	});
 
-	test("initialize_rejected is fatal with the backend's reason", () => {
+	test("a startup failure (pre-boot backend-level error) is fatal with the reason; later ones are notes", () => {
+		const { mode, view, feed, control } = harness();
+		let reason = "";
+		mode.onFatal = r => {
+			reason = r;
+		};
+		// v19: the startup-failure shape is the report, one unstamped error
+		// carrying the reason, then a nonzero exit — display the reason.
+		// (feed's default stamp would make it session traffic; handleFrame
+		// directly to keep it backend-level.)
+		mode.handleFrame({ kind: "event", stream: undefined, event: { type: "error", kind: "session", message: "no config — see the setup guide" } });
+		assert.strictEqual(reason, "no config — see the setup guide");
+
+		// Once the boot session is open, the same kind is an ordinary
+		// backend-level error (an unknown-session command's outcome) — a
+		// note, never a death.
+		boot(control, feed);
+		reason = "";
+		mode.handleFrame({ kind: "event", stream: undefined, event: { type: "error", kind: "session", message: "no such session" } });
+		assert.strictEqual(reason, "");
+		assert.strictEqual(view.notes.some(n => n.kind === "error" && n.text.includes("no such session")), true);
+	});
+
+	test("a report naming any other protocol version is fatal, never limped on", () => {
 		const { mode, control } = harness();
 		let reason = "";
 		mode.onFatal = r => {
 			reason = r;
 		};
-		control({ type: "initialize_rejected", reason: "no config" });
-		expect(reason).toBe("no config");
-	});
-
-	test("an ack from any other protocol version is fatal, never limped on", () => {
-		const { mode, control } = harness();
-		let reason = "";
-		mode.onFatal = r => {
-			reason = r;
-		};
-		control({ type: "initialize_ack", protocol_version: 15, session_id: SESSION });
-		expect(reason).toContain("v15");
-		expect(reason).toContain("v16");
-		expect(mode.activeSession).toBeUndefined();
+		control({ type: "report", protocol_version: PROTOCOL_VERSION - 1 });
+		assert.ok((reason).includes(`v${PROTOCOL_VERSION - 1}`));
+		assert.ok((reason).includes(`v${PROTOCOL_VERSION}`));
+		assert.strictEqual(mode.activeSession, undefined);
 	});
 
 	test("compaction envelope: steps meter like turns, end delivers the context length", () => {
 		const { view, feed, control } = harness();
-		ack(control);
+		boot(control, feed);
 		feed({ type: "session_opened", id: SESSION, path: "/w", model: { provider: "p", model: "m1" }, resumed: false });
 		feed({ type: "model_changed", provider: "p", model: "m1", thinking_level: null, context_window: 200000 });
 		feed({ type: "completion_call", turn_id: "t1", usage: { input_tokens: 900, output_tokens: 100, total_tokens: 1000, cached_input_tokens: 0, cache_creation_input_tokens: 0 }, cost: 0.001 });
-		expect(view.footer?.contextUsed).toBe(1000);
+		assert.strictEqual(view.footer?.contextUsed, 1000);
 
 		feed({ type: "compaction_begin" });
-		expect(view.status).toBe("compacting context…");
+		assert.strictEqual(view.status, "compacting context…");
 		// Summarization spend meters exactly like a completion_call's (v15).
 		feed({ type: "compaction_step", id: "c1", usage: { input_tokens: 800, output_tokens: 50, total_tokens: 850, cached_input_tokens: 0, cache_creation_input_tokens: 0 }, cost: 0.0005 });
-		expect(view.footer?.inputTokens).toBe(1700);
-		expect(view.footer?.cost).toBeCloseTo(0.0015);
+		assert.strictEqual(view.footer?.inputTokens, 1700);
+		costCloseTo(view.footer?.cost, 0.0015);
 		feed({ type: "compaction_end", tokens_after: 4200 });
-		expect(view.footer?.contextUsed).toBe(4200); // authoritative post-compaction length
-		expect(view.status).toBe("idle");
-		expect(view.notes.some(n => n.text.startsWith("context compacted"))).toBe(true);
+		assert.strictEqual(view.footer?.contextUsed, 4200); // authoritative post-compaction length
+		assert.strictEqual(view.status, "idle");
+		assert.strictEqual(view.notes.some(n => n.text.startsWith("context compacted")), true);
 
 		// The next request's fresh total wins again from then on.
 		feed({ type: "completion_call", turn_id: "t2", usage: { input_tokens: 10, output_tokens: 5, total_tokens: 4300, cached_input_tokens: 0, cache_creation_input_tokens: 0 } });
-		expect(view.footer?.contextUsed).toBe(4300);
+		assert.strictEqual(view.footer?.contextUsed, 4300);
 	});
 
 	test("compaction failure: error note, status restored, nothing metered", () => {
 		const { view, feed, control } = harness();
-		ack(control);
+		boot(control, feed);
 		feed({ type: "session_opened", id: SESSION, path: "/w", model: { provider: "p", model: "m1" }, resumed: false });
 		feed({ type: "user_message", entry_id: "e1", text: "go" });
 		feed({ type: "compaction_begin" });
 		feed({ type: "compaction_failed", message: "provider down" });
-		expect(view.notes.some(n => n.text.includes("compaction failed"))).toBe(true);
-		expect(view.status).toBe("working — esc interrupts"); // the run continues
-		expect(view.footer?.inputTokens).toBe(0);
+		assert.strictEqual(view.notes.some(n => n.text.includes("compaction failed")), true);
+		assert.strictEqual(view.status, "working — esc interrupts"); // the run continues
+		assert.strictEqual(view.footer?.inputTokens, 0);
 	});
 
 	test("the session tree: chain events feed it, checkout moves the head and rides the wire, /tree dispatches", () => {
 		const { backend, mode, feed, control } = harness();
-		ack(control);
+		boot(control, feed);
 		feed({ type: "session_opened", id: SESSION, path: "/w", model: { provider: "p", model: "m1" }, resumed: false });
 		feed({ type: "user_message", entry_id: "e1", text: "go" });
 		feed({ type: "turn_started", id: "t1", started_at_ms: 1 });
@@ -474,27 +545,27 @@ describe("InteractiveMode", () => {
 		feed({ type: "tool_result", turn_id: "t1", entry_id: "e2", name: "bash", internal_call_id: "i1", content: "ok", status: { status: "success" } });
 
 		// The store built the chain; the tool row shows the call.
-		expect(mode.tree.rows().map(row => row.id)).toEqual(["e1", "t1", "e2"]);
-		expect(mode.tree.rows().find(row => row.id === "e2")!.preview).toBe("bash cmd: ls");
+		assert.deepStrictEqual(mode.tree.rows().map(row => row.id), ["e1", "t1", "e2"]);
+		assert.strictEqual(mode.tree.rows().find(row => row.id === "e2")!.preview, "bash cmd: ls");
 
 		// Rewind via the tree: the command names the session and entry.
 		mode.checkout("e1");
-		expect(backend.sent).toEqual([{ kind: "checkout", session: SESSION, entryId: "e1" }]);
+		assert.deepStrictEqual(backend.sent, [{ kind: "checkout", session: SESSION, entryId: "e1" }]);
 		feed({ type: "checked_out", entry_id: "e1", base_id: null });
-		expect(mode.tree.headId).toBe("e1");
+		assert.strictEqual(mode.tree.headId, "e1");
 		// The next message branches off the rewound head.
 		feed({ type: "user_message", entry_id: "e3", text: "again" });
-		expect(mode.tree.rows().map(row => row.id)).toEqual(["e1", "e3", "t1", "e2"]);
+		assert.deepStrictEqual(mode.tree.rows().map(row => row.id), ["e1", "e3", "t1", "e2"]);
 
 		// /tree dispatches to the root's callback (as invocable, not display-only).
 		let opened = 0;
 		mode.onTree = () => opened++;
 		mode.submit("/tree");
-		expect(opened).toBe(1);
-		expect(mode.slashCommands().find(c => c.name === "tree")).toMatchObject({ displayOnly: false });
+		assert.strictEqual(opened, 1);
+		assert.partialDeepStrictEqual(mode.slashCommands().find(c => c.name === "tree"), { displayOnly: false });
 
 		// A fresh session_opened resets the tree with the session.
 		feed({ type: "session_opened", id: SESSION, path: "/w", model: { provider: "p", model: "m1" }, resumed: false });
-		expect(mode.tree.size).toBe(0);
+		assert.strictEqual(mode.tree.size, 0);
 	});
 });

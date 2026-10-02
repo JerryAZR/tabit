@@ -5,7 +5,7 @@ The sibling build (`../tabit-tui-work/tui`, branch `tui/research`) is the
 rows into terminal scrollback via the `TerminalFrameProvider`/`HistoryBatch`
 contract. This package is the **other presentation**: a full-screen
 alt-screen TUI — a bounded, application-owned viewport with a pinned dock —
-over the same `tabit --json` edge. Same protocol (v13), same crash doctrine,
+over the same `tabit-core --json` edge. Same protocol (v20), same crash doctrine,
 different surface.
 
 ## Engine: stock pi-tui, not the fork
@@ -18,7 +18,7 @@ alt-screen implementation lives upstream in **`@earendil-works/pi-tui`**
 `VStack`/`HStack`/`ScrollView`, follow-end streaming, scrollbars, in-viewport
 search, mouse selection, Kitty input, IME. It is pi's own daily-driver
 fullscreen mode, so it is production-proven at exactly this job; it ships
-compiled `dist` JS, which Bun consumes directly, and its optional native
+compiled `dist` JS, which plain Node consumes directly, and its optional native
 helpers (win32 VT input, clipboard) degrade gracefully when absent. The
 ROADMAP ruling's fallback ladder already names stock ("stock pi-tui on plain
 Node"); this is that rung promoted by the presentation pivot, not a new
@@ -29,8 +29,8 @@ share no engine, only the wire seam.
 
 Everything in TUI-RESEARCH §9 transfers except the presentation root:
 
-- **Verbatim from the sibling build**: `backend.ts` (spawn/handshake/stderr
-  ring, the Node port of `backend.rs`), `protocol.ts` (v13 types + lenient
+- **Verbatim from the sibling build**: `backend.ts` (spawn/stderr
+  ring, the Node port of `backend.rs`), `protocol.ts` (v20 types + lenient
   parse), `mock-backend.ts` (protocol-faithful child-process mock), and their
   tests. These are presentation-agnostic.
 - **The handler-table doctrine carries**: one typed handler per wire event;
@@ -145,7 +145,8 @@ the whole block).
    apply; engine-side viewport search/scrollbars/selection arrive in exchange.
 3. Everything else mirrors: backend seam, handler table, component porting
    (stock exports the same component names the sibling adapts), toolchain
-   (Bun-first, exact pins, tsc strict, offline mock-driven tests).
+   (plain Node — native type stripping, `node --test` — exact pins, tsc
+   strict, offline mock-driven tests).
 
 ## Session tree: client-built, checkout now (owner ruling 2026-09)
 

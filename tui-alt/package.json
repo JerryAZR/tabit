@@ -2,24 +2,24 @@
 	"type": "module",
 	"name": "tabit-tui-alt",
 	"version": "0.1.0",
-	"description": "Tabit's alt-screen terminal frontend: a full-screen TUI over `tabit --json`",
+	"description": "Tabit's alt-screen terminal frontend: a full-screen TUI over `tabit-core --json`",
 	"license": "MIT",
 	"main": "./src/cli.ts",
 	"bin": {
 		"tabit-tui": "./src/cli.ts"
 	},
 	"engines": {
-		"bun": ">=1.3.14"
+		"node": ">=24.2"
 	},
 	"scripts": {
 		"check": "tsc --noEmit",
-		"test": "bun test"
+		"test": "node --test test/*.test.ts"
 	},
 	"dependencies": {
 		"@earendil-works/pi-tui": "0.85.1"
 	},
 	"devDependencies": {
-		"@types/bun": "1.3.14",
+		"@types/node": "^24.0.0",
 		"typescript": "7.0.2"
 	}
 }

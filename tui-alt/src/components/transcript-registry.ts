@@ -19,9 +19,9 @@
 
 import type { Component } from "@earendil-works/pi-tui";
 
-import type { AssistantBlock } from "./assistant-block";
-import type { ReasoningBlock } from "./reasoning-block";
-import type { ToolBlock } from "./tool-block";
+import type { AssistantBlock } from "./assistant-block.ts";
+import type { ReasoningBlock } from "./reasoning-block.ts";
+import type { ToolBlock } from "./tool-block.ts";
 
 /** Every block a turn created, for whole-group removal (`turn_retried`). */
 export interface TurnEntry {

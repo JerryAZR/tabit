@@ -7,7 +7,7 @@
 
 import { Text, type Component } from "@earendil-works/pi-tui";
 
-import { marker } from "../symbols";
+import { marker } from "../symbols.ts";
 
 export class NoteBlock implements Component {
 	readonly #line: Text;

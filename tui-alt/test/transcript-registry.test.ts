@@ -7,12 +7,13 @@
  * previous turn's committed block.
  */
 
-import { describe, expect, test } from "bun:test";
+import assert from "node:assert/strict";
+import { describe, test } from "node:test";
 
-import { AssistantBlock } from "../src/components/assistant-block";
-import { ReasoningBlock } from "../src/components/reasoning-block";
-import { ToolBlock } from "../src/components/tool-block";
-import { TranscriptRegistry } from "../src/components/transcript-registry";
+import { AssistantBlock } from "../src/components/assistant-block.ts";
+import { ReasoningBlock } from "../src/components/reasoning-block.ts";
+import { ToolBlock } from "../src/components/tool-block.ts";
+import { TranscriptRegistry } from "../src/components/transcript-registry.ts";
 
 const touch = () => {};
 
@@ -26,11 +27,11 @@ describe("TranscriptRegistry", () => {
 		// Turn 2 reuses the id (the mock's own habit): it must not find t1's block.
 		let created = 0;
 		if (registry.reasoning("t2", "r1") === undefined) created++;
-		expect(created).toBe(1);
+		assert.strictEqual(created, 1);
 		registry.putReasoning("t2", "r1", new ReasoningBlock("t2", touch));
-		expect(registry.reasoning("t2", "r1")).not.toBe(first);
-		expect(registry.reasoning("t1", "r1")).toBe(first); // t1's block untouched
-		expect(first!.text()).toBe("turn one thinking"); // frozen: no cross-turn append
+		assert.notStrictEqual(registry.reasoning("t2", "r1"), first);
+		assert.strictEqual(registry.reasoning("t1", "r1"), first); // t1's block untouched
+		assert.strictEqual(first!.text(), "turn one thinking"); // frozen: no cross-turn append
 	});
 
 	test("removeTurn drops exactly the turn's blocks from every map", () => {
@@ -41,12 +42,12 @@ describe("TranscriptRegistry", () => {
 		registry.putReasoning("t2", "r1", new ReasoningBlock("t2", touch)); // same id, other turn
 
 		const removed = registry.removeTurn("t1");
-		expect(removed).toHaveLength(3);
-		expect(registry.assistant("t1")).toBeUndefined();
-		expect(registry.reasoning("t1", "r1")).toBeUndefined();
-		expect(registry.tool("call-1")).toBeUndefined();
-		expect(registry.reasoning("t2", "r1")).toBeDefined(); // survives
-		expect(registry.removeTurn("t1")).toEqual([]); // second remove is a no-op
+		assert.strictEqual(removed.length, 3);
+		assert.strictEqual(registry.assistant("t1"), undefined);
+		assert.strictEqual(registry.reasoning("t1", "r1"), undefined);
+		assert.strictEqual(registry.tool("call-1"), undefined);
+		assert.ok(registry.reasoning("t2", "r1") !== undefined); // survives
+		assert.deepStrictEqual(registry.removeTurn("t1"), []); // second remove is a no-op
 	});
 
 	test("collapsibles lists reasoning and tool blocks; clear empties everything", () => {
@@ -54,11 +55,11 @@ describe("TranscriptRegistry", () => {
 		registry.putReasoning("t1", "r1", new ReasoningBlock("t1", touch));
 		registry.putTool("t1", "call-1", new ToolBlock("t1", touch, "read", null));
 		registry.putAssistant("t1", new AssistantBlock("t1", touch)); // not collapsible
-		expect(registry.collapsibles()).toHaveLength(2);
+		assert.strictEqual(registry.collapsibles().length, 2);
 
 		registry.clear();
-		expect(registry.collapsibles()).toHaveLength(0);
-		expect(registry.assistant("t1")).toBeUndefined();
-		expect(registry.removeTurn("t1")).toEqual([]);
+		assert.strictEqual(registry.collapsibles().length, 0);
+		assert.strictEqual(registry.assistant("t1"), undefined);
+		assert.deepStrictEqual(registry.removeTurn("t1"), []);
 	});
 });

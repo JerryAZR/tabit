@@ -84,7 +84,7 @@ export function parseToolArgs(input: ToolRenderInput): Record<string, unknown> |
 
 const DEFAULT_PREVIEW_LINES = 5;
 
-import { toolBold, toolMuted, toolOutput, toolTitle } from "../theme";
+import { toolBold, toolMuted, toolOutput, toolTitle } from "../theme.ts";
 
 function toolTitleBold(text: string): string {
 	return toolTitle(toolBold(text));

@@ -1,5 +1,5 @@
 /**
- * The tabit frontend wire vocabulary (FRONTEND.md, protocol v10), mirrored
+ * The tabit frontend wire vocabulary (FRONTEND.md, protocol v20), mirrored
  * from `crates/tabit-protocol` as TypeScript types, plus the lenient parse
  * a hand-rolled client owes the contract: JSON.parse first, switch on
  * known `type`s to a typed union, and hand everything unrecognized back as
@@ -23,10 +23,21 @@
  * into the invocation envelope — `compaction_begin` → `compaction_step` × N
  * → `compaction_end`/`compaction_failed`, with `compaction_retried` for
  * discarded attempts; a step's `usage`/`cost` meter exactly like a
- * `completion_call`'s.
+ * `completion_call`'s. v16: `session_opened.cwd`, `sessions_available`
+ * rows' `path`/`cwd`, real `compact` directives. v17: `interaction_settled`
+ * — the settle close for interaction cards. v18: event frames may carry
+ * `origin` (extension attribution) and `ttl` (the node net's hop budget —
+ * consumers ignore it). v19: the report model — the backend speaks first
+ * (`report { protocol_version }`); `initialize`/`initialize_ack`/
+ * `initialize_rejected` are deleted (the frontend is the version check and
+ * owns the kill; startup failures are the report, one unstamped `error`,
+ * and a nonzero exit); replay brackets renamed `replay_begin { total }` /
+ * `replay_end`, default-on for resumed boots. v20: `skills_available` is
+ * session-level — stamped with the session's stream, announced per
+ * session; fold per stream.
  */
 
-export const PROTOCOL_VERSION = 16;
+export const PROTOCOL_VERSION = 20;
 
 // ---------------------------------------------------------------------------
 // Commands (frontend → backend). Fire-and-forget; outcomes arrive as
@@ -50,15 +61,16 @@ export type SessionCommand =
 	  }
 	| { type: "interaction_response"; session: string; id: string; payload: unknown };
 
-export type ClientFrame = { type: "initialize"; protocol_version: number; replay?: boolean } | SessionCommand;
+/** v19: a client line IS a command — the initialize handshake is deleted
+ *  and commands may flow from the frontend's first line. */
+export type ClientFrame = SessionCommand;
 
 // ---------------------------------------------------------------------------
 // Server frames (backend → frontend)
 // ---------------------------------------------------------------------------
 
 export type ServerControlFrame =
-	| { type: "initialize_ack"; protocol_version: number; session_id: string }
-	| { type: "initialize_rejected"; reason: string }
+	| { type: "report"; protocol_version: number }
 	| { type: "protocol_error"; message: string };
 
 export interface ModelSelection {
@@ -215,8 +227,8 @@ export type SessionEvent =
 	  }
 	| { type: "run_failed"; message: string; kind: string; started_at_ms: number; completed_at_ms: number }
 	| { type: "error"; kind: string; message: string; pending?: number }
-	| { type: "replay_started"; total: number }
-	| { type: "replay_done" }
+	| { type: "replay_begin"; total: number }
+	| { type: "replay_end" }
 	| { type: "checked_out"; entry_id: string; base_id: string | null }
 	| { type: "sessions_available"; sessions: AvailableSession[] }
 	| { type: "skills_available"; skills: AvailableSkill[] }
@@ -249,6 +261,7 @@ export type SessionEvent =
 	  }
 	| { type: "native_item"; turn_id: string; item: unknown }
 	| { type: "interaction_request"; id: string; ui_type: string; payload: unknown }
+	| { type: "interaction_settled"; id: string }
 	| { type: "compaction_begin" }
 	| { type: "compaction_delta"; text: string }
 	| { type: "compaction_step"; id: string; usage: Usage; cost?: number }
@@ -256,18 +269,22 @@ export type SessionEvent =
 	| { type: "compaction_end"; tokens_after: number }
 	| { type: "compaction_failed"; message: string };
 
-/** A stamped event line; `stream` (the session id) is absent for backend-level frames. */
+/** A stamped event line; `stream` (the session id) is absent for backend-level
+ *  frames. `origin` (v18) attributes an extension's emission; `ttl` (v18) is
+ *  the node net's hop budget — consumers ignore it. */
 export interface EventFrame {
 	stream?: string;
+	origin?: string;
+	ttl?: number;
 	event: SessionEvent;
 }
 
 export type ParsedServerFrame =
 	| { kind: "control"; frame: ServerControlFrame }
-	| { kind: "event"; stream?: string; event: SessionEvent }
+	| { kind: "event"; stream?: string; origin?: string; event: SessionEvent }
 	| { kind: "unknown"; raw: string; type?: string };
 
-const CONTROL_TYPES = new Set(["initialize_ack", "initialize_rejected", "protocol_error"]);
+const CONTROL_TYPES = new Set(["report", "protocol_error"]);
 
 const EVENT_TYPES = new Set([
 	"run_aborted",
@@ -286,8 +303,8 @@ const EVENT_TYPES = new Set([
 	"run_finished",
 	"run_failed",
 	"error",
-	"replay_started",
-	"replay_done",
+	"replay_begin",
+	"replay_end",
 	"checked_out",
 	"sessions_available",
 	"skills_available",
@@ -296,6 +313,7 @@ const EVENT_TYPES = new Set([
 	"model_changed",
 	"native_item",
 	"interaction_request",
+	"interaction_settled",
 	"compaction_begin",
 	"compaction_delta",
 	"compaction_step",
@@ -325,10 +343,14 @@ export function parseServerFrame(line: string): ParsedServerFrame | null {
 	if (type === undefined) return { kind: "unknown", raw: trimmed };
 	if (CONTROL_TYPES.has(type)) return { kind: "control", frame: obj as unknown as ServerControlFrame };
 	if (EVENT_TYPES.has(type)) {
-		const { stream, ...event } = obj;
+		// `origin` (v18) is attribution worth keeping; `ttl` (v18) is the
+		// node net's routing tripwire — consumers ignore it by ruling, so
+		// it is stripped here rather than leaked into the event.
+		const { stream, origin, ttl: _ttl, ...event } = obj;
 		return {
 			kind: "event",
 			stream: typeof stream === "string" ? stream : undefined,
+			origin: typeof origin === "string" ? origin : undefined,
 			event: event as SessionEvent,
 		};
 	}

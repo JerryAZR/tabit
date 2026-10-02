@@ -8,7 +8,7 @@
 
 import { Box, Text, type Component } from "@earendil-works/pi-tui";
 
-import { userMessageBg, userMessageText } from "../theme";
+import { userMessageBg, userMessageText } from "../theme.ts";
 
 export class UserBlock implements Component {
 	readonly #box: Box;

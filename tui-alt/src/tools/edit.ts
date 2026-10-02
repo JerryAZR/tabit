@@ -7,10 +7,10 @@
  * wire format already is the diff.
  */
 
-import type { ToolCardRenderer, ToolRenderInput } from "./registry";
-import { parseToolArgs, registerToolCardRenderer } from "./registry";
-import type { EditDetails } from "../protocol";
-import { diffAdd, diffContext, diffHunk, diffRemove, toolAccent, toolTitle, toolBold } from "../theme";
+import type { ToolCardRenderer, ToolRenderInput } from "./registry.ts";
+import { parseToolArgs, registerToolCardRenderer } from "./registry.ts";
+import type { EditDetails } from "../protocol.ts";
+import { diffAdd, diffContext, diffHunk, diffRemove, toolAccent, toolTitle, toolBold } from "../theme.ts";
 
 registerToolCardRenderer("edit", {
 	call: input => {

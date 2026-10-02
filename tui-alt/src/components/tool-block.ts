@@ -10,10 +10,10 @@
 
 import { Box, Container, MouseRegion, Spacer, Text, type Component } from "@earendil-works/pi-tui";
 
-import { TranscriptBlock } from "./transcript-block";
-import { rendererFor } from "../tools/renderers";
-import { defaultResult, type ToolCardRenderer, type ToolRenderInput } from "../tools/registry";
-import { toolErrorBg, toolPendingBg, toolSuccessBg } from "../theme";
+import { TranscriptBlock } from "./transcript-block.ts";
+import { rendererFor } from "../tools/renderers.ts";
+import { defaultResult, type ToolCardRenderer, type ToolRenderInput } from "../tools/registry.ts";
+import { toolErrorBg, toolPendingBg, toolSuccessBg } from "../theme.ts";
 
 export class ToolBlock extends TranscriptBlock {
 	readonly #region: MouseRegion;

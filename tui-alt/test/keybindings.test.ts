@@ -5,12 +5,13 @@
  * what each test needs, last write wins.
  */
 
-import { describe, expect, test } from "bun:test";
+import assert from "node:assert/strict";
+import { describe, test } from "node:test";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { applyKeybindings, loadTuiToml, parseTuiToml, tuiTomlPath } from "../src/keybindings";
+import { applyKeybindings, loadTuiToml, parseTuiToml, tuiTomlPath } from "../src/keybindings.ts";
 
 describe("tui.toml parsing", () => {
 	test("overrides: strings and arrays under [keys]; comments and other sections ignored", () => {
@@ -23,10 +24,10 @@ describe("tui.toml parsing", () => {
 [future]
 whatever = "ignored"
 `);
-		expect(warnings).toEqual([]);
-		expect(config["tui.app.interrupt"]).toEqual(["escape"]);
-		expect(config["tui.app.quit"]).toBe("ctrl+q");
-		expect(config["future.whatever"]).toBeUndefined();
+		assert.deepStrictEqual(warnings, []);
+		assert.deepStrictEqual(config["tui.app.interrupt"], ["escape"]);
+		assert.strictEqual(config["tui.app.quit"], "ctrl+q");
+		assert.strictEqual(config["future.whatever"], undefined);
 	});
 
 	test("malformed lines and unknown ids warn, never throw", () => {
@@ -37,42 +38,42 @@ oops
 "not.tui.binding" = "ctrl+x"
 "tui.app.quit" = "ctrl+q"
 `);
-		expect(config["tui.app.quit"]).toBe("ctrl+q");
-		expect(config["tui.app.interrupt"]).toBeUndefined();
-		expect(warnings).toHaveLength(3);
+		assert.strictEqual(config["tui.app.quit"], "ctrl+q");
+		assert.strictEqual(config["tui.app.interrupt"], undefined);
+		assert.strictEqual(warnings.length, 3);
 	});
 
 	test("empty source parses to defaults", () => {
 		const { config, warnings } = parseTuiToml("");
-		expect(config).toEqual({});
-		expect(warnings).toEqual([]);
+		assert.deepStrictEqual(config, {});
+		assert.deepStrictEqual(warnings, []);
 	});
 });
 
 describe("the registry", () => {
 	test("defaults install; overrides replace the action's key list", () => {
 		const defaults = applyKeybindings();
-		expect(defaults.getKeys("tui.app.interrupt")).toEqual(["escape", "ctrl+c"]);
-		expect(defaults.getKeys("tui.app.toggleCollapsibles")).toEqual(["ctrl+o"]);
-		expect(defaults.getDefinition("tui.app.interrupt").description).toContain("Interrupt");
+		assert.deepStrictEqual(defaults.getKeys("tui.app.interrupt"), ["escape", "ctrl+c"]);
+		assert.deepStrictEqual(defaults.getKeys("tui.app.toggleCollapsibles"), ["ctrl+o"]);
+		assert.ok(defaults.getDefinition("tui.app.interrupt").description?.includes("Interrupt"));
 
 		const overridden = applyKeybindings({ "tui.app.interrupt": ["escape"] });
-		expect(overridden.getKeys("tui.app.interrupt")).toEqual(["escape"]);
+		assert.deepStrictEqual(overridden.getKeys("tui.app.interrupt"), ["escape"]);
 		// engine actions survive the merge untouched
-		expect(overridden.getKeys("tui.editor.cursorUp")).toEqual(["up"]);
+		assert.deepStrictEqual(overridden.getKeys("tui.editor.cursorUp"), ["up"]);
 	});
 
 	test("loadTuiToml: missing file is silent defaults; present file parses; unreadable warns", async () => {
 		const home = mkdtempSync(join(tmpdir(), "tui-kb-"));
 		try {
 			const missing = await loadTuiToml(home);
-			expect(missing.config).toEqual({});
-			expect(missing.warnings).toEqual([]);
+			assert.deepStrictEqual(missing.config, {});
+			assert.deepStrictEqual(missing.warnings, []);
 
 			mkdirSync(join(home, ".tabit"));
 			writeFileSync(tuiTomlPath(home), '[keys]\n"tui.app.quit" = "ctrl+q"\n');
 			const present = await loadTuiToml(home);
-			expect(present.config["tui.app.quit"]).toBe("ctrl+q");
+			assert.strictEqual(present.config["tui.app.quit"], "ctrl+q");
 		} finally {
 			rmSync(home, { recursive: true, force: true });
 		}
@@ -82,8 +83,8 @@ describe("the registry", () => {
 			mkdirSync(join(blocked, ".tabit"));
 			mkdirSync(tuiTomlPath(blocked));
 			const broken = loadTuiToml(blocked);
-			expect(broken.config).toEqual({});
-			expect(broken.warnings).toHaveLength(1);
+			assert.deepStrictEqual(broken.config, {});
+			assert.strictEqual(broken.warnings.length, 1);
 		} finally {
 			rmSync(blocked, { recursive: true, force: true });
 		}

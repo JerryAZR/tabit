@@ -7,8 +7,8 @@
  * (absent on replay, where durations are unrecoverable).
  */
 
-import { parseToolArgs, registerToolCardRenderer, type ToolRenderInput } from "./registry";
-import { toolBold, toolMuted, toolOutput, toolTitle } from "../theme";
+import { parseToolArgs, registerToolCardRenderer, type ToolRenderInput } from "./registry.ts";
+import { toolBold, toolMuted, toolOutput, toolTitle } from "../theme.ts";
 
 registerToolCardRenderer("bash", {
 	call: input => {

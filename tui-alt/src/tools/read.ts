@@ -6,8 +6,8 @@
  * shows themed content expanded. Errors surface even collapsed.
  */
 
-import { parseToolArgs, registerToolCardRenderer, type ToolRenderInput } from "./registry";
-import { toolAccent, toolError, toolMuted, toolOutput, toolTitle, toolBold, warn } from "../theme";
+import { parseToolArgs, registerToolCardRenderer, type ToolRenderInput } from "./registry.ts";
+import { toolAccent, toolError, toolMuted, toolOutput, toolTitle, toolBold, warn } from "../theme.ts";
 
 registerToolCardRenderer("read", {
 	call: input => {

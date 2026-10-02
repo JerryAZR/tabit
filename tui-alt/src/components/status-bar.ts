@@ -9,7 +9,7 @@
 
 import { Container, Loader, Spacer, type Component, type TuiAltScreen } from "@earendil-works/pi-tui";
 
-import { accent, dim } from "../theme";
+import { accent, dim } from "../theme.ts";
 
 /** The sentinel label the mode sends when nothing is in flight. */
 export const STATUS_IDLE = "idle";
