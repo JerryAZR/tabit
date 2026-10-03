@@ -205,7 +205,7 @@ impl Session {
         };
         let stream = self.open_run(&run_token, &agent, &selection).await;
         let mut driven = self
-            .drive(stream, &run_token, run_started_ms, &mut sink)
+            .drive(stream, &run_token, &selection, run_started_ms, &mut sink)
             .await;
         driven = self.overflow_intercept(driven).await;
         let (outcome, output) = self.conclude(driven, run_started_ms, &mut sink);
@@ -373,6 +373,7 @@ impl Session {
         &mut self,
         mut stream: tabit_engine::agent::StreamingResult,
         run_token: &CancellationToken,
+        selection: &tabit_protocol::ModelSelection,
         started_at_ms: u64,
         sink: &mut EventSink<'_>,
     ) -> DriveOutcome {
@@ -485,17 +486,14 @@ impl Session {
                     // facts (the fold commits them — reload counts the
                     // same numbers; live adds only what is new).
                     {
-                        let selection = self.selection();
-                        // A run in flight always holds a selection
-                        // (run open guaranteed it; no command clears
-                        // one) — internal invariant, fail loud
-                        // (AGENTS.md doctrine).
-                        #[allow(clippy::expect_used)]
-                        let selection = selection.expect("a live run always has a selection");
                         // The invoice fact: dollars from the rates in
                         // effect, stamped now — commit and ledger bill
-                        // the same value.
-                        let cost = crate::model::turn_cost(&self.config, &selection, &call.usage);
+                        // the same value. Bills the run's BOUND
+                        // selection (run open's snapshot), never the
+                        // live register: a mid-run `model` switch lands
+                        // on the next run, so this run's usage and cost
+                        // attribute to the model that produced them.
+                        let cost = crate::model::turn_cost(&self.config, selection, &call.usage);
                         tabit_log::lock::lock(&self.ledger).add(
                             &selection.provider,
                             &selection.model,
