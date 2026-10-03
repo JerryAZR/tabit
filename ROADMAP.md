@@ -175,6 +175,13 @@ the engine stamp the attempt's usage on the discard item directly.
   last-selected file — a registry rung below `default_model`), and
   the "selection didn't land" picker signal.
 
+### Docs and comments sweep
+
+Scheduled, unscheduled date: one pass over stale comments and docs —
+they accrete (e.g. `assemble.rs`'s "handshake ack" phrasing surviving
+the v19 report model, caught in review 2026-10). Sweep when the next
+cross-cutting change touches many files anyway, not as its own event.
+
 ### ACP
 
 **Ruled adapter-only (2026-09):** the native vocabulary stays the one
