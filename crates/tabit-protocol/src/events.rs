@@ -5,7 +5,7 @@
 //! ships in this workspace, so an added variant is a coordinated change,
 //! not a compatibility hazard.
 
-use crate::model::ModelSelection;
+use crate::model::{AvailableProvider, ModelSelection};
 use crate::usage::Usage;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -296,6 +296,22 @@ pub enum SessionEvent {
         /// replaces-core signal and the peer-refusal notices
         /// (EXTENSIONS.md's naming ruling).
         conflicts: Vec<ExtensionConflict>,
+    },
+    /// The usable model catalog, announced once at startup right
+    /// after `extensions_available` (v21): every usable provider
+    /// (key resolvable via auth.toml/`api_key_env`, or declared
+    /// `keyless = true`) with its models. **Unstamped,
+    /// backend-level** — one backend process has one model
+    /// registry. Unlike the skills/extension catalogs it is
+    /// **unconditional**: emitted even when empty, so the frame's
+    /// absence means "protocol older than v21", never "no models";
+    /// `providers: []` is the legal "no usable models at this
+    /// backend" state. A re-announcement (config reload, when it
+    /// lands) replaces the catalog wholesale — last-wins fold.
+    ModelsAvailable {
+        /// Every usable provider, in alphabetical id order; models
+        /// in config-file order.
+        providers: Vec<AvailableProvider>,
     },
     /// A session became visible in this backend: the boot session
     /// (emitted at spawn, ahead of the catalog and any replay), a
@@ -742,6 +758,7 @@ impl SessionEvent {
             SessionEvent::SessionsAvailable { .. } => tags::SESSIONS_AVAILABLE,
             SessionEvent::SkillsAvailable { .. } => tags::SKILLS_AVAILABLE,
             SessionEvent::ExtensionsAvailable { .. } => tags::EXTENSIONS_AVAILABLE,
+            SessionEvent::ModelsAvailable { .. } => tags::MODELS_AVAILABLE,
             SessionEvent::SessionOpened { .. } => tags::SESSION_OPENED,
             SessionEvent::ModelChanged { .. } => tags::MODEL_CHANGED,
             SessionEvent::NativeItem { .. } => tags::NATIVE_ITEM,
@@ -788,6 +805,7 @@ pub mod tags {
     pub const SESSIONS_AVAILABLE: &str = "sessions_available";
     pub const SKILLS_AVAILABLE: &str = "skills_available";
     pub const EXTENSIONS_AVAILABLE: &str = "extensions_available";
+    pub const MODELS_AVAILABLE: &str = "models_available";
     pub const SESSION_OPENED: &str = "session_opened";
     pub const MODEL_CHANGED: &str = "model_changed";
     pub const NATIVE_ITEM: &str = "native_item";
@@ -824,6 +842,7 @@ pub mod tags {
         SESSIONS_AVAILABLE,
         SKILLS_AVAILABLE,
         EXTENSIONS_AVAILABLE,
+        MODELS_AVAILABLE,
         SESSION_OPENED,
         MODEL_CHANGED,
         NATIVE_ITEM,

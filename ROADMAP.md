@@ -56,7 +56,7 @@ The foundation is shipped and hardened. In build order, all closed:
   the host, the SDK, install/management — the checklist is complete;
   EXTENSIONS.md is the contract and the record.
 - **The wire** (`tabit-protocol`, `tabit-wire`, the session edge):
-  protocol v20, the node runtime (locality routing, asks, the report
+  protocol v21, the node runtime (locality routing, asks, the report
   model), the json stdio edge.
 - **Prompt caching** (shipped 2026-08): all-1h Anthropic, session-id
   cache keys for OpenAI Responses, subagents keyed separately — the
@@ -155,13 +155,22 @@ the engine stamp the attempt's usage on the discard item directly.
 - **Dynamic model listing — deferred** (2026-09): `/v1/models`
   returns ids only, not useful enough to ship. Recorded direction:
   the provider catalog (curated per-model metadata) could ship as an
-  extension instead of core machinery. When reload lands,
-  discovery/catalog merge must be one callable step over
-  `(config, auth)`, not a re-run of the initialization flow.
+  extension instead of core machinery.
+- **Config reload — the `reload` command** (2026-10): an additive
+  first cut — re-read config/auth, new keys and providers appear, the
+  model catalog re-announces (`models_available`, FRONTEND.md §6).
+  The general semantics — vanished providers, stale session
+  registers, the skills/gate reload scope — stay parked until a
+  caller exists; the first caller will be a login extension
+  (key-paste writing auth.toml plus a providers fragment — the
+  lmstudio-ext precedent). When it lands, discovery/catalog merge
+  must be one callable step over `(config, auth)`, not a re-run of
+  the initialization flow.
 - Per-model `headers` stay unwired (needs a client-caching decision);
   `context_window` is wired (compaction); display names /
   `reasoning` wait on a model-picker UI (with the frontend).
-- Frontend-dependent model deferrals: the models-list command and the
+- Frontend-dependent model deferrals: the catalog half landed
+  (v21's `models_available` boot announcement); still parked: the
   real picker, the global implicit preference (a `~/.tabit/`
   last-selected file — a registry rung below `default_model`), and
   the "selection didn't land" picker signal.

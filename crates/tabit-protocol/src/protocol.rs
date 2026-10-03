@@ -16,7 +16,11 @@ use serde::{Deserialize, Serialize};
 /// its [`ServerControlFrame::Report`] carrying this version; the
 /// spawner reads it and kills an incompatible child (owner ruling
 /// 2026-09-25 — the report model: children report first, spawners
-/// decide). v19: the report model — `initialize`/`initialize_ack`/
+/// decide). v21: models — the unconditional `models_available` boot
+/// announcement (the usable model catalog; absence of the frame now
+/// means "protocol older than v21"). v20: skills became
+/// session-level (stamped, per session becoming visible). v19: the
+/// report model — `initialize`/`initialize_ack`/
 /// `initialize_rejected` are deleted (commands flow from the
 /// spawner's first line; startup failures are the report, an
 /// unstamped `error` event, and a nonzero exit), and the replay
@@ -31,7 +35,7 @@ use serde::{Deserialize, Serialize};
 /// compaction — the `compact` command and its event family (reshaped
 /// in v15 into the
 /// `compaction_begin`/`compaction_step`/`compaction_end` envelope).
-pub const PROTOCOL_VERSION: u32 = 20;
+pub const PROTOCOL_VERSION: u32 = 21;
 
 /// Which session produced an event. The stamp is the session id
 /// itself (v3: the `"main"` alias is retired — one name per session);

@@ -39,7 +39,7 @@ pub use events::{
     ErrorKind, ExtensionConflict, ExtensionConflictKind, ExtensionsCatalog, RunFailedKind,
     SessionEvent, ToolResultStatus,
 };
-pub use model::{Cost, ModelFacts, ModelSelection};
+pub use model::{AvailableModel, AvailableProvider, Cost, ModelFacts, ModelSelection};
 pub use protocol::command_tags;
 pub use protocol::{
     EventFrame, PROTOCOL_VERSION, ServerControlFrame, ServerFrame, SessionCommand, StreamId,

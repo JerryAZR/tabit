@@ -31,6 +31,7 @@ pub(crate) fn plain_data() -> crate::SessionHostData {
         create: std::sync::Arc::new(|| Err("new_session is not driven".to_string())),
         open: std::sync::Arc::new(|_| Err("open_session is not driven".to_string())),
         extensions: Default::default(),
+        models: Vec::new(),
     }
 }
 

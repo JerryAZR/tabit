@@ -18,7 +18,7 @@ render a specific tool's `details` cargo, the interaction template
 payloads — lives in **TOOLS.md**, its companion since the shapes grew
 past one doc (2026-09 ruling).
 
-Wire shapes below are the **v20 contract**. v3 was the multi-session
+Wire shapes below are the **v21 contract**. v3 was the multi-session
 host — session-addressed commands, `new_session`/`open_session` on the
 channel, the `"main"` stream alias retired (the stream stamp is the
 session id). v4 made backend-level frames **unstamped** (§6) and
@@ -59,8 +59,10 @@ on any child pipe is the child's self-report
 boot auto-replays (§3); v20 made `skills_available` **session-level** —
 stamped with the session's stream and announced as each session
 becomes visible, so frontends fold skills per stream and a subagent
-child in another directory announces its own catalog (§6). Each
-version landed as one protocol-version bump with no compatibility
+child in another directory announces its own catalog (§6); v21 added
+`models_available` — the backend-level boot announcement of the usable
+model catalog (§6). Each version landed as one protocol-version bump
+with no compatibility
 period; always check the report's `protocol_version`. (`tabit-core --list` prints a human table —
 there is no JSON listing edge.)
 
@@ -80,7 +82,7 @@ you read and write on the child's stdio (one frame per line; the
    `--max-turns <n>`, `--ephemeral` (in memory, nothing persists).
    You own the lifecycle: you picked the binary, you kill it.
 2. **Read the first line — the report.**
-   `{"type":"report","protocol_version":20}`. Protocol facts only.
+   `{"type":"report","protocol_version":21}`. Protocol facts only.
    **You are the version check**: a version you do not speak is
    yours to kill and clean up (§3). After the report there is no
    handshake state — your commands may flow from your first line
@@ -89,8 +91,8 @@ you read and write on the child's stdio (one frame per line; the
    (common order, not a contract — build on stamps and kinds, never
    position): `session_opened` carries the boot session's id (your
    command address), then its `skills_available`, then the
-   backend-level `sessions_available` and `extensions_available`
-   catalogs, then — for a resumed boot — the replay bracket
+   backend-level `sessions_available`, `extensions_available`, and
+   `models_available` catalogs, then — for a resumed boot — the replay bracket
    (`replay_begin` … `replay_end`).
 4. **Send your first message.**
    `{"type":"message","session":"<the id>","text":"hello"}`. Idle,
@@ -194,7 +196,7 @@ arrive as events. Input tolerance: blank lines are skipped, a trailing
 size limit** — tool output can be large; buffer accordingly.
 
 ```
-← {"type":"report","protocol_version":20}
+← {"type":"report","protocol_version":21}
 ← {"type":"session_opened","stream":"019…","id":"019…","path":"…",
    "model":{"provider":"…","model":"…","thinking_level":null},"resumed":true}
 ← {"type":"sessions_available","sessions":[
@@ -257,7 +259,8 @@ value, switch on `type` when recognized) and log the rest.
    the boot session's `skills_available` when its discovery found
    something (v20, stamped with the boot's stream), then the
    backend-level catalogs (`sessions_available`, then
-   `extensions_available`), then the replay pass for a resumed boot,
+   `extensions_available`, then `models_available`), then the replay
+   pass for a resumed boot,
    then live traffic) is today's common order, not a contract; other
    participants' frames
    (an extension's, origin-stamped) may interleave anywhere, in
@@ -473,6 +476,7 @@ consumes (its `details` cargo) is TOOLS.md's table of shapes.
    directory to learn either). A brand-new session has no file yet and is absent until it records. |
 | `skills_available` | `skills: [{ name, description, location, level }]` | **(v20) session-level**: stamped with the session's stream, announced right after each `session_opened` (boot, `new_session`, `open_session`) — every skill that session's own discovery merged (home `~/.agents`/`~/.tabit` + workspace `.agents`/`.tabit` skills dirs over the session's cwd, plus the process's extension contribution), the same facts that session's prompt catalog carries — `level` is `user` or `workspace` (which source won). Fold skills state **per stream** (v20): a subagent child is a full session host in its own cwd and announces its own stamped catalog, which must not clobber another session's list. Only announced when the session discovered at least one skill — with per-stream folding, absence is unambiguous. Skill *invocation* is no new wire shape: the model calls the `skill` tool, an ordinary `tool_call`/`tool_result` pair on the asking session's stream; the user invokes one manually with the message-text tag (§5). |
 | `extensions_available` | `extensions: [{ name, version, description?, dir, status, reason?, tools: [{ name, description }], hooks: [string] }]`, `conflicts: [{ kind, extension, tool, incumbent? }]` | **(v9)** once, right after `skills_available`: every discovered extension with its provenance (`dir`) and standing — `status` is `alive` or `dead` (a refused handshake, a failed scan, or death since; `reason` carries why). **Unstamped, backend-level** (one process, one extension host); only announced when at least one extension was discovered — a refusal counts as discovered. **A boot-time snapshot** (2026-09 ruling): a mid-run extension death does not re-announce — stderr carries the report and the catalog stands until the next backend start. `conflicts` are the boot's name-assembly reports: `kind: "replaces_core"` (an extension tool replaced the core tool of the same name — the signal is mandatory; how loudly you present it is your call) and `kind: "refused_peer"` (the newcomer was refused, `incumbent` names the extension that holds the name). Extension tool *invocation* is no new wire shape: an ordinary `tool_call`/`tool_result` pair, attributed by the model-facing name. |
+| `models_available` | `providers: [{ id, name?, models: [{ id, name?, context_window?, max_tokens?, cost?, reasoning, input: [string], thinking_levels: [string] }] }]` | **(v21)** once at boot, right after `extensions_available`: every **usable** provider from config, with its models — a provider with no resolvable key (auth.toml/`api_key_env`) and no `keyless = true` declaration is not runnable and does not appear (its models go with it; no `usable` flag crosses the wire to fold). **Unstamped, backend-level** (one process, one model registry). **Always emitted, even when empty**: absence of the frame means the backend speaks a protocol older than v21, never "no models"; `providers: []` is a legal state meaning "no usable models at this backend", deliberately cause-agnostic. An empty list means no run can open at this backend: surface it as a setup-state warning rather than letting the user type into a session whose first run fails at open — the signal is mandatory; how loudly you present it is your call. Providers arrive in alphabetical id order, models in config-file order; display sorting is yours. Per model: `name` is the display name (absent = fall back to `id`); `context_window`/`max_tokens` are token counts, **absent when the config does not state them** (never zero); `cost` is the same `{ input, output, cache_read, cache_write }` shape `model_changed` carries; `reasoning` says the model produces reasoning output; `input` lists the accepted modalities as lowercase strings (`"text"`, `"image"`); `thinking_levels` carries the dial's ordered **names** (never the request-merge maps behind them), empty when the model has no dial — and `thinking_level: null` is always a legal selection (the provider/model default), so a picker cycles null → the announced names. Announced once at boot; re-announced on config reload when that lands, and a re-announcement replaces the catalog wholesale (last-wins fold). |
 | `session_opened` | `id`, `path`, `cwd`, `model`, `resumed`, `parent?`, `parent_call?` | a session became visible in this backend — the boot (at spawn, right after the report), a `new_session`, an `open_session`, **or a subagent child** (v5). `cwd` (v16) is the session's working
 directory — the boot's is the backend's cwd, a child's is its spawn
 cwd. **One announcement shape for every path** (2026-09 ruling — the report carries protocol-level facts only; the boot is not a special case). Stamped with the session's own stream. Selection notes, if any, follow on the same stream. v5: `path` is **empty for an ephemeral session** (in memory only — nothing to open or replay; subagent children are ephemeral today), and `parent` names the spawning session for a subagent child — absent for every user-facing session. A frontend branches on `parent`: user sessions update their session facts, children render nested (or not at all) — a child announcement must never overwrite the active session's facts. The child's whole run (its `user_message`, deltas, `tool_call`s, terminal) streams on its own stamp; the spawner's transcript sees only the subagent `tool_call`/`tool_result` pair. `parent_call` (v7, additive) is the spawning tool call's `internal_call_id`: the announce pairs the child with the **exact** open `tool_call` event — exact under concurrent subagent calls, where arrival order cannot disambiguate. Absent whenever `parent` is. |
@@ -760,8 +764,10 @@ answer or denial the model saw.
   however large. Cursors are a future addition.
 - **No unload or residency limits.** Opened sessions stay loaded for
   the process's life (lazy loading bounds *startup*; LRU unload is
-  deferred). There is no model-discovery command and no in-band
-  catalog refresh: `sessions_available` is announced once at startup,
+  deferred). The model catalog is the `models_available` boot
+  announcement (§6) — config-derived, still no pull-command, with an
+  in-band re-announcement arriving when config reload lands.
+  `sessions_available` is announced once at startup,
   sessions created in-band announce themselves (`session_opened`),
   and sessions appearing on disk from elsewhere need a restart
   (`tabit-core --list`, a human table, exists for CLI inspection).
@@ -792,8 +798,9 @@ reject with plain-reason frames (§3.1 — the death-classification
 pin); cut points follow the roundtrip-unit rule
 (§7); synthesized tool results carry no marker (§7); all
 non-terminal errors ride the generic `error { kind }` carrier (§6).
-Model discovery stays config-side (`--model` refs resolve at startup;
-no discovery command is shipped). The write-behind log with its prompt
+Model discovery is config-derived and announced once at boot
+(`models_available`, §6); `--model` refs resolve at startup and no
+discovery pull-command is shipped. The write-behind log with its prompt
 barrier shipped (§6).
 
 ## Changelog
@@ -815,6 +822,15 @@ v19 rode the deleted GUI's CHANGELOG.md — git history holds it.)
   visible (was: one unstamped backend-level catalog at startup).
   Frontends fold skills state per stream; a child's catalog no
   longer touches another session's list.
+- **v21 (2026-10)** — `models_available`: the backend-level,
+  unstamped boot announcement of the usable model catalog (§6) —
+  every provider with a resolvable key or `keyless = true`, its
+  models carrying the facts config states (context window, max
+  tokens, cost, reasoning, input modalities, the thinking dial's
+  ordered names). **Always emitted, even empty**: `providers: []`
+  means no usable models at this backend (a setup state, not a
+  silent absence), and the frame's absence now means "protocol older
+  than v21", never "no models".
 - **2026-09 (no bump — checkout execution semantics)** — a
   `checkout` target inside an open tool roundtrip (the assistant's
   tool-call entry, or a mid-batch result) resolves **forward** to the

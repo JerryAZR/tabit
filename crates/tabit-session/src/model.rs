@@ -68,12 +68,19 @@ pub(crate) fn resolve_facts(selection: &ModelSelection, config: &TabitConfig) ->
     ModelFacts {
         context_window: model.context_window,
         name: model.name.clone(),
-        cost: model.cost.map(|cost| tabit_protocol::Cost {
-            input: cost.input,
-            output: cost.output,
-            cache_read: cost.cache_read,
-            cache_write: cost.cache_write,
-        }),
+        cost: model.cost.map(wire_cost),
+    }
+}
+
+/// The wire mirror of a config rate card — the one conversion site
+/// (the register announcement's facts and the boot catalog's
+/// `models_available` fold share it).
+pub(crate) fn wire_cost(cost: tabit_config::Cost) -> tabit_protocol::Cost {
+    tabit_protocol::Cost {
+        input: cost.input,
+        output: cost.output,
+        cache_read: cost.cache_read,
+        cache_write: cost.cache_write,
     }
 }
 

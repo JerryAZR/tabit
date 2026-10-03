@@ -449,3 +449,128 @@ api_key = "dummy"
 fn api_key() -> String {
     "dummy".to_string()
 }
+
+/// The boot catalog fold (protocol v21): usable providers only, in
+/// the config map's alphabetical order; models in config-file order,
+/// optional facts absent when config is silent, the dial's names in
+/// config order.
+#[test]
+fn the_available_catalog_carries_usable_providers_with_their_stated_facts() {
+    // `alpha` is keyless (usable, sparse config — the optional facts
+    // stay absent); `beta` has its key in auth.toml and a fully
+    // stated model; `gamma` has neither key nor `keyless = true` and
+    // must not appear (its models go with it).
+    let registry = registry_with(
+        r#"
+[providers.beta]
+name = "The Beta provider"
+base_url = "https://beta.example/v1"
+api = "openai-completions"
+
+[[providers.beta.models]]
+id = "b1"
+name = "Beta One"
+reasoning = true
+input = ["text", "image"]
+context_window = 200000
+max_tokens = 16000
+cost = { input = 1.0, output = 4.0, cache_read = 0.1, cache_write = 0.4 }
+
+[[providers.beta.models.thinking_levels]]
+name = "low"
+extra_body = { thinking = { effort = "low" } }
+
+[[providers.beta.models.thinking_levels]]
+name = "high"
+extra_body = { thinking = { effort = "high" } }
+
+[[providers.beta.models]]
+id = "b2"
+
+[providers.gamma]
+base_url = "https://gamma.example/v1"
+api = "openai-completions"
+
+[[providers.gamma.models]]
+id = "g1"
+
+[providers.alpha]
+base_url = "http://127.0.0.1:1234/v1"
+api = "openai-completions"
+keyless = true
+
+[[providers.alpha.models]]
+id = "a1"
+"#,
+        r#"
+[providers.beta]
+api_key = "dummy"
+"#,
+    );
+    let catalog = registry.available_catalog();
+    let ids: Vec<&str> = catalog.iter().map(|p| p.id.as_str()).collect();
+    assert_eq!(
+        ids,
+        vec!["alpha", "beta"],
+        "usable providers only, alphabetical: {ids:?}"
+    );
+
+    // The sparse provider: facts absent, never zeroed.
+    let alpha = &catalog[0];
+    assert_eq!(alpha.name, None);
+    let a1 = &alpha.models[0];
+    assert_eq!(a1.id, "a1");
+    assert_eq!(a1.name, None);
+    assert_eq!(a1.context_window, None);
+    assert_eq!(a1.max_tokens, None);
+    assert_eq!(a1.cost, None);
+    assert!(!a1.reasoning);
+    assert_eq!(a1.input, vec!["text"], "text-only is the default");
+    assert!(a1.thinking_levels.is_empty(), "no dial configured");
+
+    // The fully stated model: every fact crosses, in config order.
+    let beta = &catalog[1];
+    assert_eq!(beta.name.as_deref(), Some("The Beta provider"));
+    assert_eq!(
+        beta.models
+            .iter()
+            .map(|m| m.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["b1", "b2"],
+        "models in config-file order"
+    );
+    let b1 = &beta.models[0];
+    assert_eq!(b1.name.as_deref(), Some("Beta One"));
+    assert_eq!(b1.context_window, Some(200_000));
+    assert_eq!(b1.max_tokens, Some(16_000));
+    assert_eq!(
+        b1.cost,
+        Some(tabit_protocol::Cost {
+            input: 1.0,
+            output: 4.0,
+            cache_read: 0.1,
+            cache_write: 0.4,
+        })
+    );
+    assert!(b1.reasoning);
+    assert_eq!(b1.input, vec!["text", "image"]);
+    assert_eq!(
+        b1.thinking_levels,
+        vec!["low", "high"],
+        "the dial's ordered names — the merge maps never cross"
+    );
+}
+
+#[test]
+fn the_available_catalog_is_empty_when_nothing_is_usable() {
+    // No key, no `keyless = true` (e.g. an explicit `--model` boots
+    // such a config — the explicit rung validates existence only):
+    // the catalog is the legal empty state, and still emits.
+    let registry = registry_with(TWO_MODELS, "");
+    assert!(
+        registry.available_catalog().is_empty(),
+        "an unusable provider's models go with it"
+    );
+    // Nothing configured at all: also empty, never an error.
+    assert!(registry_with("", "").available_catalog().is_empty());
+}

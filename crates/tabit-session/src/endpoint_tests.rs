@@ -229,6 +229,138 @@ async fn the_skills_catalog_is_the_sessions_stamped() {
 }
 
 #[tokio::test]
+async fn the_models_catalog_announces_once_unstamped_after_the_extension_catalog() {
+    // v21: the usable model catalog is a backend-level boot
+    // announcement — exactly one frame, no stream stamp, ordered
+    // after `extensions_available`, its content the registry's fold
+    // (the endpoint only emits; the fold's own tests are the
+    // registry's).
+    let store = temp_store("endpoint-models");
+    let session = Factory::new(vec![text_turn("hi")])
+        .into_builder(store.clone())
+        .create("C:/w")
+        .expect("session");
+    let registry = crate::ModelRegistry::new(
+        std::sync::Arc::new(
+            tabit_config::TabitConfig::from_toml_str(
+                r#"
+[providers.local]
+base_url = "http://127.0.0.1:1234/v1"
+api = "openai-completions"
+keyless = true
+
+[[providers.local.models]]
+id = "m"
+context_window = 128000
+
+[[providers.local.models.thinking_levels]]
+name = "off"
+
+[[providers.local.models.thinking_levels]]
+name = "high"
+
+[providers.locked]
+base_url = "https://locked.example/v1"
+api = "openai-completions"
+
+[[providers.locked.models]]
+id = "l1"
+"#,
+                std::path::Path::new("providers.toml"),
+            )
+            .expect("config"),
+        ),
+        std::sync::Arc::new(tabit_config::AuthConfig::default()),
+    );
+    let data = SessionHostData {
+        extensions: tabit_protocol::ExtensionsCatalog {
+            extensions: vec![tabit_protocol::AvailableExtension {
+                name: "echo".to_string(),
+                version: "0.1.0".to_string(),
+                description: None,
+                dir: "C:/u/.tabit/extensions/echo".to_string(),
+                status: "alive".to_string(),
+                reason: None,
+                tools: Vec::new(),
+                hooks: Vec::new(),
+            }],
+            conflicts: Vec::new(),
+        },
+        models: registry.available_catalog(),
+        ..plain_data()
+    };
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store), data);
+    handle.message(&boot_id(&handle), "go");
+    let frames = drain(&mut handle).await;
+
+    let mut extensions_at = None;
+    let mut announced = Vec::new();
+    for (index, frame) in frames.iter().enumerate() {
+        match &frame.event {
+            SessionEvent::ExtensionsAvailable { .. } => extensions_at = Some(index),
+            SessionEvent::ModelsAvailable { providers } => {
+                assert_eq!(frame.stream, None, "backend-level: no stream stamp");
+                announced.push((index, providers));
+            }
+            _ => {}
+        }
+    }
+    let extensions_at = extensions_at.expect("the extension catalog announced");
+    assert_eq!(
+        announced.len(),
+        1,
+        "exactly one model catalog per boot — never a per-session repeat"
+    );
+    let (models_at, providers) = announced[0];
+    assert!(
+        models_at > extensions_at,
+        "models_available follows extensions_available"
+    );
+    // The usable fold crossed the wire: `locked` (no key, not
+    // keyless) is absent with its models; the usable provider's
+    // stated facts and the dial's names ride.
+    assert_eq!(providers.len(), 1);
+    assert_eq!(providers[0].id, "local");
+    assert_eq!(providers[0].models.len(), 1);
+    let model = &providers[0].models[0];
+    assert_eq!(model.id, "m");
+    assert_eq!(model.context_window, Some(128_000));
+    assert_eq!(model.max_tokens, None, "unstated stays absent");
+    assert_eq!(model.thinking_levels, vec!["off", "high"]);
+    std::fs::remove_dir_all(store.dir()).ok();
+}
+
+#[tokio::test]
+async fn an_empty_models_catalog_still_announces() {
+    // The all-unusable boot (e.g. an explicit `--model` on a key-less
+    // provider — the explicit rung of `default_selection` validates
+    // existence only, so this boots): `providers: []` is the legal
+    // state and the frame STILL emits — absence of the frame means
+    // "protocol older than v21", never "no models".
+    let store = temp_store("endpoint-models-empty");
+    let session = Factory::new(vec![text_turn("hi")])
+        .into_builder(store.clone())
+        .create("C:/w")
+        .expect("session");
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store), plain_data());
+    handle.message(&boot_id(&handle), "go");
+    let frames = drain(&mut handle).await;
+    let catalogs: Vec<(Option<StreamId>, usize)> = frames
+        .iter()
+        .filter_map(|frame| match &frame.event {
+            SessionEvent::ModelsAvailable { providers } => {
+                Some((frame.stream.clone(), providers.len()))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(catalogs.len(), 1, "exactly one announcement, even empty");
+    assert_eq!(catalogs[0].0, None, "backend-level: no stream stamp");
+    assert_eq!(catalogs[0].1, 0, "no usable models at this backend");
+    std::fs::remove_dir_all(store.dir()).ok();
+}
+
+#[tokio::test]
 async fn an_idle_message_runs_to_completion_over_the_stream() {
     let store = temp_store("endpoint-idle");
     let session = Factory::new(vec![text_turn("hello there")])
@@ -381,21 +513,28 @@ async fn abort_while_idle_discards_queued_messages() {
     let frames = drain(&mut handle).await;
     // No run ever happened — and nothing user-authored leaves
     // silently (flag 6): both queued pairs come back as one
-    // `messages_discarded`, after session_opened and the catalog.
+    // `messages_discarded`, after session_opened and the catalogs
+    // (the model catalog is unconditional — v21).
     let types: Vec<&str> = frames
         .iter()
         .map(|f| match &f.event {
             SessionEvent::SessionOpened { .. } => "session_opened",
             SessionEvent::SessionsAvailable { .. } => "sessions_available",
+            SessionEvent::ModelsAvailable { .. } => "models_available",
             SessionEvent::MessagesDiscarded { .. } => "messages_discarded",
             _ => "other",
         })
         .collect();
     assert_eq!(
         types,
-        vec!["session_opened", "sessions_available", "messages_discarded"]
+        vec![
+            "session_opened",
+            "sessions_available",
+            "models_available",
+            "messages_discarded"
+        ]
     );
-    let texts: Vec<String> = match &frames[2].event {
+    let texts: Vec<String> = match &frames[3].event {
         SessionEvent::MessagesDiscarded { messages } => {
             messages.iter().map(|m| m.text.clone()).collect()
         }
@@ -643,6 +782,7 @@ async fn every_session_becoming_visible_announces_its_own_skills() {
         }),
         open: std::sync::Arc::new(|_| Err("not driven".to_string())),
         extensions: Default::default(),
+        models: Vec::new(),
     };
     let mut handle = SessionHost::spawn(session, Vec::new(), wiring, data);
     let boot = boot_id(&handle);
@@ -694,6 +834,7 @@ async fn new_session_runs_a_second_stream_and_both_route_by_id() {
         }),
         open: std::sync::Arc::new(|_| Err("not driven".to_string())),
         extensions: Default::default(),
+        models: Vec::new(),
     };
     let mut handle = SessionHost::spawn(session, Vec::new(), wiring, data);
     let boot = boot_id(&handle);
@@ -804,6 +945,7 @@ async fn open_session_loads_a_stored_session_and_replays_it() {
                 .map_err(|error| error.to_string())
         }),
         extensions: Default::default(),
+        models: Vec::new(),
     };
     let mut handle = SessionHost::spawn(boot_session, Vec::new(), wiring, data);
     let boot = boot_id(&handle);
@@ -843,6 +985,11 @@ async fn open_session_loads_a_stored_session_and_replays_it() {
             .await
             .expect("the pass keeps producing events")
             .expect("the stream stays open through the pass");
+        // The boot's backend-level catalogs may still be draining
+        // (they are not the pass); the pass frames are stamped.
+        if matches!(frame.event, SessionEvent::ModelsAvailable { .. }) {
+            continue;
+        }
         assert_eq!(
             frame.stream.as_ref().map(StreamId::as_str),
             Some(stored_id.as_str()),
@@ -960,6 +1107,7 @@ async fn open_session_emits_its_model_notes_ahead_of_the_replay() {
                 .map_err(|error| error.to_string())
         }),
         extensions: Default::default(),
+        models: Vec::new(),
     };
     let mut handle = SessionHost::spawn(boot_session, Vec::new(), wiring, data);
     boot_id(&handle);
@@ -1054,10 +1202,12 @@ async fn a_replay_request_streams_the_pass_onto_the_event_channel() {
             .await
             .expect("the worker answers a replay request");
         match frame.event {
-            // The boot's announcement and the startup catalog precede
+            // The boot's announcement and the startup catalogs precede
             // the pass; session-level announcements are not pass
             // content.
-            SessionEvent::SessionOpened { .. } | SessionEvent::SessionsAvailable { .. } => {}
+            SessionEvent::SessionOpened { .. }
+            | SessionEvent::SessionsAvailable { .. }
+            | SessionEvent::ModelsAvailable { .. } => {}
             SessionEvent::ReplayBegin { .. } => pass.push("started".to_string()),
             SessionEvent::ReplayEnd => {
                 pass.push("done".to_string());
@@ -1130,6 +1280,7 @@ async fn a_catalog_failure_is_the_carrier_in_place_of_the_announcement() {
             create: std::sync::Arc::new(|| Err("not driven".to_string())),
             open: std::sync::Arc::new(|_| Err("not driven".to_string())),
             extensions: Default::default(),
+            models: Vec::new(),
         },
     );
 
@@ -1177,6 +1328,7 @@ async fn lifecycle_failures_and_notes_ride_the_carrier() {
             }),
             open: std::sync::Arc::new(|id: &str| Err(format!("no stored session with id `{id}`"))),
             extensions: Default::default(),
+            models: Vec::new(),
         },
     );
     let _boot = boot_id(&handle);
@@ -1245,6 +1397,7 @@ async fn a_created_sessions_selection_notes_follow_its_stream() {
             }),
             open: std::sync::Arc::new(|_| Err("not driven".to_string())),
             extensions: Default::default(),
+            models: Vec::new(),
         },
     );
     handle.command_link().send(SessionCommand::NewSession);
@@ -1312,6 +1465,7 @@ async fn new_session_is_never_blocked_by_a_running_session() {
         }),
         open: std::sync::Arc::new(|_| Err("not driven".to_string())),
         extensions: Default::default(),
+        models: Vec::new(),
     };
     let mut handle = SessionHost::spawn(session, Vec::new(), wiring, data);
     let boot = boot_id(&handle);
@@ -1477,6 +1631,7 @@ async fn frontend_death_aborts_every_sessions_run() {
         }),
         open: std::sync::Arc::new(|_| Err("not driven".to_string())),
         extensions: Default::default(),
+        models: Vec::new(),
     };
     let mut handle = SessionHost::spawn(session, Vec::new(), wiring, data);
     let boot = boot_id(&handle);
@@ -3576,7 +3731,13 @@ async fn the_stream_is_live_from_the_mount_in_arrival_order() {
     let tags: Vec<&str> = frames.iter().map(|f| f.event.tag()).collect();
     assert_eq!(
         tags,
-        vec!["error", "session_opened", "sessions_available"],
+        // (the model catalog is the v21 unconditional boot emission)
+        vec![
+            "error",
+            "session_opened",
+            "sessions_available",
+            "models_available"
+        ],
         "live from the mount, in arrival order — no buffer, no drop"
     );
     std::fs::remove_dir_all(store.dir()).ok();
@@ -3674,6 +3835,7 @@ async fn an_opened_session_announces_its_own_skills() {
                 .map_err(|error| error.to_string())
         }),
         extensions: Default::default(),
+        models: Vec::new(),
     };
     let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store), data);
     let boot = boot_id(&handle);

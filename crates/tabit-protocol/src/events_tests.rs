@@ -192,6 +192,22 @@ fn all_events() -> Vec<SessionEvent> {
                 incumbent: Some("clash-a".to_string()),
             }],
         },
+        SessionEvent::ModelsAvailable {
+            providers: vec![AvailableProvider {
+                id: "local".to_string(),
+                name: None,
+                models: vec![crate::AvailableModel {
+                    id: "openai/gpt-oss-20b".to_string(),
+                    name: Some("GPT OSS 20B".to_string()),
+                    context_window: Some(128_000),
+                    max_tokens: Some(16_000),
+                    cost: None,
+                    reasoning: true,
+                    input: vec!["text".to_string(), "image".to_string()],
+                    thinking_levels: vec!["low".to_string(), "high".to_string()],
+                }],
+            }],
+        },
         SessionEvent::NativeItem {
             turn_id: TURN.to_string(),
             item: serde_json::json!({"web_search_call": {}}),
@@ -331,6 +347,34 @@ fn every_tag_agrees_with_the_wire_the_enum_and_the_list() {
         })
         .expect("serialize"),
         r#"{"type":"extensions_available","extensions":[{"name":"shadow","version":"0.1.0","description":null,"dir":"C:/u/.tabit/extensions/shadow","status":"dead","reason":"no handshake within 30s","tools":[],"hooks":[]}],"conflicts":[{"kind":"replaces_core","extension":"shadow","tool":"read","incumbent":null}]}"#
+    );
+    // The model catalog: the same unstamped backend-level family,
+    // UNCONDITIONAL (v21) — optionals absent when config is silent,
+    // the dial's names only, `reasoning` always stated.
+    assert_eq!(
+        serde_json::to_string(&SessionEvent::ModelsAvailable {
+            providers: vec![AvailableProvider {
+                id: "local".to_string(),
+                name: None,
+                models: vec![crate::AvailableModel {
+                    id: "m".to_string(),
+                    name: None,
+                    context_window: Some(200_000),
+                    max_tokens: None,
+                    cost: Some(crate::Cost {
+                        input: 1.0,
+                        output: 4.0,
+                        cache_read: 0.1,
+                        cache_write: 0.4,
+                    }),
+                    reasoning: false,
+                    input: vec!["text".to_string(), "image".to_string()],
+                    thinking_levels: Vec::new(),
+                }],
+            }],
+        })
+        .expect("serialize"),
+        r#"{"type":"models_available","providers":[{"id":"local","models":[{"id":"m","context_window":200000,"cost":{"input":1.0,"output":4.0,"cache_read":0.1,"cache_write":0.4},"reasoning":false,"input":["text","image"],"thinking_levels":[]}]}]}"#
     );
     // The announce's wire spelling: a subagent child carries its
     // parentage and the spawning call's correlation id; a user

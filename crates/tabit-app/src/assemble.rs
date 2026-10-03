@@ -305,7 +305,10 @@ pub fn core_tools() -> Vec<tabit_engine::tool::DynamicTool> {
 /// the boot (config, tools, preamble), behind closures so
 /// tabit-session stays free of front-facing wiring. The process's
 /// `--model`/`--max-turns` apply to sessions created later;
-/// `open_session` resolves by stored id and resumes that file.
+/// `open_session` resolves by stored id and resumes that file. The
+/// startup catalogs ride along: the extension world, and the usable
+/// model catalog the registry folds once (config is not re-read per
+/// request by design — a reload re-announces when that lands).
 /// One registry for the whole process (the ruling: providers are user
 /// config, not per-session) — every session the host builds shares
 /// the provider client caches.
@@ -333,6 +336,9 @@ pub fn host_data(
     let open_extensions = extensions.clone();
     tabit_session::SessionHostData {
         extensions: extensions.catalog.clone(),
+        // The usable model catalog, folded once at boot (v21 —
+        // unconditional; the registry owns the usable predicate).
+        models: registry.available_catalog(),
         create: Arc::new(move || {
             assemble(
                 &fresh_args,

@@ -141,6 +141,13 @@ pub struct SessionHostData {
     /// the binary's boot-time assembly verdict: provenance, standing,
     /// and the load-time conflict reports.
     pub extensions: tabit_protocol::ExtensionsCatalog,
+    /// The usable model catalog's wire snapshot (v21), announced once
+    /// at startup after the extension catalog — and UNCONDITIONALLY,
+    /// even when empty (absence of the frame means "protocol older
+    /// than v21", never "no models"; an empty `providers` is the
+    /// legal no-usable-models state). The fold is the model
+    /// registry's (it owns config + auth); this is its frozen answer.
+    pub models: Vec<tabit_protocol::AvailableProvider>,
 }
 
 /// One session's delivery surface — the module's handler at the
@@ -740,6 +747,19 @@ impl SessionHostMount {
                 },
             );
         }
+        // The model catalog closes the startup announcements (v21),
+        // backend-level like the others (one process, one model
+        // registry) but UNCONDITIONAL: unlike skills and extensions
+        // it emits even when empty — absence of the frame means
+        // "protocol older than v21", never "no models", and an empty
+        // `providers` is the legal no-usable-models state a frontend
+        // should surface as a setup warning (FRONTEND.md §6).
+        sink.emit(
+            None,
+            SessionEvent::ModelsAvailable {
+                providers: data.models.clone(),
+            },
+        );
 
         // A resumed boot replays automatically (owner ruling
         // 2026-09-25): the resident chain re-emits right after the

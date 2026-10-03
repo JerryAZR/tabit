@@ -189,6 +189,7 @@ fn host(store: &SessionStore, node: Arc<Node>, session: Session) -> SessionHost 
         create: Arc::new(|| Err("not driven".to_string())),
         open: Arc::new(|_| Err("not driven".to_string())),
         extensions: Default::default(),
+        models: Vec::new(),
     };
     SessionHost::spawn(session, Vec::new(), wiring, data)
 }

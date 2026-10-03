@@ -16,14 +16,14 @@ use std::sync::{Arc, Mutex};
 
 use crate::lock::lock;
 use crate::model::validate_selection;
-use tabit_config::{AuthConfig, Provider, TabitConfig, WireApi};
+use tabit_config::{AuthConfig, InputModality, Provider, TabitConfig, WireApi};
 use tabit_engine::agent::ModelHandle;
 use tabit_providers::client::CompletionClient;
 use tabit_providers::providers::{anthropic, openai};
 
 use crate::SessionError;
 use crate::session::ModelFactory;
-use tabit_protocol::ModelSelection;
+use tabit_protocol::{AvailableModel, AvailableProvider, ModelSelection};
 
 /// One constructed provider client. Clients clone cheaply and share
 /// their HTTP connection pool; models built from them are thin wrappers,
@@ -188,6 +188,58 @@ impl ModelRegistry {
                 selection.provider
             )),
         }
+    }
+
+    /// The boot catalog for the wire's `models_available`
+    /// announcement (protocol v21): every USABLE provider — the same
+    /// `usable` predicate `default_selection`'s rungs walk, never a
+    /// sibling — with its models, folded into the protocol's wire
+    /// types. The fold lives here because the registry owns config +
+    /// auth; the endpoint just emits. Providers walk in the config
+    /// map's alphabetical order (the same walk `first_usable_model`
+    /// uses), models in config-file order; display sorting is the
+    /// frontend's business.
+    pub fn available_catalog(&self) -> Vec<AvailableProvider> {
+        self.inner
+            .config
+            .providers
+            .iter()
+            .filter(|(id, _)| self.usable(id))
+            .map(|(id, provider)| AvailableProvider {
+                id: id.clone(),
+                name: provider.name.clone(),
+                models: provider
+                    .models
+                    .iter()
+                    .map(|model| AvailableModel {
+                        id: model.id.clone(),
+                        name: model.name.clone(),
+                        context_window: model.context_window,
+                        max_tokens: model.max_tokens,
+                        cost: model.cost.map(crate::model::wire_cost),
+                        reasoning: model.reasoning,
+                        input: model
+                            .input
+                            .iter()
+                            .map(|modality| {
+                                match modality {
+                                    InputModality::Text => "text",
+                                    InputModality::Image => "image",
+                                }
+                                .to_string()
+                            })
+                            .collect(),
+                        // Names only — the dial's request-merge maps
+                        // never cross the wire.
+                        thinking_levels: model
+                            .thinking_levels
+                            .iter()
+                            .map(|level| level.name.clone())
+                            .collect(),
+                    })
+                    .collect(),
+            })
+            .collect()
     }
 
     /// The last-resort pick: the first usable provider's first model

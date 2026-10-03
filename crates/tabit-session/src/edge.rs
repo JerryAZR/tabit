@@ -1128,6 +1128,7 @@ id = "m"
                     crate::SessionEvent::TurnCommitted { .. } => Some("turn_committed"),
                     crate::SessionEvent::RunFinished { .. } => Some("run_finished"),
                     crate::SessionEvent::SessionsAvailable { .. } => Some("sessions_available"),
+                    crate::SessionEvent::ModelsAvailable { .. } => Some("models_available"),
                     crate::SessionEvent::SessionOpened { .. } => Some("session_opened"),
                     _ => Some("other"),
                 },
@@ -1139,6 +1140,9 @@ id = "m"
             vec![
                 "session_opened",
                 "sessions_available",
+                // The v21 model catalog: unconditional, backend-level,
+                // right after the (here absent) extension catalog.
+                "models_available",
                 // The register announcement precedes the bracket (the
                 // pass itself carries no model_changed — state is
                 // announced live, never reconstructed from history).
@@ -1282,6 +1286,7 @@ id = "m"
                 create,
                 open,
                 extensions: Default::default(),
+                models: Vec::new(),
             },
         );
         let out = SharedOut::default();
