@@ -54,7 +54,7 @@ api_key = "dummy"
             Some(ModelSelection::new("local", "m2")),
         )
         .expect("explicit wins");
-    assert_eq!(got, explicit);
+    assert_eq!(got, Some(explicit));
     assert!(notes.is_empty(), "an explicit choice never degrades");
 
     // An explicit choice that does not resolve is loud immediately.
@@ -76,7 +76,7 @@ api_key = "dummy"
     let (got, notes) = registry
         .default_selection(None, Some(ModelSelection::new("local", "m2")))
         .expect("resumed wins");
-    assert_eq!(got, ModelSelection::new("local", "m2"));
+    assert_eq!(got, Some(ModelSelection::new("local", "m2")));
     assert!(
         notes.is_empty(),
         "a resolvable resumed model never degrades"
@@ -94,6 +94,7 @@ fn default_selection_stale_resumed_degrades_with_a_note() {
     let (selection, notes) = registry
         .default_selection(None, Some(ModelSelection::new("gone", "m")))
         .expect("falls back instead of failing");
+    let selection = selection.expect("a usable model exists");
     assert_eq!(selection.model, "m", "the first configured model");
     assert_eq!(notes.len(), 1, "the degradation is reported");
     assert!(
@@ -116,19 +117,20 @@ api_key = "dummy"
     assert!(notes.is_empty());
     assert_eq!(
         got,
-        ModelSelection {
+        Some(ModelSelection {
             provider: "local".into(),
             model: "m".into(),
             thinking_level: Some("high".into()),
-        }
+        })
     );
 }
 
 #[test]
 fn a_keyless_declaration_is_the_usability_flag() {
     // No key, no `keyless = true`: the provider is not usable — the
-    // explicit build fails loudly naming both fixes, and there is no
-    // usable provider to fall back to.
+    // explicit build fails loudly naming both fixes, and default
+    // resolution finds no usable provider to fall back to (it
+    // degrades selection-less, per the first-run ruling reversal).
     let flagged = registry_with(TWO_MODELS, "");
     let error = flagged
         .build("local", "m", "session")
@@ -141,10 +143,14 @@ fn a_keyless_declaration_is_the_usability_flag() {
         other => panic!("expected config error, got {other:?}"),
     }
     match flagged.default_selection(None, None) {
-        Err(SessionError::Config { message }) => {
-            assert!(message.contains("usable model provider"), "{message}");
+        // The first-run ruling reversal: no usable provider degrades
+        // to a selection-less session with the teaching note, never
+        // a startup error.
+        Ok((None, notes)) => {
+            assert_eq!(notes.len(), 1, "the teaching note rides: {notes:?}");
+            assert!(notes[0].contains("no usable model"), "{}", notes[0]);
         }
-        other => panic!("expected the teaching error, got {other:?}"),
+        other => panic!("expected the selection-less degradation, got {other:?}"),
     }
 
     // Declared keyless: usable, with the stubbed empty credential
@@ -154,7 +160,7 @@ fn a_keyless_declaration_is_the_usability_flag() {
         .build("local", "m", "session")
         .expect("keyless builds");
     let (selection, notes) = keyless.default_selection(None, None).expect("usable");
-    assert_eq!(selection, ModelSelection::new("local", "m"));
+    assert_eq!(selection, Some(ModelSelection::new("local", "m")));
     assert!(notes.is_empty());
 }
 
@@ -194,28 +200,29 @@ api_key = "k"
     let (selection, notes) = registry
         .default_selection(None, None)
         .expect("usable exists");
-    assert_eq!(selection, ModelSelection::new("remote", "remote-m"));
+    assert_eq!(selection, Some(ModelSelection::new("remote", "remote-m")));
     assert_eq!(notes.len(), 1, "the degradation is noted: {notes:?}");
     assert!(notes[0].contains("not usable"), "{notes:?}");
 }
 
 #[test]
-fn default_selection_falls_back_to_first_model_then_error() {
+fn default_selection_falls_back_to_first_model_then_degrades() {
     let registry = default_registry();
     let (got, notes) = registry.default_selection(None, None).expect("first-seen");
-    assert_eq!(got, ModelSelection::new("local", "m"));
+    assert_eq!(got, Some(ModelSelection::new("local", "m")));
     assert!(notes.is_empty());
 
+    // Nothing usable (the first-run ruling reversal): the terminal
+    // arm degrades to a selection-less session with a teaching note —
+    // a fresh install is normal, never a startup death.
     let empty = registry_with("", "");
-    let err = empty
+    let (selection, notes) = empty
         .default_selection(None, None)
-        .expect_err("nothing configured");
-    match err {
-        SessionError::Config { message } => {
-            assert!(message.contains("usable model provider"), "{message}")
-        }
-        other => panic!("expected config error, got {other:?}"),
-    }
+        .expect("nothing usable degrades, never errors");
+    assert_eq!(selection, None, "the selection-less boot");
+    assert_eq!(notes.len(), 1, "the teaching note rides");
+    assert!(notes[0].contains("no usable model"), "{}", notes[0]);
+    assert!(notes[0].contains("providers.toml"), "{}", notes[0]);
 }
 
 #[test]
@@ -323,6 +330,7 @@ api_key = \"dummy\"
         let (selection, notes) = registry
             .default_selection(None, None)
             .expect("falls back instead of failing");
+        let selection = selection.expect("a usable model exists");
         assert_eq!(selection.model, "m", "the first configured model");
         assert!(
             !notes.is_empty(),

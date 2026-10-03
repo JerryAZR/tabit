@@ -10,7 +10,7 @@ use crate::error::SessionError;
 use crate::lock::lock;
 use futures::StreamExt;
 use std::sync::Arc;
-use tabit_engine::agent::{MultiTurnStreamItem, StreamingError};
+use tabit_engine::agent::{Agent, MultiTurnStreamItem, StreamingError};
 use tabit_engine::completion::Message;
 use tabit_engine::streaming::{StreamedUserContent, StreamingChat};
 use tabit_protocol::SessionEvent;
@@ -176,30 +176,34 @@ impl Session {
         }
         self.drain_persist_transitions();
         // The agent-cache check at run open — the single point of use.
-        // A selection that validates against config but cannot be
+        // A session with no selection at all (the zero-config boot) or
+        // a selection that validates against config but cannot be
         // constructed in this environment (client build trouble, the
         // only residual class: config is immutable per process) fails
         // here, before any turn: the frontend sees the queued
         // `user_message`s (the failed open's drain acknowledges them)
         // then `run_failed` — the same shape a provider stream error
         // takes.
-        if let Err(error) = self.ensure_agent() {
-            self.fail_before_engine(
-                tabit_protocol::RunFailedKind::MODEL,
-                run_started_ms,
-                format!(
-                    "{error} — the message is kept; switch the model and retry to \
-                     answer it"
-                ),
-                &mut sink,
-            );
-            return RunSummary {
-                outcome: RunOutcome::Failed,
-                output: String::new(),
-                events: sink.events,
-            };
-        }
-        let stream = self.open_run(&run_token).await;
+        let (agent, selection) = match self.ensure_agent() {
+            Ok(pair) => pair,
+            Err(error) => {
+                self.fail_before_engine(
+                    tabit_protocol::RunFailedKind::MODEL,
+                    run_started_ms,
+                    format!(
+                        "{error} — the message is kept; switch the model and retry to \
+                         answer it"
+                    ),
+                    &mut sink,
+                );
+                return RunSummary {
+                    outcome: RunOutcome::Failed,
+                    output: String::new(),
+                    events: sink.events,
+                };
+            }
+        };
+        let stream = self.open_run(&run_token, &agent, &selection).await;
         let mut driven = self
             .drive(stream, &run_token, run_started_ms, &mut sink)
             .await;
@@ -278,12 +282,16 @@ impl Session {
 
     /// Assemble the engine request for one run: the abort token and
     /// interaction capability in the tool context, the permission gate,
-    /// and steering over the run-agnostic mailbox. The conversation is
-    /// the shared cell — the loop's folds ARE the durable commits; the
-    /// session never folds.
+    /// and steering over the run-agnostic mailbox. `agent`/`selection`
+    /// are the run-open snapshot pair [`Self::ensure_agent`] guaranteed
+    /// — a mid-run register write reaches the next run's open, never
+    /// this one. The conversation is the shared cell — the loop's
+    /// folds ARE the durable commits; the session never folds.
     async fn open_run(
         &self,
         run_token: &CancellationToken,
+        agent: &Arc<Agent>,
+        selection: &tabit_protocol::ModelSelection,
     ) -> tabit_engine::agent::StreamingResult {
         let mut tool_context = tabit_engine::tool::ToolContext::new();
         tool_context.insert(run_token.clone());
@@ -302,7 +310,7 @@ impl Session {
         tool_context.insert(std::sync::Arc::new(crate::services::ExtensionServices::new(
             self.model_factory.clone(),
             self.config.clone(),
-            self.selection(),
+            selection.clone(),
             self.ledger.clone(),
         ))
             as std::sync::Arc<dyn tabit_engine::tool::services::HostServices>);
@@ -315,7 +323,7 @@ impl Session {
                 parts.clone(),
                 self.subagent_pool.clone(),
                 self.id.clone(),
-                self.selection(),
+                selection.clone(),
                 self.cwd.clone(),
             )));
         }
@@ -328,8 +336,7 @@ impl Session {
         // conversation): the run folds the session's one durable
         // manager, and the opening message — if any — arrives through
         // the steering drain at the loop's first convergence.
-        let mut request = self
-            .agent
+        let mut request = agent
             .stream_over(self.conversation.clone())
             .max_turns(self.max_turns)
             .tool_concurrency(TOOL_CONCURRENCY);
@@ -346,7 +353,7 @@ impl Session {
             // assembles. Ordering, not coordination — the drain at
             // CONVERGE and the history read at PREPARE sit either
             // side of it.
-            .pre_request(self.pre_request_door(run_token))
+            .pre_request(self.pre_request_door(run_token, agent.clone(), selection.clone()))
             .tool_context(tool_context)
             // Announced turn ids are entry ids (ENGINE.md behavior delta
             // 10): the engine mints from tabit's UUIDv7 source, so the id
@@ -479,6 +486,12 @@ impl Session {
                     // same numbers; live adds only what is new).
                     {
                         let selection = self.selection();
+                        // A run in flight always holds a selection
+                        // (run open guaranteed it; no command clears
+                        // one) — internal invariant, fail loud
+                        // (AGENTS.md doctrine).
+                        #[allow(clippy::expect_used)]
+                        let selection = selection.expect("a live run always has a selection");
                         // The invoice fact: dollars from the rates in
                         // effect, stamped now — commit and ledger bill
                         // the same value.

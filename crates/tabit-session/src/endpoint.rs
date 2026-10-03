@@ -82,8 +82,10 @@ pub struct SessionInfo {
     pub session_path: String,
     /// The session's working directory.
     pub session_cwd: String,
-    /// The active model selection.
-    pub model: ModelSelection,
+    /// The active model selection — `None` when the session is
+    /// selection-less (the zero-config boot; the first `model`
+    /// command lands one).
+    pub model: Option<ModelSelection>,
     /// Whether the session continues an existing chain (or started
     /// fresh — see [`Session::resumed`]).
     pub resumed: bool,
@@ -1390,11 +1392,15 @@ fn execute_checkout(session: &mut Session, sink: &NoticeSink, entry_id: String) 
 /// repeats; replayed history itself never carries `model_changed` (the
 /// register ruling: state is announced live, not reconstructed).
 fn emit_replay(session: &Session, sink: &NoticeSink) {
-    let selection = session.selection();
-    sink.emit(SessionEvent::model_changed(
-        &selection,
-        session.model_facts(&selection),
-    ));
+    // A selection-less session (the zero-config boot) announces no
+    // `model_changed` — until the first `model` command lands one
+    // (v21, amended); the pass itself is unaffected.
+    if let Some(selection) = session.selection() {
+        sink.emit(SessionEvent::model_changed(
+            &selection,
+            session.model_facts(&selection),
+        ));
+    }
     let events = session.replay_events();
     let total = events.len() as u64;
     sink.emit(SessionEvent::ReplayBegin { total });

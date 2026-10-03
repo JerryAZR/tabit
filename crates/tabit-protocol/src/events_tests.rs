@@ -216,7 +216,7 @@ fn all_events() -> Vec<SessionEvent> {
             id: "0199".to_string(),
             path: "C:/w/s.jsonl".to_string(),
             cwd: "C:/work/proj".to_string(),
-            model: crate::ModelSelection::new("p", "m"),
+            model: Some(crate::ModelSelection::new("p", "m")),
             resumed: true,
             parent: None,
             parent_call: None,
@@ -384,7 +384,7 @@ fn every_tag_agrees_with_the_wire_the_enum_and_the_list() {
             id: "0199".to_string(),
             path: String::new(),
             cwd: "C:/work/proj".to_string(),
-            model: ModelSelection::new("p", "m"),
+            model: Some(ModelSelection::new("p", "m")),
             resumed: false,
             parent: Some("0192uuidv7parent".to_string()),
             parent_call: Some("i1".to_string()),
@@ -397,13 +397,28 @@ fn every_tag_agrees_with_the_wire_the_enum_and_the_list() {
             id: "0199".to_string(),
             path: "C:/w/s.jsonl".to_string(),
             cwd: "C:/work/proj".to_string(),
-            model: ModelSelection::new("p", "m"),
+            model: Some(ModelSelection::new("p", "m")),
             resumed: true,
             parent: None,
             parent_call: None,
         })
         .expect("serialize"),
         r#"{"type":"session_opened","id":"0199","path":"C:/w/s.jsonl","cwd":"C:/work/proj","model":{"provider":"p","model":"m","thinking_level":null},"resumed":true}"#
+    );
+    // A selection-less session (the zero-config boot, v21 amended):
+    // `model` serializes present-null, never skipped.
+    assert_eq!(
+        serde_json::to_string(&SessionEvent::SessionOpened {
+            id: "0199".to_string(),
+            path: "C:/w/s.jsonl".to_string(),
+            cwd: "C:/work/proj".to_string(),
+            model: None,
+            resumed: false,
+            parent: None,
+            parent_call: None,
+        })
+        .expect("serialize"),
+        r#"{"type":"session_opened","id":"0199","path":"C:/w/s.jsonl","cwd":"C:/work/proj","model":null,"resumed":false}"#
     );
     // The wire spelling of the brackets and the truncation warning.
     assert_eq!(

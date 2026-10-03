@@ -6,7 +6,10 @@
 //! connection pool, and resolves the default model selection with the
 //! precedence: an explicit caller choice, then the resumed session's
 //! last model, then the configured `default_model` preference, then the
-//! first configured model.
+//! first configured model — and, when nothing anywhere is usable, no
+//! selection at all (the first-run ruling reversal, 2026-10: the
+//! zero-config boot opens selection-less with a teaching note; it is
+//! never a startup error).
 //!
 //! Reload (re-reading config for future resolutions) and dynamic model
 //! listing from endpoints are deferred until a consumer exists.
@@ -105,19 +108,23 @@ impl ModelRegistry {
     /// reference that no longer resolves — gone from config, or its
     /// provider lacking the key material it needs — degrades with a note
     /// (it is a preference, like `default_model`); only an explicit
-    /// selection fails loudly. The notes are data — the session worker
-    /// surfaces them to the frontend as `error { kind: model }` frames
-    /// (stderr printing at construction is ruled out: events are the only
-    /// thing a frontend can see).
+    /// selection fails loudly. The terminal arm **degrades instead of
+    /// erroring** (the first-run ruling reversal, 2026-10): nothing
+    /// usable means `Ok((None, notes))` with a teaching note — a fresh
+    /// install is normal, the session boots selection-less, and the
+    /// run-open failure is the carrier. The notes are data — the
+    /// session worker surfaces them to the frontend as
+    /// `error { kind: model }` frames (stderr printing at construction
+    /// is ruled out: events are the only thing a frontend can see).
     pub fn default_selection(
         &self,
         explicit: Option<ModelSelection>,
         resumed: Option<ModelSelection>,
-    ) -> Result<(ModelSelection, Vec<String>), SessionError> {
+    ) -> Result<(Option<ModelSelection>, Vec<String>), SessionError> {
         let mut notes = Vec::new();
         if let Some(explicit) = explicit {
             validate_selection(&explicit, &self.inner.config)?;
-            return Ok((explicit, notes));
+            return Ok((Some(explicit), notes));
         }
         // A resumed selection is a preference too (owner ruling, pi
         // precedent): the session's last model may be gone from
@@ -126,10 +133,10 @@ impl ModelRegistry {
         // exactly that model.
         if let Some(resumed) = resumed {
             match self.preference_error(&resumed) {
-                None => return Ok((resumed, notes)),
+                None => return Ok((Some(resumed), notes)),
                 Some(error) => notes.push(format!(
                     "the resumed session's model `{}/{}` is not usable ({}); \
-                     falling back to default_model or the first usable model",
+                     the default selection resolves without it",
                     resumed.provider, resumed.model, error
                 )),
             }
@@ -140,27 +147,39 @@ impl ModelRegistry {
         // startup).
         if let Some(default) = &self.inner.config.default_model {
             match preferred_selection(default, &self.inner.config) {
-                Ok(selection) if self.usable(&selection.provider) => return Ok((selection, notes)),
+                Ok(selection) if self.usable(&selection.provider) => {
+                    return Ok((Some(selection), notes));
+                }
                 Ok(_) => notes.push(format!(
                     "default_model `{}` is not usable (its provider has no key and \
-                     is not declared keyless); falling back to the first usable model",
+                     is not declared keyless); the default selection falls through it",
                     default.model
                 )),
                 Err(message) => notes.push(format!(
-                    "default_model `{}` is not usable ({message}); falling back \
-                     to the first usable model",
+                    "default_model `{}` is not usable ({message}); the default selection \
+                     falls through it",
                     default.model
                 )),
             }
         }
-        self.first_usable_model()
-            .map(|(provider, model)| (ModelSelection::new(provider, model), notes))
-            .ok_or_else(|| SessionError::Config {
-                message: "a usable model provider — every configured provider lacks a \
-                          key (declare local servers `keyless = true`, or add a key via \
-                          auth.toml / `api_key_env`)"
-                    .to_string(),
-            })
+        match self.first_usable_model() {
+            Some((provider, model)) => Ok((Some(ModelSelection::new(provider, model)), notes)),
+            // The terminal arm degrades (the ruling reversal): teach,
+            // never scare — point at the fix, name the in-app path.
+            None => {
+                notes.push(
+                    "no usable model at this backend — every configured provider lacks a key \
+                     (declare local servers `keyless = true`, or add one via auth.toml / \
+                     `api_key_env`), or there is no providers.toml at all, which is the normal \
+                     fresh-install state. Create ~/.tabit/providers.toml (plus \
+                     ~/.tabit/auth.toml for keys) and restart the backend; the session runs \
+                     selection-less until then, and a `model` command can name any configured \
+                     ref at any time"
+                        .to_string(),
+                );
+                Ok((None, notes))
+            }
+        }
     }
 
     /// Is this provider runnable — does it have the key material it

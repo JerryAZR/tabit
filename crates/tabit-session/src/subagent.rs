@@ -81,7 +81,13 @@ pub struct SpawnContext {
     parts: Arc<SubagentParts>,
     pool: Arc<crate::subagent_pool::SubagentPool>,
     parent_id: String,
-    parent_selection: ModelSelection,
+    /// The parent's selection at run open — the child's inheritance
+    /// default. `None` when the parent is selection-less: the child
+    /// then resolves its own default (and boots selection-less the
+    /// same way if its backend has nothing usable either). Run open
+    /// guarantees `Some`, so `None` only reaches a directly
+    /// constructed context (tests, alternative assemblies).
+    parent_selection: Option<ModelSelection>,
     parent_cwd: PathBuf,
 }
 
@@ -94,14 +100,14 @@ impl SpawnContext {
         parts: Arc<SubagentParts>,
         pool: Arc<crate::subagent_pool::SubagentPool>,
         parent_id: String,
-        parent_selection: ModelSelection,
+        parent_selection: impl Into<Option<ModelSelection>>,
         parent_cwd: PathBuf,
     ) -> Self {
         Self {
             parts,
             pool,
             parent_id,
-            parent_selection,
+            parent_selection: parent_selection.into(),
             parent_cwd,
         }
     }
@@ -124,9 +130,11 @@ impl SpawnContext {
         &self.parent_id
     }
 
-    /// This parent's model selection — the inheritance default.
-    pub fn parent_selection(&self) -> &ModelSelection {
-        &self.parent_selection
+    /// This parent's model selection — the inheritance default
+    /// (`None` when the parent is selection-less; the child resolves
+    /// its own default then).
+    pub fn parent_selection(&self) -> Option<&ModelSelection> {
+        self.parent_selection.as_ref()
     }
 
     /// This parent's working directory — the inheritance default.
@@ -227,9 +235,13 @@ pub async fn subagent(
             cwd.map(PathBuf::from)
                 .unwrap_or_else(|| ctx.parent_cwd().to_path_buf()),
         )
-        .model(ctx.parent_selection().clone())
         .max_turns(parts.max_turns)
         .ephemeral(true);
+    // The child inherits this session's model when there is one; a
+    // selection-less parent leaves the child's own default to resolve.
+    if let Some(selection) = ctx.parent_selection() {
+        spec = spec.model(selection.clone());
+    }
     if let Some(id) = context.get::<InternalCallId>() {
         spec = spec.parent_call(id.0.clone());
     }

@@ -305,6 +305,31 @@ api = "openai-completions"
     std::fs::remove_file(&path).expect("cleanup");
 }
 
+#[test]
+fn load_default_missing_default_file_is_empty_not_an_error() {
+    // The first-run ruling reversal (2026-10): no providers.toml at
+    // the default location and no explicit pointer set means a fresh
+    // install — the empty config, not NotFound. (The set-but-missing
+    // pointer stays loud — `load_default_lists_candidates_when_nothing_exists`.)
+    let _guard = OVERRIDE_ENV_LOCK.lock().expect("env lock");
+    let home = std::env::temp_dir().join("tabit-config-tests/fresh-home");
+    let _ = std::fs::remove_dir_all(&home);
+    std::fs::create_dir_all(&home).expect("temp home");
+    // SAFETY: serialized by OVERRIDE_ENV_LOCK.
+    unsafe {
+        std::env::set_var("HOME", &home);
+        std::env::remove_var("TABIT_CONFIG");
+        std::env::remove_var("TABIT_CONFIG_EXTRA");
+    }
+    let result = TabitConfig::load_default();
+    // SAFETY: see above.
+    unsafe {
+        std::env::remove_var("HOME");
+    }
+    let config = result.expect("a bare machine boots on the empty config");
+    assert!(config.providers.is_empty(), "nothing configured");
+}
+
 /// `$TABIT_CONFIG_EXTRA` appends one more candidate behind the base:
 /// the base wins when it exists, the extra serves when it alone
 /// does.

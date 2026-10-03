@@ -270,7 +270,7 @@ id = "m"
             SessionStore::new(dir),
             config,
             auth,
-            ModelSelection::new("p", "m"),
+            Some(ModelSelection::new("p", "m")),
         )
         .expect("builder")
         .model_factory(std::sync::Arc::new(move |_, _, _| {
@@ -317,7 +317,7 @@ id = "m"
             SessionStore::new(&dir),
             config,
             auth,
-            ModelSelection::new("p", "m"),
+            Some(ModelSelection::new("p", "m")),
         )
         .expect("builder")
         .model_factory(std::sync::Arc::new(move |_, _, _| {
@@ -653,7 +653,7 @@ id = "m"
         let (opened_id, opened_model) =
             opened.expect("the boot session announces itself by session_opened");
         assert_eq!(opened_id, boot_id);
-        assert_eq!(opened_model, ModelSelection::new("p", "m"));
+        assert_eq!(opened_model, Some(ModelSelection::new("p", "m")));
         assert_eq!(texts(&frames, "user"), vec!["hi"]);
         assert_eq!(texts(&frames, "delta"), vec!["hello"]);
         assert!(matches!(
@@ -1009,7 +1009,7 @@ id = "m"
                 store,
                 config,
                 Arc::new(AuthConfig::default()),
-                ModelSelection::new("p", "m"),
+                Some(ModelSelection::new("p", "m")),
             )
             .expect("builder")
             .model_factory(Arc::new(move |_, _, _| {
@@ -1258,7 +1258,7 @@ id = "m"
                 store,
                 factory_config,
                 Arc::new(AuthConfig::default()),
-                ModelSelection::new("p", "m"),
+                Some(ModelSelection::new("p", "m")),
             )
             .expect("builder")
             .model_factory(Arc::new(move |_, _, _| {

@@ -19,13 +19,28 @@ impl Session {
     /// selection-is-truth rule ([`Session::set_model`] is the write
     /// half). Any future writer that swaps `selection` (config reload,
     /// say) cannot leave a stale agent serving requests, because the
-    /// one reader derives rather than trusts.
-    pub(super) fn ensure_agent(&mut self) -> Result<(), SessionError> {
-        let selection = self.selection();
-        if self.agent_built_for == selection {
-            return Ok(());
+    /// one reader derives rather than trusts. Returns the agent and
+    /// the selection it is built for — the run's snapshot pair. A
+    /// selection-less session (`None` — the zero-config boot) cannot
+    /// open a run at all: the teaching failure, carried as
+    /// `run_failed { kind: model }` by the caller.
+    pub(super) fn ensure_agent(&mut self) -> Result<(Arc<Agent>, ModelSelection), SessionError> {
+        let Some(selection) = self.selection() else {
+            return Err(SessionError::Config {
+                message: "no model selected — this backend has no usable model configured; \
+                          create ~/.tabit/providers.toml (plus ~/.tabit/auth.toml for keys) and \
+                          restart, or switch with the `model` command"
+                    .to_string(),
+            });
+        };
+        // The pair is written together, so a matching stamp means the
+        // agent stands.
+        if let (Some(agent), Some(built_for)) = (&self.agent, &self.agent_built_for)
+            && *built_for == selection
+        {
+            return Ok((agent.clone(), selection));
         }
-        self.agent = Arc::new(build_agent(
+        let agent = Arc::new(build_agent(
             &self.model_factory,
             &self.config,
             &selection,
@@ -34,8 +49,9 @@ impl Session {
             &self.tools,
             None,
         )?);
-        self.agent_built_for = selection;
-        Ok(())
+        self.agent = Some(agent.clone());
+        self.agent_built_for = Some(selection.clone());
+        Ok((agent, selection))
     }
 
     pub(super) fn assemble(
@@ -68,18 +84,11 @@ impl Session {
         let shared_conversation = SharedConversation {
             conversation: conversation_cell.clone(),
         };
-        // The opening agent is derived from the resolved selection before
-        // the struct exists (the placeholder this replaces existed only
-        // to satisfy the field initializer).
-        let agent = Arc::new(build_agent(
-            &builder.model_factory,
-            &builder.config,
-            &builder.selection,
-            &id,
-            builder.preamble.as_deref(),
-            &builder.tools,
-            None,
-        )?);
+        // No opening agent: the cache is lazy (the selection-is-truth
+        // rule derives it at run open) — a selection-less session has
+        // none to build, and a selection that cannot construct in this
+        // environment must not kill the boot: its failure is the
+        // run-open `run_failed { kind: model }`.
         let session = Self {
             config: builder.config,
             selection: selection_cell,
@@ -88,8 +97,8 @@ impl Session {
             max_turns: builder.max_turns,
             model_factory: builder.model_factory,
             run_hooks: builder.run_hooks,
-            agent,
-            agent_built_for: builder.selection,
+            agent: None,
+            agent_built_for: None,
             conversation: conversation_cell,
             buffer,
             shared_conversation,

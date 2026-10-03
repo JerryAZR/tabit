@@ -29,9 +29,14 @@ impl Session {
     }
 
     /// Change the thinking level without changing provider/model. `None`
-    /// clears it.
+    /// clears it. A selection-less session has nothing to re-level —
+    /// the loud, named error.
     pub fn set_thinking_level(&mut self, level: Option<&str>) -> Result<(), SessionError> {
-        let current = self.selection();
+        let Some(current) = self.selection() else {
+            return Err(SessionError::Config {
+                message: "no model selected — set one first with the `model` command".to_string(),
+            });
+        };
         let selection = ModelSelection {
             provider: current.provider,
             model: current.model,
@@ -42,7 +47,10 @@ impl Session {
 
     /// The active model selection (an owned clone — three strings; the
     /// cell is shared with the endpoint's receive-time writes).
-    pub fn selection(&self) -> ModelSelection {
+    /// `None` when the session is selection-less (the zero-config
+    /// boot): nothing usable at this backend until a `model` command
+    /// lands one.
+    pub fn selection(&self) -> Option<ModelSelection> {
         lock(&self.selection).clone()
     }
 
@@ -103,7 +111,7 @@ impl Session {
 /// record — write-behind, last model_change wins).
 #[derive(Clone)]
 pub(crate) struct ModelRegister {
-    selection: Arc<Mutex<ModelSelection>>,
+    selection: Arc<Mutex<Option<ModelSelection>>>,
     buffer: crate::writer::SharedBuffer,
     config: Arc<TabitConfig>,
 }
@@ -111,7 +119,10 @@ pub(crate) struct ModelRegister {
 impl ModelRegister {
     /// Record + swap, atomic under the cell lock. Unconditional — a
     /// dedup guard would be machinery without a failure it prevents
-    /// (repeat values are harmless under last-write-wins).
+    /// (repeat values are harmless under last-write-wins). The first
+    /// write on a selection-less session lands its first selection —
+    /// the register knows no way back to `None` (there is no unselect
+    /// command).
     pub(crate) fn write(&self, selection: ModelSelection) {
         let mut cell = lock(&self.selection);
         if let Err(error) = crate::lock::lock(&self.buffer).enqueue(&[register_record(&selection)])
@@ -120,7 +131,7 @@ impl ModelRegister {
             // later enqueue — a refusal is degradation, not loss.
             tracing::warn!(%error, "model_change record failed to flush; queued for retry");
         }
-        *cell = selection;
+        *cell = Some(selection);
     }
 
     /// The announcement facts for a selection (protocol v11) — the
@@ -150,10 +161,16 @@ pub(super) fn register_record(selection: &ModelSelection) -> FileRecord {
 /// manager's injected resolver and every other stamp site.
 pub(super) fn cost_resolver(
     config: Arc<TabitConfig>,
-    selection: Arc<Mutex<ModelSelection>>,
+    selection: Arc<Mutex<Option<ModelSelection>>>,
 ) -> tabit_log::TurnCost {
     Arc::new(move |usage| {
         let selection = lock(&selection).clone();
+        let Some(selection) = selection else {
+            // A selection-less session never runs (run open fails),
+            // so it never bills — the arm exists for the type, not
+            // for a flow.
+            return None;
+        };
         crate::model::turn_cost(&config, &selection, usage)
     })
 }

@@ -392,7 +392,7 @@ async fn an_idle_message_runs_to_completion_over_the_stream() {
     // The info block carries the startup facts, and closing stats landed.
     assert_eq!(
         handle.info().model,
-        tabit_protocol::ModelSelection::new("p", "m")
+        Some(tabit_protocol::ModelSelection::new("p", "m"))
     );
     assert!(
         handle.closing_stats().is_some(),
@@ -853,7 +853,7 @@ async fn new_session_runs_a_second_stream_and_both_route_by_id() {
         SessionEvent::SessionOpened { id, model, .. } => {
             assert_eq!(
                 model,
-                tabit_protocol::ModelSelection::new("p", "m"),
+                Some(tabit_protocol::ModelSelection::new("p", "m")),
                 "the frame carries the new session's selection"
             );
             id
@@ -4153,4 +4153,150 @@ async fn a_midroundtrip_checkout_resolves_forward_to_the_batches_last_result() {
         .filter(|frame| matches!(&frame.event, SessionEvent::TurnCommitted { .. }))
         .count();
     assert_eq!(done_turns, 1, "only the tool turn precedes the landing");
+}
+
+/// A session built selection-less (`None` — the zero-config boot
+/// shape) over the given config, with the registry's default factory
+/// (real builds — an unusable provider fails at run open, the honest
+/// shape).
+fn selectionless_session(store: SessionStore, config: &str) -> crate::Session {
+    crate::SessionBuilder::new(
+        store,
+        std::sync::Arc::new(
+            tabit_config::TabitConfig::from_toml_str(
+                config,
+                std::path::Path::new("providers.toml"),
+            )
+            .expect("config"),
+        ),
+        std::sync::Arc::new(tabit_config::AuthConfig::default()),
+        None,
+    )
+    .expect("builder")
+    .create("C:/w")
+    .expect("session")
+}
+
+#[tokio::test]
+async fn a_selection_less_boot_announces_null_and_fails_runs_at_open() {
+    // The zero-config boot (the first-run ruling reversal): nothing
+    // usable → the session opens selection-less. `session_opened`
+    // carries `model: null`, the teaching note rides the startup
+    // notes as `error { kind: model }`, no `model_changed` is ever
+    // announced (not ahead of a replay pass either), and the first
+    // message's run fails at open with `kind: "model"`.
+    let store = temp_store("endpoint-selectionless");
+    let session = selectionless_session(store.clone(), "");
+    let mut handle = SessionHost::spawn(
+        session,
+        vec!["no usable model at this backend — create ~/.tabit/providers.toml".to_string()],
+        plain_wiring(&store),
+        plain_data(),
+    );
+    let id = boot_id(&handle);
+    assert_eq!(handle.info().model, None, "selection-less at attach");
+
+    handle.message(&id, "hi");
+    // A replay request proves the pass announces no register either.
+    handle.replay(&id);
+    let frames = drain(&mut handle).await;
+
+    match frames.first().map(|f| &f.event) {
+        Some(SessionEvent::SessionOpened { model, .. }) => {
+            assert_eq!(*model, None, "the null selection crosses")
+        }
+        other => panic!("session_opened first, got {other:?}"),
+    }
+    match frames.get(1).map(|f| &f.event) {
+        Some(SessionEvent::Error { kind, message, .. }) => {
+            assert_eq!(kind, tabit_protocol::ErrorKind::MODEL);
+            assert!(message.contains("no usable model"), "{message}");
+        }
+        other => panic!("the teaching note follows session_opened, got {other:?}"),
+    }
+    assert!(
+        !frames
+            .iter()
+            .any(|f| matches!(f.event, SessionEvent::ModelChanged { .. })),
+        "a selection-less session never announces model_changed"
+    );
+    assert!(
+        frames
+            .iter()
+            .any(|f| matches!(f.event, SessionEvent::ReplayBegin { .. })),
+        "the pass still served"
+    );
+    let (kind, message) = frames
+        .iter()
+        .find_map(|f| match &f.event {
+            SessionEvent::RunFailed { kind, message, .. } => Some((kind.clone(), message.clone())),
+            _ => None,
+        })
+        .expect("the first message's run fails");
+    assert_eq!(kind, tabit_protocol::RunFailedKind::MODEL);
+    assert!(message.contains("no model selected"), "{message}");
+    assert!(
+        message.contains("providers.toml") && message.contains("`model` command"),
+        "the failure teaches: {message}"
+    );
+    std::fs::remove_dir_all(store.dir()).ok();
+}
+
+#[tokio::test]
+async fn a_model_command_lands_the_first_selection_on_a_selection_less_session() {
+    // The provider is configured but unusable (no key, not declared
+    // keyless): the `model` command validates existence only — the
+    // register lands and `model_changed` announces; the session is
+    // no longer selection-less. The run then fails at open on the
+    // build failure (the missing key), still `kind: "model"`.
+    let store = temp_store("endpoint-lands");
+    let session = selectionless_session(
+        store.clone(),
+        r#"
+[providers.locked]
+base_url = "http://127.0.0.1:1/v1"
+api = "openai-completions"
+
+[[providers.locked.models]]
+id = "m"
+"#,
+    );
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store), plain_data());
+    let id = boot_id(&handle);
+
+    handle.model(&id, ModelSelection::new("locked", "m"));
+    let changed = until_event(&mut handle, |event| {
+        matches!(event, SessionEvent::ModelChanged { .. })
+    })
+    .await;
+    assert!(
+        matches!(&changed.event, SessionEvent::ModelChanged { provider, model, .. } if provider == "locked" && model == "m"),
+        "the first selection announces: {:?}",
+        changed.event
+    );
+
+    // An unknown ref still errors at receive and moves nothing.
+    handle.model(&id, ModelSelection::new("ghost", "m"));
+    handle.message(&id, "hi");
+    let frames = drain(&mut handle).await;
+    assert!(
+        frames.iter().any(|f| matches!(&f.event,
+            SessionEvent::Error { kind, message, .. }
+                if kind == tabit_protocol::ErrorKind::MODEL && message.contains("ghost"))),
+        "the unknown ref is the immediate model error"
+    );
+    let failure = frames
+        .iter()
+        .find_map(|f| match &f.event {
+            SessionEvent::RunFailed { kind, message, .. } => Some((kind.clone(), message.clone())),
+            _ => None,
+        })
+        .expect("the run fails at open");
+    assert_eq!(failure.0, tabit_protocol::RunFailedKind::MODEL);
+    assert!(
+        failure.1.contains("requires a key"),
+        "the build failure, not a selection-less one: {}",
+        failure.1
+    );
+    std::fs::remove_dir_all(store.dir()).ok();
 }

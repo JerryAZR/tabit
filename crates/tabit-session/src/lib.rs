@@ -52,7 +52,7 @@
 //! let store = SessionStore::project_default();
 //! let selection = ModelSelection::new("lmstudio", "openai/gpt-oss-20b");
 //!
-//! let mut session = SessionBuilder::new(store, config, auth, selection)?
+//! let mut session = SessionBuilder::new(store, config, auth, Some(selection))?
 //!     .create("C:/work/project")?;
 //! let run = session.prompt("explain this repository").await;
 //! println!("{}", run.output);

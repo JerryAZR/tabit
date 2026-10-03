@@ -427,3 +427,298 @@ fn an_unreadable_session_is_a_json_startup_failure_without_the_guide() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// ---- The zero-config first run (the ruling reversal, 2026-10) ----
+
+/// A JSON-mode child with live pipes: stdout lines arrive on a
+/// channel (a reader thread owns the pipe), stdin writes reach the
+/// child. The zero-config tests must answer the boot announcements —
+/// the session id exists only after `session_opened`.
+struct JsonChild {
+    child: std::process::Child,
+    lines: std::sync::mpsc::Receiver<String>,
+    stdin: std::process::ChildStdin,
+}
+
+/// Spawn `tabit-core` in `dir` on a hermetic machine: `home` is a
+/// fresh temp HOME, the config env pointers are removed, and
+/// `TABIT_CONFIG` points at `config` only when given. The extension
+/// root is pinned empty like `run_in`'s.
+fn json_child(dir: &Path, home: &Path, config: Option<&Path>, args: &[&str]) -> JsonChild {
+    use std::io::BufRead as _;
+    let empty_root = dir.join("no-extensions");
+    std::fs::create_dir_all(&empty_root).expect("empty extension root");
+    let mut argv: Vec<String> = vec![
+        "--extensions".to_string(),
+        empty_root.to_str().expect("utf-8 path").to_string(),
+    ];
+    argv.extend(args.iter().map(|arg| (*arg).to_string()));
+    let mut command = Command::new(env!("CARGO_BIN_EXE_tabit-core"));
+    command
+        .args(&argv)
+        .current_dir(dir)
+        .env("HOME", home)
+        .env("USERPROFILE", home)
+        .env_remove("TABIT_CONFIG")
+        .env_remove("TABIT_CONFIG_EXTRA")
+        .env_remove("TABIT_AUTH")
+        .env_remove("TABIT_SETTINGS")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    if let Some(config) = config {
+        command.env("TABIT_CONFIG", config);
+    }
+    let mut child = command.spawn().expect("spawn tabit-core");
+    let stdin = child.stdin.take().expect("piped stdin");
+    let stdout = child.stdout.take().expect("piped stdout");
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        for line in std::io::BufReader::new(stdout).lines() {
+            let Ok(line) = line else { break };
+            if tx.send(line).is_err() {
+                return;
+            }
+        }
+        // The child died; unblock the reader.
+        drop(tx);
+    });
+    JsonChild {
+        child,
+        lines: rx,
+        stdin,
+    }
+}
+
+/// The next wire line, parsed. A silent child is a test bug, not a
+/// hang: bound every wait.
+fn next_frame(child: &JsonChild) -> serde_json::Value {
+    let line = child
+        .lines
+        .recv_timeout(std::time::Duration::from_secs(30))
+        .expect("a wire line arrives");
+    serde_json::from_str(&line).expect("every line is a frame")
+}
+
+/// Read frames until `models_available` (the boot announcements'
+/// tail), returning everything seen.
+fn read_boot(child: &JsonChild) -> Vec<serde_json::Value> {
+    let mut frames = vec![next_frame(child)];
+    assert_eq!(frames[0]["type"], "report", "the report leads: {frames:?}");
+    while !frames
+        .iter()
+        .any(|frame| frame["type"] == "models_available")
+    {
+        frames.push(next_frame(child));
+    }
+    frames
+}
+
+/// Close stdin (frontend death) and collect the exit code.
+fn close_and_wait(mut child: JsonChild) -> Option<i32> {
+    drop(child.stdin);
+    child.child.wait().expect("reap").code()
+}
+
+#[test]
+fn zero_config_boots_selection_less_and_the_run_open_failure_teaches() {
+    // The ruling reversal: a bare machine (no providers.toml at the
+    // default location, no env pointers) boots fine. The wire says
+    // so: `session_opened.model` is null, `models_available` is
+    // empty, the teaching note rides as `error { kind: model }`, and
+    // the first message's run fails at open with `kind: "model"`.
+    let dir = test_dir("zero-config");
+    let home = test_dir("zero-config-home");
+    let mut child = json_child(&dir, &home, None, &["--json"]);
+
+    let frames = read_boot(&child);
+    let opened = frames
+        .iter()
+        .find(|frame| frame["type"] == "session_opened")
+        .expect("the boot session announced");
+    assert_eq!(opened["model"], serde_json::Value::Null, "null, present");
+    let session = opened["id"].as_str().expect("the session id").to_string();
+    let note = frames
+        .iter()
+        .find(|frame| frame["type"] == "error" && frame["kind"] == "model")
+        .expect("the teaching note rides the startup notes");
+    assert!(
+        note["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("no usable model") && m.contains("providers.toml")),
+        "the note teaches: {note}"
+    );
+    let catalog = frames
+        .iter()
+        .find(|frame| frame["type"] == "models_available")
+        .expect("the catalog announced");
+    assert_eq!(catalog["providers"], serde_json::json!([]), "empty");
+    assert!(
+        !frames.iter().any(|frame| frame["type"] == "model_changed"),
+        "a selection-less session announces no model_changed"
+    );
+
+    use std::io::Write as _;
+    writeln!(
+        child.stdin,
+        "{}",
+        serde_json::json!({"type": "message", "session": session, "text": "hi"})
+    )
+    .expect("write the message");
+    let failure = loop {
+        let frame = next_frame(&child);
+        if frame["type"] == "run_failed" {
+            break frame;
+        }
+    };
+    assert_eq!(failure["kind"], "model", "the run-open failure: {failure}");
+    assert!(
+        failure["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("no model selected") && m.contains("providers.toml")),
+        "the failure teaches: {failure}"
+    );
+
+    assert_eq!(close_and_wait(child), Some(0), "a clean wind-down");
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+#[test]
+fn explicit_model_on_a_known_but_unusable_provider_boots() {
+    // The explicit rung validates existence only: the provider is
+    // configured but has no key, so the catalog is empty — yet the
+    // boot succeeds with the asked-for selection, and the missing
+    // key surfaces as the run-open failure (the lazy agent cache;
+    // construction failure is not a startup death).
+    let dir = test_dir("unusable-explicit");
+    let home = test_dir("unusable-explicit-home");
+    let config = dir.join("providers.toml");
+    std::fs::write(
+        &config,
+        "[providers.p]\nbase_url = \"http://127.0.0.1:1/v1\"\napi = \"openai-completions\"\n\n[[providers.p.models]]\nid = \"m\"\n",
+    )
+    .expect("write config");
+    let mut child = json_child(&dir, &home, Some(&config), &["--json", "--model", "p/m"]);
+
+    let frames = read_boot(&child);
+    let opened = frames
+        .iter()
+        .find(|frame| frame["type"] == "session_opened")
+        .expect("the boot session announced");
+    assert_eq!(
+        opened["model"],
+        serde_json::json!({"provider": "p", "model": "m", "thinking_level": null}),
+        "the explicit selection crossed: {opened}"
+    );
+    let session = opened["id"].as_str().expect("the session id").to_string();
+    let catalog = frames
+        .iter()
+        .find(|frame| frame["type"] == "models_available")
+        .expect("the catalog announced");
+    assert_eq!(
+        catalog["providers"],
+        serde_json::json!([]),
+        "no key, not keyless: unusable"
+    );
+
+    use std::io::Write as _;
+    writeln!(
+        child.stdin,
+        "{}",
+        serde_json::json!({"type": "message", "session": session, "text": "hi"})
+    )
+    .expect("write the message");
+    let failure = loop {
+        let frame = next_frame(&child);
+        if frame["type"] == "run_failed" {
+            break frame;
+        }
+    };
+    assert_eq!(failure["kind"], "model", "{failure}");
+    assert!(
+        failure["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("requires a key")),
+        "the build failure, named: {failure}"
+    );
+
+    assert_eq!(close_and_wait(child), Some(0), "the boot succeeded");
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+#[test]
+fn explicit_model_on_an_unknown_ref_still_fails_startup() {
+    // The explicit rung stays loud: a ref config does not know is a
+    // startup rejection (plain reason — no setup guide), exit 1.
+    let config = dead_provider_config("unknown-model");
+    let dir = config.parent().expect("config dir").to_path_buf();
+    let (code, stdout, stderr) = run_in(&dir, &config, &["--json", "--model", "ghost/m"]);
+    assert_eq!(code, Some(1), "stdout: {stdout}\nstderr: {stderr}");
+    assert!(
+        stdout.contains("could not start the session") && stdout.contains("ghost"),
+        "the rejection names the ref: {stdout}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_set_but_missing_tabit_config_stays_loud() {
+    // The replacement ruling survives the reversal: an explicit
+    // pointer that misses is never a silent empty config.
+    let dir = test_dir("missing-pointer");
+    let missing = dir.join("absent.toml");
+    let (code, stdout, stderr) = run_in(&dir, &missing, &["--json"]);
+    assert_eq!(code, Some(1), "stdout: {stdout}\nstderr: {stderr}");
+    assert!(
+        stdout.contains("first-run setup needed") && stdout.contains("absent.toml"),
+        "the guide names the missing pointer: {stdout}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn print_mode_without_a_selection_fails_the_run_and_teaches() {
+    // Non-interactive death is the one acceptable kind (pi's shape):
+    // no startup check — the run fails at open, the message teaches,
+    // the exit is nonzero.
+    let dir = test_dir("print-no-model");
+    let home = test_dir("print-no-model-home");
+    let empty_root = dir.join("no-extensions");
+    std::fs::create_dir_all(&empty_root).expect("empty extension root");
+    let output = Command::new(env!("CARGO_BIN_EXE_tabit-core"))
+        .args([
+            "--extensions",
+            empty_root.to_str().expect("utf-8 path"),
+            "-p",
+            "hi",
+        ])
+        .current_dir(&dir)
+        .env("HOME", &home)
+        .env("USERPROFILE", &home)
+        .env_remove("TABIT_CONFIG")
+        .env_remove("TABIT_CONFIG_EXTRA")
+        .env_remove("TABIT_AUTH")
+        .env_remove("TABIT_SETTINGS")
+        .output()
+        .expect("spawn tabit-core");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "stdout: {stdout}\nstderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("run failed") && stderr.contains("no model selected"),
+        "the run-open failure is print mode's carrier: {stderr}"
+    );
+    assert!(
+        stderr.contains("no usable model"),
+        "the boot's teaching note warned on stderr too: {stderr}"
+    );
+    assert!(stdout.is_empty(), "no answer exists to print: {stdout}");
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&home);
+}

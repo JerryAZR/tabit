@@ -333,8 +333,13 @@ pub enum SessionEvent {
         /// session's is the backend's cwd; a subagent child's is its
         /// own spawn cwd.
         cwd: String,
-        /// The session's active selection.
-        model: ModelSelection,
+        /// The session's active selection. **Nullable (v21,
+        /// amended)**: `null` — serialized present, never skipped —
+        /// means the session has no selection (nothing usable at
+        /// this backend — the zero-config boot); the first `model`
+        /// command lands one, and until then no `model_changed` is
+        /// announced and runs fail at open.
+        model: Option<ModelSelection>,
         /// Whether the session continues an existing chain.
         resumed: bool,
         /// The parent session's id when this session is a subagent
@@ -354,8 +359,12 @@ pub enum SessionEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         parent_call: Option<String>,
     },
-    /// The active model changed (a `ModelChange` log entry replayed, or
-    /// — from slice 3 — a `model` command applied).
+    /// The active model changed: a `model` command applied (a state
+    /// write at receive), or the register announcement leading a
+    /// replay pass — the session's current selection, announced live,
+    /// never reconstructed from history. Never emitted for a session
+    /// with no selection (the zero-config boot announces
+    /// `session_opened.model: null` instead, v21 amended).
     ModelChanged {
         /// Provider id from tabit config.
         provider: String,

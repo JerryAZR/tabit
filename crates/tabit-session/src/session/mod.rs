@@ -76,13 +76,15 @@ pub const TOOL_CONCURRENCY: usize = 4;
 pub struct Session {
     config: Arc<TabitConfig>,
     /// The active model selection — a **shared cell, not worker
-    /// state**: the endpoint writes it at receive through the
-    /// [`ModelRegister`] (record + swap, one operation, any thread),
-    /// and every reader derives — run open's agent derivation
-    /// ([`Self::ensure_agent`]), announcements. The lazy-agent rule
-    /// makes any-writer safe: the reader checks freshness, it does not
-    /// trust writers to rebuild.
-    selection: Arc<Mutex<ModelSelection>>,
+    /// state**, and **optional** (the zero-config boot: a session can
+    /// be selection-less until a `model` command lands one): the
+    /// endpoint writes it at receive through the [`ModelRegister`]
+    /// (record + swap, one operation, any thread), and every reader
+    /// derives — run open's agent derivation ([`Self::ensure_agent`]),
+    /// announcements. The lazy-agent rule makes any-writer safe: the
+    /// reader checks freshness, it does not trust writers to rebuild.
+    /// `agent_built_for` is the cache key.
+    selection: Arc<Mutex<Option<ModelSelection>>>,
     preamble: Option<String>,
     tools: Vec<DynamicTool>,
     max_turns: usize,
@@ -91,12 +93,16 @@ pub struct Session {
     /// [`SessionBuilder::hooks`]); added to every run.
     run_hooks: Option<tabit_engine::agent::HookStack>,
     /// The built agent — a derived cache of `selection`, not a second
-    /// truth. Run open rebuilds it whenever it no longer matches the
-    /// selection (owner ruling 2026-08: check at the single point of
-    /// use, so a stale agent cannot serve a request no matter who
-    /// wrote the selection or how). `agent_built_for` is the cache key.
-    agent: Arc<Agent>,
-    agent_built_for: ModelSelection,
+    /// truth, and **lazily built**: nothing constructs it at assembly
+    /// (a selection-less session has none to build; a selection that
+    /// cannot construct here must not kill the boot — its failure is
+    /// the run-open `run_failed { kind: model }`). Run open rebuilds
+    /// it whenever it no longer matches the selection (owner ruling
+    /// 2026-08: check at the single point of use, so a stale agent
+    /// cannot serve a request no matter who wrote the selection or
+    /// how). `agent_built_for` is the cache key.
+    agent: Option<Arc<Agent>>,
+    agent_built_for: Option<ModelSelection>,
     /// The conversation's source of truth (tabit-log): owned here,
     /// forever — the engine never holds it; the handler folds at the
     /// item arms (steer drained → fold, batch settled → fold_all,

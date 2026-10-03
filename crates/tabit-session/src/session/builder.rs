@@ -19,7 +19,7 @@ use tabit_protocol::ModelSelection;
 pub struct SessionBuilder {
     pub(super) store: SessionStore,
     pub(super) config: Arc<TabitConfig>,
-    pub(super) selection: ModelSelection,
+    pub(super) selection: Option<ModelSelection>,
     pub(super) preamble: Option<String>,
     pub(super) tools: Vec<DynamicTool>,
     pub(super) max_turns: usize,
@@ -46,8 +46,11 @@ pub struct ResumeReport {
 }
 
 impl SessionBuilder {
-    /// Start building a session that will use `selection`. The selection is
-    /// validated against the config immediately.
+    /// Start building a session that will use `selection` — or no
+    /// selection at all (`None`, the zero-config boot: the session
+    /// opens selection-less, runs fail at open until a `model`
+    /// command lands one). A `Some` selection is validated against
+    /// the config immediately.
     ///
     /// The default model factory mints a **per-builder registry** (its
     /// own provider client caches) — an ergonomic default for
@@ -59,9 +62,11 @@ impl SessionBuilder {
         store: SessionStore,
         config: Arc<TabitConfig>,
         auth: Arc<AuthConfig>,
-        selection: ModelSelection,
+        selection: Option<ModelSelection>,
     ) -> Result<Self, SessionError> {
-        validate_selection(&selection, &config)?;
+        if let Some(selection) = &selection {
+            validate_selection(selection, &config)?;
+        }
         let default_factory: ModelFactory =
             ModelRegistry::new(config.clone(), auth.clone()).factory();
         Ok(Self {
@@ -133,9 +138,10 @@ impl SessionBuilder {
     }
 
     /// Create a fresh session. Nothing touches the disk: the file (with
-    /// the opening model selection recorded right after the header)
-    /// materializes at the first user message, so a session that never
-    /// runs leaves nothing behind — not a header-only orphan.
+    /// the opening model selection recorded right after the header,
+    /// when there is one) materializes at the first user message, so a
+    /// session that never runs leaves nothing behind — not a
+    /// header-only orphan.
     pub fn create(self, cwd: &str) -> Result<Session, SessionError> {
         let writer = self.store.create();
         let selection = self.selection.clone();
@@ -153,8 +159,11 @@ impl SessionBuilder {
         // lands with the session's first drain, and a session that
         // never runs materializes nothing (the writer's no-orphan
         // gate). A register write before then supersedes it (last
-        // model_change wins).
-        crate::lock::lock(&session.buffer).prequeue(&register_record(&selection));
+        // model_change wins). A selection-less session writes none —
+        // the first `model` command's write is its first record.
+        if let Some(selection) = selection {
+            crate::lock::lock(&session.buffer).prequeue(&register_record(&selection));
+        }
         Ok(session)
     }
 
@@ -196,7 +205,9 @@ impl SessionBuilder {
         let report = ResumeReport {
             resumed_model: parsed.register.clone(),
         };
-        validate_selection(&self.selection, &self.config)?;
+        if let Some(selection) = &self.selection {
+            validate_selection(selection, &self.config)?;
+        }
         let id = parsed.header.id.clone();
         let file_path = parsed.path.clone();
         let writer = SessionWriter::append_to(&parsed.path, id.clone(), parsed.file_len)?;
@@ -221,17 +232,20 @@ impl SessionBuilder {
             );
         let selection = session.selection();
         let same_model = matches!(
-            &report.resumed_model,
-            Some(last) if last.provider == selection.provider
-                && last.model == selection.model
-                && last.thinking_level == selection.thinking_level
+            (&report.resumed_model, &selection),
+            (Some(last), Some(current)) if last.provider == current.provider
+                && last.model == current.model
+                && last.thinking_level == current.thinking_level
         );
-        if !same_model {
+        if let (Some(selection), false) = (&selection, same_model) {
             // Either a caller-directed switch at resume time, or a log
             // without any model_change yet — either way the session's
             // opening state is durable from here on, through the one
-            // register-write site like every other switch.
-            session.model_register().write(selection);
+            // register-write site like every other switch. A
+            // selection-less resume (None) writes nothing: a
+            // never-selected session stays never-selected, and its
+            // next resume re-derives None the same way.
+            session.model_register().write(selection.clone());
         }
         Ok((session, report))
     }
