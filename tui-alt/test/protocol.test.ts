@@ -19,10 +19,10 @@ describe("protocol: parseServerFrame", () => {
 	});
 
 	test("control frames parse with their fields", () => {
-		const parsed = parseServerFrame('{"type":"report","protocol_version":20}');
+		const parsed = parseServerFrame('{"type":"report","protocol_version":21}');
 		assert.deepStrictEqual(parsed, {
 			kind: "control",
-			frame: { type: "report", protocol_version: 20 },
+			frame: { type: "report", protocol_version: 21 },
 		});
 	});
 
@@ -58,6 +58,36 @@ describe("protocol: parseServerFrame", () => {
 		});
 	});
 
+	test("the v21 catalog parses: usable providers with per-model facts, missing_keys identities", () => {
+		const parsed = parseServerFrame(
+			'{"type":"models_available","providers":[{"id":"anthropic","models":[{"id":"claude","reasoning":true,"input":["text","image"],"thinking_levels":["low","high"]}]}],"missing_keys":[{"id":"openai"}]}',
+		);
+		assert.deepStrictEqual(parsed, {
+			kind: "event",
+			stream: undefined,
+			origin: undefined,
+			event: {
+				type: "models_available",
+				providers: [
+					{ id: "anthropic", models: [{ id: "claude", reasoning: true, input: ["text", "image"], thinking_levels: ["low", "high"] }] },
+				],
+				missing_keys: [{ id: "openai" }],
+			},
+		});
+	});
+
+	test("session_opened.model is nullable (v21) — null parses present", () => {
+		const parsed = parseServerFrame(
+			'{"type":"session_opened","stream":"s1","id":"s1","path":"","cwd":"/w","model":null,"resumed":false}',
+		);
+		assert.deepStrictEqual(parsed, {
+			kind: "event",
+			stream: "s1",
+			origin: undefined,
+			event: { type: "session_opened", id: "s1", path: "", cwd: "/w", model: null, resumed: false },
+		});
+	});
+
 	test("unknown event types are reported, never swallowed", () => {
 		const parsed = parseServerFrame('{"type":"mock_heartbeat","at":123,"stream":"s"}');
 		assert.strictEqual(parsed?.kind, "unknown");
@@ -84,10 +114,22 @@ describe("protocol: toWireLine", () => {
 		assert.deepStrictEqual(JSON.parse(line), { type: "message", session: "s1", text: "hello" });
 	});
 
+	test("login/logout are backend-level commands (v21) — no session field", () => {
+		assert.deepStrictEqual(JSON.parse(toWireLine({ type: "login", provider: "anthropic", api_key: "sk-…" })), {
+			type: "login",
+			provider: "anthropic",
+			api_key: "sk-…",
+		});
+		assert.deepStrictEqual(JSON.parse(toWireLine({ type: "logout", provider: "anthropic" })), {
+			type: "logout",
+			provider: "anthropic",
+		});
+	});
+
 	test("the declared version matches the protocol this build was written against", () => {
 		// The report-model version check kills mismatches; a silent bump here
 		// would strand every copy of this frontend against a backend it can't
 		// talk to.
-		assert.strictEqual(PROTOCOL_VERSION, 20);
+		assert.strictEqual(PROTOCOL_VERSION, 21);
 	});
 });

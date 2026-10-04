@@ -135,6 +135,20 @@ export class Backend {
 		this.send({ type: "interaction_response", session, id, payload });
 	}
 
+	/** Store a provider key (v21). Backend-level, session-less; the
+	 *  re-announced `models_available` is the ack, an unstamped
+	 *  `error { kind: "auth" }` the failure. */
+	login(provider: string, apiKey: string): void {
+		this.send({ type: "login", provider, api_key: apiKey });
+	}
+
+	/** Remove a provider's key (v21). Total and idempotent — unknown
+	 *  provider or absent key is a no-op, still acked by the
+	 *  re-announced catalog. */
+	logout(provider: string): void {
+		this.send({ type: "logout", provider });
+	}
+
 	stderrTail(): string[] {
 		return [...this.#stderrRing];
 	}

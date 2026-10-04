@@ -34,10 +34,17 @@
  * and a nonzero exit); replay brackets renamed `replay_begin { total }` /
  * `replay_end`, default-on for resumed boots. v20: `skills_available` is
  * session-level — stamped with the session's stream, announced per
- * session; fold per stream.
+ * session; fold per stream. v21: `models_available` — the backend-level
+ * usable-model catalog (providers with per-model facts, plus
+ * `missing_keys` — the login widget's targets), always emitted even
+ * empty, re-announced when the world changes (last-wins); the
+ * backend-level `login`/`logout` commands (the re-announced catalog is
+ * the ack, `error { kind: "auth" }` the failure); zero config boots —
+ * `session_opened.model` is nullable (null = no selection, serialized
+ * present).
  */
 
-export const PROTOCOL_VERSION = 20;
+export const PROTOCOL_VERSION = 21;
 
 // ---------------------------------------------------------------------------
 // Commands (frontend → backend). Fire-and-forget; outcomes arrive as
@@ -59,7 +66,9 @@ export type SessionCommand =
 			model: string;
 			thinking_level?: string | null;
 	  }
-	| { type: "interaction_response"; session: string; id: string; payload: unknown };
+	| { type: "interaction_response"; session: string; id: string; payload: unknown }
+	| { type: "login"; provider: string; api_key: string }
+	| { type: "logout"; provider: string };
 
 /** v19: a client line IS a command — the initialize handshake is deleted
  *  and commands may flow from the frontend's first line. */
@@ -77,6 +86,42 @@ export interface ModelSelection {
 	provider: string;
 	model: string;
 	thinking_level?: string | null;
+}
+
+/** One model in a `models_available` provider row (v21): the id a `model`
+ *  command addresses plus the facts config states. Every optional field
+ *  follows the v11 rule — absent means the config does not state it,
+ *  never zero. `thinking_levels` carries the dial's ordered NAMES; empty
+ *  when the model has no dial, and `null` is always a legal selection on
+ *  top (the provider/model default). */
+export interface AvailableModel {
+	id: string;
+	name?: string;
+	context_window?: number;
+	max_tokens?: number;
+	cost?: ModelCost;
+	/** Whether the model produces reasoning output. */
+	reasoning: boolean;
+	/** The accepted input modalities, lowercase ("text", "image"). */
+	input: string[];
+	thinking_levels: string[];
+}
+
+/** One usable provider in the `models_available` catalog (v21) — usable
+ *  means a resolvable key or `keyless = true`; unusable providers cross
+ *  only as `missing_keys` identities. Alphabetical id order; display
+ *  sorting is the frontend's. */
+export interface AvailableProvider {
+	id: string;
+	name?: string;
+	models: AvailableModel[];
+}
+
+/** A configured provider failing the usable predicate (v21) — identity
+ *  only; the login widget's targets. */
+export interface MissingKeyProvider {
+	id: string;
+	name?: string;
 }
 
 /** Per-million-token pricing, USD — the mirror of tabit-config's cost record. */
@@ -244,12 +289,16 @@ export type SessionEvent =
 			/** The session's working directory (v16): the boot's is the
 			 *  backend's cwd, a child's is its spawn cwd. */
 			cwd: string;
-			model: ModelSelection;
+			/** Nullable (v21): null = no selection (nothing usable at this
+			 *  backend — the zero-config boot); serialized present, never
+			 *  skipped. */
+			model: ModelSelection | null;
 			resumed: boolean;
 			parent?: string;
 			/** The spawning tool call's internal id — pairs the child with the exact open tool_call. */
 			parent_call?: string;
 	  }
+	| { type: "models_available"; providers: AvailableProvider[]; missing_keys: MissingKeyProvider[] }
 	| {
 			type: "model_changed";
 			provider: string;
@@ -311,6 +360,7 @@ const EVENT_TYPES = new Set([
 	"extensions_available",
 	"session_opened",
 	"model_changed",
+	"models_available",
 	"native_item",
 	"interaction_request",
 	"interaction_settled",

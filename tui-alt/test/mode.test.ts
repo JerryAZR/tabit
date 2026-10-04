@@ -36,6 +36,12 @@ class FakeBackend implements BackendLink {
 	interactionResponse(session: string, id: string, payload: unknown): void {
 		this.sent.push({ kind: "interaction_response", session, id, payload });
 	}
+	login(provider: string, apiKey: string): void {
+		this.sent.push({ kind: "login", text: apiKey, id: provider });
+	}
+	logout(provider: string): void {
+		this.sent.push({ kind: "logout", id: provider });
+	}
 }
 
 class RecordingView implements ModeView {
@@ -532,6 +538,57 @@ describe("InteractiveMode", () => {
 		assert.strictEqual(view.notes.some(n => n.text.includes("compaction failed")), true);
 		assert.strictEqual(view.status, "working — esc interrupts"); // the run continues
 		assert.strictEqual(view.footer?.inputTokens, 0);
+	});
+
+	test("the model catalog (v21): last-wins fold, missing keys listed, empty catalog warns with the branched fix", () => {
+		const { view, mode, feed, control } = harness();
+		boot(control, feed);
+		feed({
+			type: "models_available",
+			providers: [
+				{ id: "anthropic", models: [{ id: "claude", reasoning: true, input: ["text"], thinking_levels: ["low"] }] },
+				{ id: "local", name: "Local", models: [{ id: "m1", reasoning: false, input: ["text"], thinking_levels: [] }] },
+			],
+			missing_keys: [{ id: "openai" }],
+		});
+		assert.strictEqual(mode.modelsCatalog.length, 2);
+		assert.strictEqual(mode.modelsCatalog[0]!.id, "anthropic");
+		assert.strictEqual(mode.missingKeyProviders[0]!.id, "openai");
+		assert.ok(view.notes.some(n => n.text.includes("no key for: openai")));
+
+		// Re-announcement replaces wholesale (login landed elsewhere).
+		feed({ type: "models_available", providers: [{ id: "openai", models: [{ id: "gpt", reasoning: false, input: ["text"], thinking_levels: [] }] }], missing_keys: [] });
+		assert.deepStrictEqual(mode.modelsCatalog.map(p => p.id), ["openai"]);
+		assert.strictEqual(mode.missingKeyProviders.length, 0);
+
+		// Empty + missing keys: config exists, nothing usable — login fixes.
+		feed({ type: "models_available", providers: [], missing_keys: [{ id: "openai" }] });
+		assert.strictEqual(view.notes.at(-1)?.kind, "warn");
+		assert.ok((view.notes.at(-1)?.text ?? "").includes("missing keys for: openai"));
+
+		// Empty + no missing keys: no config at all — restart path.
+		feed({ type: "models_available", providers: [], missing_keys: [] });
+		assert.ok((view.notes.at(-1)?.text ?? "").includes("providers.toml"));
+	});
+
+	test("the zero-config boot (v21): session_opened model null, no model_changed, the teaching note warns", () => {
+		const { view, feed, control } = harness();
+		control({ type: "report", protocol_version: PROTOCOL_VERSION });
+		feed({ type: "session_opened", id: SESSION, path: "", cwd: "", model: null, resumed: false });
+		assert.strictEqual(view.footer?.model, undefined);
+		assert.strictEqual(view.footer?.modelName, undefined);
+		// The boot's teaching note rides error { kind: model } — a warning,
+		// not an error (§6: the session runs selection-less).
+		feed({ type: "error", kind: "model", message: "no usable model — log in or configure one" });
+		assert.strictEqual(view.notes.at(-1)?.kind, "warn");
+		// A selection-less run fails at open as run_failed, still an error.
+		feed({ type: "user_message", entry_id: "e1", text: "hi" });
+		feed({ type: "run_failed", kind: "model", message: "no model selected", started_at_ms: 1, completed_at_ms: 2 });
+		assert.strictEqual(view.notes.at(-1)?.kind, "error");
+		// The first model command lands the selection; facts arrive.
+		feed({ type: "model_changed", provider: "p", model: "m1", thinking_level: null, context_window: 1000 });
+		assert.strictEqual(view.footer?.model, "m1");
+		assert.strictEqual(view.footer?.contextWindow, 1000);
 	});
 
 	test("the session tree: chain events feed it, checkout moves the head and rides the wire, /tree dispatches", () => {

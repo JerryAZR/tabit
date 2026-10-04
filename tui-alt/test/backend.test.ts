@@ -56,6 +56,7 @@ describe("backend: the child seam over the mock", () => {
 		assert.strictEqual(types[1], "session_opened");
 		assert.ok((types).includes("skills_available"));
 		assert.ok((types).includes("sessions_available"));
+		assert.ok((types).includes("models_available"));
 		assert.ok((types).includes("model_changed"));
 		assert.strictEqual(types[types.length - 1], "replay_end");
 		backend.shutdown();
@@ -82,6 +83,40 @@ describe("backend: the child seam over the mock", () => {
 		for (const frame of stamped) {
 			if (frame.kind === "event") assert.strictEqual(frame.stream, session);
 		}
+		backend.shutdown();
+		await exitPromise;
+	});
+
+	test("login folds the world and re-announces the catalog (the ack); a bad login is error { kind: auth }", { timeout: 15000 }, async () => {
+		const { frames, backend, exitPromise } = rigUp("basic");
+		await until(() => frames.some(f => typeOf(f) === "models_available"), 8000, "boot catalog");
+		const catalogs = () => frames.filter(f => f.kind === "event" && f.event.type === "models_available");
+
+		// The boot catalog: one usable provider, one missing key.
+		const bootCatalog = catalogs()[0]!;
+		if (bootCatalog.kind !== "event" || bootCatalog.event.type !== "models_available") throw new Error("catalog");
+		assert.deepStrictEqual(bootCatalog.event.providers.map(p => p.id), ["mock"]);
+		assert.deepStrictEqual(bootCatalog.event.missing_keys.map(p => p.id), ["locked"]);
+
+		// login lands the key; the re-announced catalog is the ack.
+		backend.login("locked", "test-key");
+		await until(() => catalogs().length === 2, 8000, "re-announced catalog");
+		const after = catalogs()[1]!;
+		if (after.kind !== "event" || after.event.type !== "models_available") throw new Error("catalog");
+		assert.deepStrictEqual(after.event.providers.map(p => p.id).sort(), ["locked", "mock"]);
+		assert.deepStrictEqual(after.event.missing_keys, []);
+
+		// An empty key is rejected in-band: error { kind: auth }, no re-fold.
+		backend.login("locked", "  ");
+		await until(() => frames.some(f => f.kind === "event" && f.event.type === "error"), 8000, "auth error");
+		const err = frames.find(f => f.kind === "event" && f.event.type === "error");
+		if (err?.kind !== "event" || err.event.type !== "error") throw new Error("error frame");
+		assert.strictEqual(err.event.kind, "auth");
+		assert.strictEqual(err.stream, undefined); // backend-level
+
+		// logout is total: unknown provider is a no-op, still acked.
+		backend.logout("no-such-provider");
+		await until(() => catalogs().length === 3, 8000, "logout ack");
 		backend.shutdown();
 		await exitPromise;
 	});

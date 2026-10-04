@@ -29,7 +29,7 @@
 import { log } from "./log.ts";
 import { SessionTree } from "./session-tree.ts";
 import { PROTOCOL_VERSION } from "./protocol.ts";
-import type { ModelCost, ParsedServerFrame, ServerControlFrame, SessionEvent, Usage } from "./protocol.ts";
+import type { AvailableProvider, MissingKeyProvider, ModelCost, ParsedServerFrame, ServerControlFrame, SessionEvent, Usage } from "./protocol.ts";
 
 export interface PendingMessage {
 	id: string;
@@ -140,6 +140,10 @@ export interface BackendLink {
 	 *  the outcome is `checked_out` + a full replay pass. */
 	checkout(session: string, entryId: string): void;
 	interactionResponse(session: string, id: string, payload: unknown): void;
+	/** Store a provider key (v21) — the re-announced catalog is the ack. */
+	login(provider: string, apiKey: string): void;
+	/** Remove a provider's key (v21) — total, idempotent, still acked. */
+	logout(provider: string): void;
 }
 
 const FLUSH_MS = 33;
@@ -172,6 +176,13 @@ export class InteractiveMode {
 	#cost: number | undefined;
 	#contextUsed: number | undefined;
 	#rates: ModelCost | undefined;
+	/** The usable-model catalog (v21) — backend-level, folded last-wins
+	 *  on every `models_available` (the boot announcement and each world
+	 *  refresh). The picker's source when it lands. */
+	#catalog: AvailableProvider[] = [];
+	/** Configured providers with no resolvable key (v21) — the login
+	 *  widget's targets. */
+	#missingKeys: MissingKeyProvider[] = [];
 	#pending: PendingMessage[] = [];
 	#skills: SkillInfo[] = [];
 	#keybindings: KeybindingFact[] = [];
@@ -208,6 +219,16 @@ export class InteractiveMode {
 
 	get running(): boolean {
 		return this.#running;
+	}
+
+	/** The usable-model catalog, latest announcement (v21). */
+	get modelsCatalog(): readonly AvailableProvider[] {
+		return this.#catalog;
+	}
+
+	/** Providers configured but missing keys, latest announcement (v21). */
+	get missingKeyProviders(): readonly MissingKeyProvider[] {
+		return this.#missingKeys;
 	}
 
 	/** The session tree — read-only for the view; the mode feeds it. */
@@ -517,7 +538,10 @@ export class InteractiveMode {
 				this.#view.addNote("log writes recovered", "info");
 				return;
 			}
-			this.#view.addNote(`error (${event.kind}): ${event.message}`, "error");
+			// kind "model" is a degradation, not a death (§6): a fallback
+			// named, or the zero-config teaching note — the session runs on.
+			// kind "auth" (v21) is a failed login/logout — an error note.
+			this.#view.addNote(`error (${event.kind}): ${event.message}`, event.kind === "model" ? "warn" : "error");
 		},
 		// --- replay ------------------------------------------------------------------
 		replay_begin: () => {
@@ -567,7 +591,9 @@ export class InteractiveMode {
 				return;
 			}
 			this.#session = event.id;
-			this.#model = event.model.model;
+			// v21: null = no selection (the zero-config boot) — footer facts
+			// stay undefined until the first model command lands one.
+			this.#model = event.model?.model;
 			// Empty path = ephemeral session (nothing on disk to open).
 			this.#path = event.path === "" ? undefined : event.path;
 			this.#cwd = event.cwd === "" ? undefined : event.cwd;
@@ -601,6 +627,28 @@ export class InteractiveMode {
 			this.#contextWindow = event.context_window;
 			this.#rates = event.cost;
 			this.#emitFooter();
+		},
+		models_available: event => {
+			// v21: backend-level, always emitted (even empty), re-announced
+			// on world change — a last-wins wholesale fold. The empty
+			// catalog is the setup state (no run can open): the signal is
+			// mandatory, and the fix branches on the predicate (§3.1).
+			this.#catalog = event.providers;
+			this.#missingKeys = event.missing_keys;
+			if (event.providers.length === 0) {
+				this.#view.addNote(
+					event.missing_keys.length === 0
+						? "no providers configured at this backend — write ~/.tabit/providers.toml and restart"
+						: `no usable models — missing keys for: ${event.missing_keys.map(p => p.id).join(", ")}`,
+					"warn",
+				);
+				return;
+			}
+			const models = event.providers.reduce((n, p) => n + p.models.length, 0);
+			this.#view.addNote(
+				`${models} model(s) across ${event.providers.length} provider(s)${event.missing_keys.length > 0 ? ` — no key for: ${event.missing_keys.map(p => p.id).join(", ")}` : ""}`,
+				"info",
+			);
 		},
 		// --- interactions ------------------------------------------------------------------
 		interaction_request: event => {

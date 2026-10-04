@@ -18,7 +18,7 @@
 
 import * as readline from "node:readline";
 
-import { PROTOCOL_VERSION } from "./protocol.ts";
+import { PROTOCOL_VERSION, type AvailableModel, type AvailableProvider, type MissingKeyProvider } from "./protocol.ts";
 
 const scenario = process.argv.includes("--scenario") ? process.argv[process.argv.indexOf("--scenario") + 1] : "basic";
 
@@ -352,6 +352,41 @@ function takeQueued(): { id: string; text: string } | undefined {
 	return queued.shift();
 }
 
+// The mock's config world (v21): one usable provider, one configured
+// but missing its key (the login widget's target). login/logout fold it.
+const world: { usable: AvailableProvider[]; missing: MissingKeyProvider[] } = {
+	usable: [
+		{
+			id: "mock",
+			name: "Mock Provider",
+			models: [
+				{
+					id: "mock-model",
+					name: "Mock Model",
+					context_window: 200000,
+					max_tokens: 8192,
+					cost: { input: 1, output: 4, cache_read: 0.1, cache_write: 0.4 },
+					reasoning: true,
+					input: ["text"],
+					thinking_levels: ["low", "high"],
+				},
+			],
+		},
+	],
+	missing: [{ id: "locked", name: "Locked Provider" }],
+};
+const LOCKED_MODELS: AvailableModel[] = [{ id: "locked-model", reasoning: false, input: ["text"], thinking_levels: [] }];
+
+/** The catalog announcement — once at boot, then as the login/logout
+ *  ack (last-wins re-announcement). */
+const announceModels = () => {
+	emitNow({
+		type: "models_available",
+		providers: world.usable.map(p => ({ ...p })),
+		missing_keys: world.missing.map(({ id, name }) => ({ id, name })),
+	});
+};
+
 // ---------------------------------------------------------------------------
 // Boot (v19): the report is the first line, unprompted; the boot session's
 // announcements follow — its stamped session_opened, its stamped skills
@@ -406,6 +441,7 @@ emitNow({
 	],
 	conflicts: [{ kind: "replaces_core", extension: "release", tool: "edit" }],
 });
+announceModels();
 emitEvent(BOOT, {
 	type: "model_changed",
 	provider: "mock",
@@ -532,6 +568,41 @@ stdin.on("line", line => {
 				// stamped like the request it closes.
 				emitEvent(pending.stream, { type: "interaction_settled", id: String(frame.id) });
 			}
+			return;
+		}
+		case "login": {
+			// v21: validate against config, then fold + re-announce (the ack).
+			const provider = String(frame.provider);
+			const key = String(frame.api_key ?? "");
+			const known = world.usable.some(p => p.id === provider) || world.missing.some(p => p.id === provider);
+			if (!known) {
+				emitNow({ type: "error", kind: "auth", message: `unknown provider: ${provider}` });
+				return;
+			}
+			if (key.trim() === "") {
+				emitNow({ type: "error", kind: "auth", message: "empty key — nothing stored" });
+				return;
+			}
+			const idx = world.missing.findIndex(p => p.id === provider);
+			if (idx !== -1) {
+				const [moved] = world.missing.splice(idx, 1);
+				world.usable.push({ ...moved!, models: LOCKED_MODELS });
+			}
+			// Already-usable providers succeed unchanged (auth.toml wins over
+			// the env case — the catalog stands); either way, re-announce.
+			announceModels();
+			return;
+		}
+		case "logout": {
+			// v21: total and idempotent — unknown provider or absent key is a
+			// no-op, still acked by the re-announced catalog.
+			const provider = String(frame.provider);
+			const idx = world.usable.findIndex(p => p.id === provider);
+			if (idx !== -1) {
+				const [moved] = world.usable.splice(idx, 1);
+				world.missing.push({ id: moved!.id, name: moved!.name });
+			}
+			announceModels();
 			return;
 		}
 		default:
