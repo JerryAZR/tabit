@@ -150,6 +150,19 @@ engine's own fact. When the discussion returns: rule abort's discard
 record (or `aborted { usage }`) versus unbilled-by-decision, and have
 the engine stamp the attempt's usage on the discard item directly.
 
+Residual from the 2026-10 billing-architecture change (the `TurnCost`
+closure seam deleted; cost is computed once at the spend point and
+rides the log entries as plain data): in the mid-run-switch window a
+`model` command lands at receive, so its `model_change` record
+precedes the in-flight run's committing turns in the file. Live,
+every sink bills the run's bound selection correctly (one computed
+value to the ledger, the `completion_call` event, and the durable
+entry); on REPLAY/reload the parser attributes those windowed turns
+to the NEW model — the dollars are the recorded ones (replay never
+recomputes), only the per-model attribution shifts. The full fix is
+turn entries carrying their producing selection — a format-versioned
+log decision, parked here.
+
 ### Config / registry follow-ups
 
 - **Dynamic model listing — deferred** (2026-09): `/v1/models`

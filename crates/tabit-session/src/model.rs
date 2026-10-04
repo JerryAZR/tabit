@@ -102,7 +102,8 @@ pub(crate) fn cost_of(
 
 /// The dollars one completion cost, from the rates in effect — the
 /// invoice ruling (owner 2026-09): spend already happened, so the
-/// number is stamped at commit and never recomputed at read; a later
+/// number is computed once at the spend point and recorded verbatim
+/// (ledger, event, durable entry), never recomputed at read; a later
 /// rate cut does not refund it. `None` when the provider reported
 /// nothing (zeros are the not-reported sentinel) or the model carries
 /// no rate card.

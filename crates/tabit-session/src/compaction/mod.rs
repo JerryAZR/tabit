@@ -320,13 +320,21 @@ pub(crate) async fn run(
                 #[allow(clippy::indexing_slicing)]
                 // sanctioned crash: the pass validated this boundary against this view
                 let tokens_after = tail_sums[boundary] + usage.output_tokens;
-                let cost = write(cell).commit_compaction(
+                // The pass's dollars, computed once here at the spend
+                // point from the door's snapshot pair (the same
+                // selection that served the summarization request):
+                // the durable entry records this value, the ledger
+                // bills it, the event carries it — the log never
+                // computes.
+                let cost = crate::model::turn_cost(config, selection, &usage);
+                write(cell).commit_compaction(
                     id.clone(),
                     summary,
                     cut_child_of(&history, boundary).to_string(),
                     tokens_now,
                     tokens_after,
                     usage,
+                    cost,
                 );
                 // The summarization request is spend like any turn's:
                 // the ledger bills it live (the parser bills the entry

@@ -73,14 +73,10 @@ impl Session {
                     .to_string(),
             });
         }
-        // The register cell first: the context manager's cost stamp
-        // (the invoice ruling) resolves through it at every commit.
         let selection_cell = Arc::new(Mutex::new(builder.selection.clone()));
-        let conversation_cell: Arc<std::sync::RwLock<ContextManager>> =
-            Arc::new(std::sync::RwLock::new(ContextManager::empty(
-                buffer.clone(),
-                super::selection::cost_resolver(builder.config.clone(), selection_cell.clone()),
-            )));
+        let conversation_cell: Arc<std::sync::RwLock<ContextManager>> = Arc::new(
+            std::sync::RwLock::new(ContextManager::empty(buffer.clone())),
+        );
         let shared_conversation = SharedConversation {
             conversation: conversation_cell.clone(),
         };

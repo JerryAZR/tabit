@@ -53,40 +53,51 @@ impl WriteBuffer for BufferTap {
 }
 
 #[test]
-fn the_injected_cost_stamp_rides_the_committed_entry() {
-    // The invoice ruling at the fold: the resolver's dollars land on
-    // the entry at commit — the durable fact the parser bills and the
-    // replay pass carries. The default (`uncosted`) writes none.
+fn the_cost_rides_every_commit_as_data() {
+    // The invoice ruling at the fold: the dollars arrive WITH the
+    // commit as plain data — this crate never computes cost (the
+    // spend point computed them) — and land on the entry verbatim,
+    // the durable fact the parser bills and the replay pass carries.
+    // An uncosted commit writes none.
     let tap = BufferTap::default();
-    let costed: super::TurnCost = std::sync::Arc::new(|_| Some(0.42));
-    let mut manager = ContextManager::empty(tap.shared(), costed);
+    let mut manager = ContextManager::empty(tap.shared());
     manager.fold_turn_with_id(
         assistant_text("answer"),
         "t-cost".to_string(),
         reported(100, 50),
+        Some(0.42),
     );
-    let records = tap.records();
-    let entry = records
+    // The roundtrip commit's cost rides the batch's assistant entry
+    // the same way.
+    manager.fold_all_with_ids(
+        vec![
+            Message::Assistant {
+                id: None,
+                content: OneOrMany::one(call("c1")),
+            },
+            results_message(vec![result("c1", "ok")]),
+        ],
+        reported(70, 30),
+        vec!["r1".to_string()],
+        Some(0.17),
+    );
+    let costs: Vec<Option<f64>> = manager
+        .active_branch()
         .iter()
-        .find_map(|record| match record {
-            FileRecord::Node(entry) => Some(entry),
+        .filter_map(|entry| match &entry.kind {
+            EntryKind::AssistantMessage { cost, .. } => Some(*cost),
             _ => None,
         })
-        .expect("a committed node");
-    match &entry.kind {
-        EntryKind::AssistantMessage {
-            cost: Some(cost), ..
-        } => {
-            assert!((cost - 0.42).abs() < 1e-12);
-        }
-        other => panic!("the entry carries the stamped cost: {other:?}"),
-    }
+        .collect();
+    assert_eq!(costs, vec![Some(0.42), Some(0.17)]);
+    assert_eq!(tap.records().len(), 3, "both commits landed whole");
 
     let (mut bare, tap) = fresh_manager();
     bare.fold_turn_with_id(
         assistant_text("answer"),
         "t-bare".to_string(),
         reported(1, 1),
+        None,
     );
     assert!(tap.records().iter().all(|record| match record {
         FileRecord::Node(entry) => !matches!(
@@ -99,7 +110,7 @@ fn the_injected_cost_stamp_rides_the_committed_entry() {
 
 fn fresh_manager() -> (ContextManager, BufferTap) {
     let tap = BufferTap::default();
-    (ContextManager::empty(tap.shared(), super::uncosted()), tap)
+    (ContextManager::empty(tap.shared()), tap)
 }
 
 fn user(text: &str) -> Message {
@@ -402,14 +413,14 @@ fn from_tree_reproduces_the_incremental_history() {
     live.fold(user("again"));
 
     let tap = BufferTap::default();
-    let reloaded = ContextManager::from_tree(live.tree.clone(), tap.shared(), super::uncosted());
+    let reloaded = ContextManager::from_tree(live.tree.clone(), tap.shared());
     assert_eq!(reloaded.messages(), live.messages());
 }
 
 #[test]
 fn checkout_moves_the_view_to_the_target() {
     let tap = BufferTap::default();
-    let mut manager = ContextManager::from_tree(sample_tree(), tap.shared(), super::uncosted());
+    let mut manager = ContextManager::from_tree(sample_tree(), tap.shared());
     assert_eq!(manager.messages().len(), 4); // u1, a1, merged r1+r2, u2
     manager.checkout(Some("u1")).expect("u1 is a closed target");
     assert_eq!(manager.messages(), vec![user("go")]);
@@ -418,7 +429,7 @@ fn checkout_moves_the_view_to_the_target() {
 #[test]
 fn checkout_to_root_empties_the_view() {
     let tap = BufferTap::default();
-    let mut manager = ContextManager::from_tree(sample_tree(), tap.shared(), super::uncosted());
+    let mut manager = ContextManager::from_tree(sample_tree(), tap.shared());
     manager.checkout(None).expect("root is always valid");
     assert!(manager.messages().is_empty());
 }
@@ -426,7 +437,7 @@ fn checkout_to_root_empties_the_view() {
 #[test]
 fn checkout_unknown_target_is_a_graceful_error() {
     let tap = BufferTap::default();
-    let mut manager = ContextManager::from_tree(sample_tree(), tap.shared(), super::uncosted());
+    let mut manager = ContextManager::from_tree(sample_tree(), tap.shared());
     let Err(error) = manager.checkout(Some("nope")) else {
         panic!("an unknown target must error");
     };
@@ -439,7 +450,7 @@ fn checkout_unknown_target_is_a_graceful_error() {
 #[test]
 fn checkout_into_an_open_roundtrip_resolves_forward() {
     let tap = BufferTap::default();
-    let mut manager = ContextManager::from_tree(sample_tree(), tap.shared(), super::uncosted());
+    let mut manager = ContextManager::from_tree(sample_tree(), tap.shared());
     // a1 carries two calls; the branch ending at it is mid-roundtrip.
     // The ruling (2026-09-26): resolve forward to the batch's last
     // tool result — the first closed position ahead.
@@ -459,7 +470,7 @@ fn checkout_into_an_open_roundtrip_resolves_forward() {
 #[test]
 fn checkout_into_a_mid_batch_result_resolves_to_the_same_close() {
     let tap = BufferTap::default();
-    let mut manager = ContextManager::from_tree(sample_tree(), tap.shared(), super::uncosted());
+    let mut manager = ContextManager::from_tree(sample_tree(), tap.shared());
     // r1 answers c1 but leaves c2 open — mid-batch; the close is r2.
     let resolved = manager.checkout(Some("r1")).expect("resolves forward");
     assert_eq!(resolved.as_deref(), Some("r2"));
@@ -469,7 +480,7 @@ fn checkout_into_a_mid_batch_result_resolves_to_the_same_close() {
 #[test]
 fn an_open_target_on_a_dead_branch_resolves_along_that_branch() {
     let tap = BufferTap::default();
-    let mut manager = ContextManager::from_tree(sample_tree(), tap.shared(), super::uncosted());
+    let mut manager = ContextManager::from_tree(sample_tree(), tap.shared());
     // Branch at u1 (a new user message grows from it); a1's completing
     // results then live on the DEAD branch — the forward walk must
     // follow them there, not the active chain.
@@ -530,7 +541,7 @@ fn an_open_target_with_no_close_ahead_panics_loud() {
         tree.load_append(entry).expect("the corrupt tree appends");
     }
     let tap = BufferTap::default();
-    let mut manager = ContextManager::from_tree(tree, tap.shared(), super::uncosted());
+    let mut manager = ContextManager::from_tree(tree, tap.shared());
     let _ = manager.checkout(Some("a1"));
 }
 
@@ -540,7 +551,7 @@ fn the_buffer_serves_the_manager_and_the_session() {
     // one lock, one outbox, both producers.
     let tap = BufferTap::default();
     let shared = tap.shared();
-    let mut manager = ContextManager::empty(tap.shared(), super::uncosted());
+    let mut manager = ContextManager::empty(tap.shared());
     manager.fold(user("hello"));
     {
         let mut session_side = lock::lock(&shared);
@@ -579,17 +590,19 @@ fn commit_compaction_appends_at_the_head() {
         1234,
         4321,
         Usage::default(),
+        Some(0.42),
     );
     // The compaction node is the new head — later turns chain
     // through it, exactly the walked order.
     assert_eq!(manager.tree.head(), Some("compaction-id"));
-    // The entry enqueued as its own batch, base measurement and all.
+    // The entry enqueued as its own batch, base measurement and the
+    // pass's recorded dollars (handed in as data) and all.
     assert!(tap.records().iter().any(|record| matches!(
         record,
         FileRecord::Node(SessionEntry {
-            kind: EntryKind::Compaction { summary, tokens_after, .. },
+            kind: EntryKind::Compaction { summary, tokens_after, cost, .. },
             ..
-        }) if summary == "the summary" && *tokens_after == 4321
+        }) if summary == "the summary" && *tokens_after == 4321 && *cost == Some(0.42)
     )));
     // The derived context is [wrapped summary] + tail (the cut child
     // and everything after it stay).
@@ -622,6 +635,7 @@ fn commit_compaction_refuses_a_cut_child_off_the_branch() {
                 0,
                 0,
                 Usage::default(),
+                None,
             );
         }))
         .is_err()
@@ -644,6 +658,7 @@ fn a_second_compaction_composes_as_another_leaf() {
         0,
         10,
         Usage::default(),
+        None,
     );
     // Pass 2 cuts right after pass 1's node (the deepest valid
     // boundary): the same cut child, a deeper replacement.
@@ -654,6 +669,7 @@ fn a_second_compaction_composes_as_another_leaf() {
         0,
         20,
         Usage::default(),
+        None,
     );
     assert_eq!(manager.tree.head(), Some("pass-2"));
     let messages = manager.messages();
@@ -680,7 +696,12 @@ fn fold_turn_with_id_commits_the_reported_usage() {
         total_tokens: 100,
         ..Usage::default()
     };
-    manager.fold_turn_with_id(assistant_text("the answer"), "turn-1".to_string(), usage);
+    manager.fold_turn_with_id(
+        assistant_text("the answer"),
+        "turn-1".to_string(),
+        usage,
+        None,
+    );
     let branch = manager.active_branch();
     let EntryKind::AssistantMessage {
         usage: recorded, ..
@@ -710,6 +731,7 @@ fn fold_all_with_ids_commits_the_reported_usage() {
         ],
         usage,
         vec!["r1".to_string()],
+        None,
     );
     let branch = manager.active_branch();
     let EntryKind::AssistantMessage {
@@ -758,15 +780,26 @@ fn a_total_below_its_predecessor_is_uncounted_and_re_anchors() {
     // warning — the user switched models for their own reasons and
     // nobody can act on the discontinuity.
     let (mut manager, _tap) = fresh_manager();
-    manager.fold_turn_with_id(assistant_text("one"), "t1".to_string(), reported(90, 10));
+    manager.fold_turn_with_id(
+        assistant_text("one"),
+        "t1".to_string(),
+        reported(90, 10),
+        None,
+    );
     // The switch: total 80 against a predecessor of 100.
     manager.fold_turn_with_id(
         assistant_text("switched tokenizer"),
         "t2".to_string(),
         reported(70, 10),
+        None,
     );
     // The next turn anchors at 80: delta = 130 − 80.
-    manager.fold_turn_with_id(assistant_text("three"), "t3".to_string(), reported(120, 10));
+    manager.fold_turn_with_id(
+        assistant_text("three"),
+        "t3".to_string(),
+        reported(120, 10),
+        None,
+    );
     assert_eq!(committed_deltas(&manager), vec![Some(100), None, Some(50)]);
     assert_eq!(manager.measured_total(), Some(130));
 }
@@ -776,11 +809,21 @@ fn turn_deltas_telescope_against_the_predecessor_total() {
     let (mut manager, _tap) = fresh_manager();
     // The first turn's delta is its whole measured total (predecessor
     // 0 at session start — the system prompt folds in, measured).
-    manager.fold_turn_with_id(assistant_text("one"), "t1".to_string(), reported(90, 10));
+    manager.fold_turn_with_id(
+        assistant_text("one"),
+        "t1".to_string(),
+        reported(90, 10),
+        None,
+    );
     // A user message is client-added text: it rides the following
     // assistant's delta, never measured or estimated on its own.
     manager.fold(user("next"));
-    manager.fold_turn_with_id(assistant_text("two"), "t2".to_string(), reported(120, 30));
+    manager.fold_turn_with_id(
+        assistant_text("two"),
+        "t2".to_string(),
+        reported(120, 30),
+        None,
+    );
     assert_eq!(
         committed_deltas(&manager),
         vec![Some(100), Some(50)],
@@ -791,13 +834,23 @@ fn turn_deltas_telescope_against_the_predecessor_total() {
 #[test]
 fn an_unmeasured_turn_rides_the_next_measured_delta() {
     let (mut manager, _tap) = fresh_manager();
-    manager.fold_turn_with_id(assistant_text("one"), "t1".to_string(), reported(90, 10));
+    manager.fold_turn_with_id(
+        assistant_text("one"),
+        "t1".to_string(),
+        reported(90, 10),
+        None,
+    );
     // Zero-usage: the sentinel — no delta commits, the turn is
     // uncounted.
-    manager.fold_turn_with_id(assistant_text("lost"), "t2".to_string(), Usage::new());
+    manager.fold_turn_with_id(assistant_text("lost"), "t2".to_string(), Usage::new(), None);
     // The next measured turn telescopes over the gap: its delta
     // spans both turns' growth.
-    manager.fold_turn_with_id(assistant_text("three"), "t3".to_string(), reported(160, 50));
+    manager.fold_turn_with_id(
+        assistant_text("three"),
+        "t3".to_string(),
+        reported(160, 50),
+        None,
+    );
     assert_eq!(committed_deltas(&manager), vec![Some(100), None, Some(110)]);
 }
 
@@ -809,6 +862,7 @@ fn the_first_turn_after_compaction_deltas_against_the_regime_base() {
         assistant_text("first answer"),
         "t1".to_string(),
         reported(90, 10),
+        None,
     );
     let tail_start = manager
         .active_branch()
@@ -824,11 +878,17 @@ fn the_first_turn_after_compaction_deltas_against_the_regime_base() {
         100,
         500,
         Usage::default(),
+        None,
     );
     // The first post-compaction turn deltas against `tokens_after`,
     // never against the old regime's stale total (100).
     manager.fold(user("next"));
-    manager.fold_turn_with_id(assistant_text("post"), "t2".to_string(), reported(510, 20));
+    manager.fold_turn_with_id(
+        assistant_text("post"),
+        "t2".to_string(),
+        reported(510, 20),
+        None,
+    );
     assert_eq!(committed_deltas(&manager).last(), Some(&Some(30)));
 }
 
@@ -865,16 +925,31 @@ fn the_deltas_telescope_to_the_head_measurement() {
 
     // A plain measured session: the sum IS the measurement.
     let (mut manager, _tap) = fresh_manager();
-    manager.fold_turn_with_id(assistant_text("one"), "t1".to_string(), reported(90, 10));
+    manager.fold_turn_with_id(
+        assistant_text("one"),
+        "t1".to_string(),
+        reported(90, 10),
+        None,
+    );
     manager.fold(user("next"));
-    manager.fold_turn_with_id(assistant_text("two"), "t2".to_string(), reported(150, 10));
+    manager.fold_turn_with_id(
+        assistant_text("two"),
+        "t2".to_string(),
+        reported(150, 10),
+        None,
+    );
     assert_eq!(delta_sum(&manager), 160);
     assert_eq!(manager.measured_total(), Some(160));
 
     // A zero-usage turn: absent from the sum, spanned by the next
     // measured delta — the identity holds without it.
-    manager.fold_turn_with_id(assistant_text("lost"), "t3".to_string(), Usage::new());
-    manager.fold_turn_with_id(assistant_text("three"), "t4".to_string(), reported(200, 10));
+    manager.fold_turn_with_id(assistant_text("lost"), "t3".to_string(), Usage::new(), None);
+    manager.fold_turn_with_id(
+        assistant_text("three"),
+        "t4".to_string(),
+        reported(200, 10),
+        None,
+    );
     assert_eq!(delta_sum(&manager), 210);
     assert_eq!(manager.measured_total(), Some(210));
 
@@ -895,6 +970,7 @@ fn the_deltas_telescope_to_the_head_measurement() {
         210,
         60, // 50 of retained-tail deltas + the summary's 10 output
         reported(0, 10),
+        None,
     );
     assert_eq!(
         manager.measured_total(),
@@ -902,7 +978,12 @@ fn the_deltas_telescope_to_the_head_measurement() {
         "the window reads the base"
     );
     manager.fold(user("after"));
-    manager.fold_turn_with_id(assistant_text("post"), "t5".to_string(), reported(60, 30));
+    manager.fold_turn_with_id(
+        assistant_text("post"),
+        "t5".to_string(),
+        reported(60, 30),
+        None,
+    );
     // View deltas: the retained t4's 50 + the post turn's 30 (90 − 60);
     // the identity gains the leading summary's 10 output.
     assert_eq!(delta_sum(&manager), 80);
@@ -943,7 +1024,12 @@ fn commit_compaction_refuses_a_cut_child_off_the_active_branch() {
     // Build a branch, then branch away from it: the abandoned child
     // is a node in the tree but not on the active branch.
     manager.fold(user("go"));
-    manager.fold_turn_with_id(assistant_text("answer"), "t1".to_string(), Usage::default());
+    manager.fold_turn_with_id(
+        assistant_text("answer"),
+        "t1".to_string(),
+        Usage::default(),
+        None,
+    );
     manager.checkout(Some("t1")).expect("head at t1");
     manager.fold(user("branched"));
     let off_branch = "t1-side".to_string();
@@ -956,6 +1042,7 @@ fn commit_compaction_refuses_a_cut_child_off_the_active_branch() {
         assistant_text("other answer"),
         off_branch.clone(),
         Usage::default(),
+        None,
     );
     manager.checkout(Some(off_branch.as_str())).expect("on it");
     manager
@@ -968,6 +1055,7 @@ fn commit_compaction_refuses_a_cut_child_off_the_active_branch() {
         100,
         0,
         Usage::default(),
+        None,
     );
 }
 

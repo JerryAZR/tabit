@@ -2321,6 +2321,103 @@ async fn a_mid_run_model_switch_lands_at_receive_under_the_run() {
 }
 
 #[tokio::test]
+async fn a_mid_run_switch_bills_every_sink_the_bound_models_one_number() {
+    // The one-number law inside the divergence window: the `model`
+    // command lands mid-run (the slow tool is executing), so the
+    // register — and the file's model_change record — move to q/m2
+    // BEFORE the run's turns commit. The run bound p/m at open, and
+    // the spend point computes from that bound selection, once per
+    // call: the emitted completion_call events, the live ledger, and
+    // the durable entries all carry the SAME dollars for the BOUND
+    // model. (Replay sums those recorded dollars but attributes the
+    // windowed turns to the NEW model — the log records no producing
+    // selection; that residual is parked in ROADMAP's usage-billing
+    // section.)
+    let store = temp_store("endpoint-model-midrun-billing");
+    let factory = Factory::new(vec![tool_turn("t1", "slow"), text_turn("after")]);
+    let session = factory
+        .clone()
+        .into_builder(store.clone())
+        .dynamic_tool(slow_tool())
+        .create("C:/w")
+        .expect("session");
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store), plain_data());
+    let id = boot_id(&handle);
+
+    handle.message(&id, "go");
+    let mut frames = Vec::new();
+    let mut sent = false;
+    while let Some(frame) = handle.next_event().await {
+        if matches!(frame.event, SessionEvent::ToolCall { .. }) && !sent {
+            sent = true;
+            handle.model(&id, ModelSelection::new("q", "m2"));
+        }
+        let done = terminal(&frame.event);
+        frames.push(frame);
+        if done {
+            break;
+        }
+    }
+    frames.extend(drain(&mut handle).await);
+
+    // p/m's card is $2/M in, $4/M out: the tool turn (120+5) is
+    // $0.00026, the final turn (100+10) is $0.00024. q/m2's card
+    // prices both differently — any window leak shows.
+    const TURN_ONE: f64 = 0.00026;
+    const TURN_TWO: f64 = 0.00024;
+    let event_costs: Vec<Option<f64>> = frames
+        .iter()
+        .filter_map(|frame| match &frame.event {
+            SessionEvent::CompletionCall { cost, .. } => Some(*cost),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(event_costs.len(), 2, "one completion_call per turn");
+    for (event_cost, expected) in event_costs.iter().zip([TURN_ONE, TURN_TWO]) {
+        assert!(
+            (event_cost.expect("billed") - expected).abs() < 1e-12,
+            "the completion_call event bills the bound model's card"
+        );
+    }
+
+    // The live ledger: one row, the BOUND model, the same dollars.
+    let stats = handle.closing_stats().expect("the host wound down");
+    assert_eq!(stats.per_model.len(), 1, "only the bound model served");
+    assert_eq!(stats.per_model[0].key(), "p/m");
+    assert!(
+        (stats.per_model[0].cost.expect("billed") - (TURN_ONE + TURN_TWO)).abs() < 1e-12,
+        "the ledger's add is the same computed value"
+    );
+    assert!((stats.total_cost - (TURN_ONE + TURN_TWO)).abs() < 1e-12);
+
+    // The durable entries: the same dollars, verbatim — the log
+    // records what the spend point computed; it never computes.
+    let parsed = store
+        .open_path(std::path::PathBuf::from(&handle.info().session_path).as_path())
+        .expect("reload");
+    let entry_costs: Vec<Option<f64>> = parsed
+        .tree
+        .path_to_head()
+        .iter()
+        .filter_map(|entry| match &entry.kind {
+            crate::EntryKind::AssistantMessage { cost, .. } => Some(*cost),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        entry_costs, event_costs,
+        "the entries carry exactly the event's dollars — one computed value \
+         (identical bits through the file's shortest-roundtrip JSON)"
+    );
+    // Replay sums the recorded dollars — never recomputes — so the
+    // totals agree even inside the attribution window.
+    assert!(
+        (parsed.stats.total_cost().expect("the file bills") - (TURN_ONE + TURN_TWO)).abs() < 1e-12
+    );
+    std::fs::remove_dir_all(store.dir()).ok();
+}
+
+#[tokio::test]
 async fn a_model_switch_survives_an_abort() {
     let store = temp_store("endpoint-model-abort");
     let factory = Factory::new(vec![tool_turn("t1", "slow"), text_turn("after")]);
@@ -3494,7 +3591,6 @@ async fn the_idle_door_compacts_after_a_large_run_and_the_file_holds_the_entry()
     let messages = crate::ContextManager::from_tree(
         parsed.tree,
         Arc::new(std::sync::Mutex::new(tabit_log::NullBuffer)),
-        tabit_log::uncosted(),
     )
     .messages();
     assert!(matches!(
@@ -3645,7 +3741,6 @@ async fn an_overflow_failure_is_intercepted_compacted_and_the_run_retried() {
     let messages = crate::ContextManager::from_tree(
         parsed.tree,
         Arc::new(std::sync::Mutex::new(tabit_log::NullBuffer)),
-        tabit_log::uncosted(),
     )
     .messages();
     assert!(matches!(

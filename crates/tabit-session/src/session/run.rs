@@ -203,9 +203,24 @@ impl Session {
                 };
             }
         };
-        let stream = self.open_run(&run_token, &agent, &selection).await;
+        // The run's turn-cost channel: the drive's CompletionCall arm
+        // computes each call's dollars from the bound selection and
+        // writes them here; the engine's turn commit takes the value
+        // onto the durable entry — one computation, three sinks (the
+        // ledger add, the completion_call event, the log entry).
+        let turn_costs = tabit_engine::TurnCostSlot::default();
+        let stream = self
+            .open_run(&run_token, &agent, &selection, &turn_costs)
+            .await;
         let mut driven = self
-            .drive(stream, &run_token, &selection, run_started_ms, &mut sink)
+            .drive(
+                stream,
+                &run_token,
+                &selection,
+                run_started_ms,
+                &turn_costs,
+                &mut sink,
+            )
             .await;
         driven = self.overflow_intercept(driven).await;
         let (outcome, output) = self.conclude(driven, run_started_ms, &mut sink);
@@ -292,6 +307,7 @@ impl Session {
         run_token: &CancellationToken,
         agent: &Arc<Agent>,
         selection: &tabit_protocol::ModelSelection,
+        turn_costs: &tabit_engine::TurnCostSlot,
     ) -> tabit_engine::agent::StreamingResult {
         let mut tool_context = tabit_engine::tool::ToolContext::new();
         tool_context.insert(run_token.clone());
@@ -354,6 +370,7 @@ impl Session {
             // CONVERGE and the history read at PREPARE sit either
             // side of it.
             .pre_request(self.pre_request_door(run_token, agent.clone(), selection.clone()))
+            .turn_cost_slot(turn_costs.clone())
             .tool_context(tool_context)
             // Announced turn ids are entry ids (ENGINE.md behavior delta
             // 10): the engine mints from tabit's UUIDv7 source, so the id
@@ -375,6 +392,7 @@ impl Session {
         run_token: &CancellationToken,
         selection: &tabit_protocol::ModelSelection,
         started_at_ms: u64,
+        turn_costs: &tabit_engine::TurnCostSlot,
         sink: &mut EventSink<'_>,
     ) -> DriveOutcome {
         let mut driven = DriveOutcome {
@@ -486,14 +504,22 @@ impl Session {
                     // facts (the fold commits them — reload counts the
                     // same numbers; live adds only what is new).
                     {
-                        // The invoice fact: dollars from the rates in
-                        // effect, stamped now — commit and ledger bill
-                        // the same value. Bills the run's BOUND
-                        // selection (run open's snapshot), never the
-                        // live register: a mid-run `model` switch lands
-                        // on the next run, so this run's usage and cost
-                        // attribute to the model that produced them.
+                        // The one-number law: the dollars are computed
+                        // ONCE, here at the spend point, from the run's
+                        // BOUND selection (run open's snapshot — a
+                        // mid-run `model` switch lands on the next run,
+                        // so this run's usage and cost attribute to the
+                        // model that produced them) — and the same
+                        // value flows to all three sinks: the ledger
+                        // add, the completion_call event, and the
+                        // durable entry (the engine's turn commit takes
+                        // it from the cost channel; this item always
+                        // precedes that commit, and the consumer's
+                        // processing resumes the stream). The log never
+                        // computes — it records what the spend point
+                        // computed.
                         let cost = crate::model::turn_cost(&self.config, selection, &call.usage);
+                        *crate::lock::lock(turn_costs) = cost;
                         tabit_log::lock::lock(&self.ledger).add(
                             &selection.provider,
                             &selection.model,

@@ -297,6 +297,13 @@ impl StreamingPromptRequest {
         self
     }
 
+    /// Attach the run's turn-cost channel — see
+    /// [`AgentRunner::turn_cost_slot`](crate::agent::runner::AgentRunner::turn_cost_slot).
+    pub fn turn_cost_slot(mut self, slot: crate::agent::runner::TurnCostSlot) -> Self {
+        self.runner = self.runner.turn_cost_slot(slot);
+        self
+    }
+
     forward_prompt_setters!(runner);
 
     async fn send(self) -> StreamingResult {
