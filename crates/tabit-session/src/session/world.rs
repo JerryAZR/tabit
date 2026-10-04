@@ -96,10 +96,13 @@ impl Session {
         lock(&self.world).config.clone()
     }
 
-    /// The host-level world refresh, direct-`Session` form (the
-    /// endpoint's workers ride [`Self::world_cell`] instead — the
-    /// worker task owns the session). See [`SessionWorld::refresh`].
-    pub fn refresh_world(&self, config: Arc<TabitConfig>, factory: ModelFactory) {
+    /// The host-level world refresh, direct-`Session` form — the
+    /// endpoint's build/refresh bracket (a session built but not yet
+    /// in `workers`, which the refresh's worker walk missed) and the
+    /// session tests ride this; resident workers ride
+    /// [`Self::world_cell`] instead (the worker task owns the
+    /// session). See [`SessionWorld::refresh`].
+    pub(crate) fn refresh_world(&self, config: Arc<TabitConfig>, factory: ModelFactory) {
         lock(&self.world).refresh(config, factory);
     }
 }

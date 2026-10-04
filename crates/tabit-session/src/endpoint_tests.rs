@@ -4870,3 +4870,145 @@ id = "m"
     );
     std::fs::remove_dir_all(store.dir()).ok();
 }
+
+#[tokio::test]
+async fn login_with_an_empty_key_errors_auth_and_writes_nothing() {
+    // An empty/whitespace key is a typo, not a credential: storing it
+    // would flip the provider usable and meet the user as a 401
+    // (`kind: provider`, off the teaching path). The door rejects it
+    // as `kind: auth` — no write, no re-announcement.
+    let store = temp_store("endpoint-login-empty");
+    let auth_path = store.dir().join("auth.toml");
+    let session = Factory::new(vec![text_turn("hi")])
+        .into_builder(store.clone())
+        .create("C:/w")
+        .expect("session");
+    let mut handle = SessionHost::spawn(
+        session,
+        Vec::new(),
+        plain_wiring(&store),
+        auth_world(&auth_path),
+    );
+
+    handle.command_link().send(SessionCommand::Login {
+        provider: "locked".to_string(),
+        api_key: tabit_protocol::ApiKey("   ".to_string()),
+    });
+    let frames = drain(&mut handle).await;
+
+    let errors: Vec<&str> = frames
+        .iter()
+        .filter_map(|frame| match &frame.event {
+            SessionEvent::Error { kind, message, .. } if kind == "auth" => Some(message.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(errors.len(), 1, "one auth-kind error");
+    assert!(errors[0].contains("empty api_key"), "{}", errors[0]);
+    assert!(
+        errors[0].contains("locked"),
+        "the message names the provider"
+    );
+    assert_eq!(
+        catalogs(&frames).len(),
+        1,
+        "a rejected login does not re-announce"
+    );
+    assert!(!auth_path.exists(), "nothing was written");
+    std::fs::remove_dir_all(store.dir()).ok();
+}
+
+#[tokio::test]
+async fn a_login_mid_build_reaches_the_new_session_via_the_generation_recheck() {
+    // The new_session/world-refresh race: the create closure reads
+    // the world cell, and a login landing between that read and the
+    // worker insert walks the resident workers without the new
+    // session. The generation bracket catches the bump and applies
+    // the refresh to the just-built session directly. The login
+    // crosses the by-type door from INSIDE the build — the
+    // deterministic mid-build landing (handlers run synchronously on
+    // the caller's task, so the intake below IS the interleaving).
+    let store = temp_store("endpoint-new-session-race");
+    let auth_path = store.dir().join("auth.toml");
+    let session = Factory::new(vec![text_turn("boot")])
+        .into_builder(store.clone())
+        .create("C:/w")
+        .expect("session");
+    let data = auth_world(&auth_path);
+    let wiring = plain_wiring(&store);
+    let node = wiring.node.clone();
+    // The factory the build installs — world-tracked provenance, so a
+    // refresh reaching the session swaps it (a custom factory would
+    // survive; that provenance is pinned elsewhere).
+    let built_factory =
+        std::sync::Arc::new(std::sync::Mutex::new(None::<crate::session::ModelFactory>));
+    let data = SessionHostData {
+        create: std::sync::Arc::new({
+            let world = data.world.clone();
+            let node = node.clone();
+            let built_factory = built_factory.clone();
+            let create_store = store.clone();
+            move || {
+                // Read the world at call time, as the real builders do.
+                let registry = lock(&world).registry();
+                let factory = registry.factory();
+                *built_factory.lock().unwrap() = Some(factory.clone());
+                let built = Factory::new(vec![text_turn("new")])
+                    .into_builder(create_store.clone())
+                    .world_factory(factory)
+                    .create("C:/w")
+                    .map(|session| (session, Vec::new()))
+                    .map_err(|error| error.to_string());
+                // The login lands mid-build — after this session's
+                // world read, before its worker insert.
+                let arrival = crate::Channel::local("co-frontend", |_| {}, |_| {});
+                node.intake(
+                    &arrival,
+                    tabit_wire::node::Inbound::Command(SessionCommand::Login {
+                        provider: "locked".to_string(),
+                        api_key: tabit_protocol::ApiKey("sk-mid-build".to_string()),
+                    }),
+                );
+                built
+            }
+        }),
+        ..data
+    };
+    let mut handle = SessionHost::spawn(session, Vec::new(), wiring, data);
+    let boot = boot_id(&handle);
+    let link = handle.command_link();
+
+    link.send(SessionCommand::NewSession);
+    let frame = until_event(
+        &mut handle,
+        |event| matches!(event, SessionEvent::SessionOpened { id, .. } if id != &boot),
+    )
+    .await;
+    let created = match frame.event {
+        SessionEvent::SessionOpened { id, .. } => id,
+        other => panic!("expected session_opened, got {other:?}"),
+    };
+
+    // The login landed (its write is synchronous with the intake).
+    let auth = tabit_config::AuthConfig::load(&auth_path).expect("the auth file exists");
+    assert_eq!(auth.api_key("locked"), Some("sk-mid-build"));
+    // The refresh reached the just-built session: its world factory is
+    // no longer the one the build recorded. Without the generation
+    // re-check the refresh's worker walk misses this session (it was
+    // not yet registered) and the factory stays the stale one.
+    let worker = lock(&handle.workers)
+        .get(&created)
+        .cloned()
+        .expect("the new session's worker");
+    let current = lock(&worker.world).factory.clone();
+    let built = built_factory
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("the build recorded its factory");
+    assert!(
+        !std::sync::Arc::ptr_eq(&current, &built),
+        "the mid-build login's refresh reached the new session"
+    );
+    std::fs::remove_dir_all(store.dir()).ok();
+}

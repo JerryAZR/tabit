@@ -178,7 +178,13 @@ log decision, parked here.
   Its mechanism shipped with `login`/`logout` (2026-10, protocol v21):
   the current-world cell plus the per-session world refresh is exactly
   the path `reload` reuses — what remains is re-reading the
-  providers.toml layers and the command itself. The general
+  providers.toml layers and the command itself. One dormant
+  assumption closes with it: `run.rs`'s `turn_cost` reads the rate
+  card LIVE from the world config — safe today because login/logout
+  swap auth only (the config Arc is shared), but a reload swaps the
+  config mid-run, so it must snapshot the config into the run's bound
+  pair (or re-derive the bound-at-open invoice invariant) when it
+  lands. The general
   semantics — vanished providers, stale session registers, the
   skills/gate reload scope — stay parked until the command lands.
 - **The models.dev catalog extension** (2026-10, recorded): an

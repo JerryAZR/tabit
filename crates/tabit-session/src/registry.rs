@@ -38,11 +38,45 @@ use tabit_protocol::{AvailableModel, AvailableProvider, MissingKeyProvider, Mode
 /// — mint a fresh registry over the same config with the new auth,
 /// swap, re-fold, re-announce. Lock via [`crate::lock::lock`]; no
 /// guard crosses an await.
-pub type CurrentWorld = Arc<Mutex<ModelRegistry>>;
+pub type CurrentWorld = Arc<Mutex<WorldCell>>;
+
+/// The cell's contents: the registry plus the refresh GENERATION — a
+/// counter every world swap bumps, so a session build racing a
+/// refresh can tell the world moved under it (the endpoint's
+/// `new_session`/`open_session` window: the refresh walks the
+/// resident workers, and a session built but not yet registered is
+/// the one it misses).
+pub struct WorldCell {
+    registry: ModelRegistry,
+    generation: u64,
+}
+
+impl WorldCell {
+    /// The current registry (a cheap clone — the clients cache is
+    /// shared behind it).
+    pub fn registry(&self) -> ModelRegistry {
+        self.registry.clone()
+    }
+
+    /// The refresh generation: bumped by every [`Self::refresh`].
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    /// Swap the registry, bumping the generation (the endpoint's
+    /// login/logout refresh; config reload reuses it when it lands).
+    pub fn refresh(&mut self, registry: ModelRegistry) {
+        self.registry = registry;
+        self.generation += 1;
+    }
+}
 
 /// Mint the current-world cell over the boot registry.
 pub fn current_world(registry: ModelRegistry) -> CurrentWorld {
-    Arc::new(Mutex::new(registry))
+    Arc::new(Mutex::new(WorldCell {
+        registry,
+        generation: 0,
+    }))
 }
 
 /// One constructed provider client. Clients clone cheaply and share

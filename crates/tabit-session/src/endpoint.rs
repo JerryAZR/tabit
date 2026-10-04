@@ -807,7 +807,7 @@ impl SessionHostMount {
         // should surface as a setup warning (FRONTEND.md §6). Folded
         // from the current-world cell at attach — the same fold
         // login/logout re-run for their re-announcement.
-        announce_catalog(&sink, &lock(&data.world));
+        announce_catalog(&sink, &lock(&data.world).registry());
 
         // A resumed boot replays automatically (owner ruling
         // 2026-09-25): the resident chain re-emits right after the
@@ -1003,6 +1003,10 @@ struct Lifecycle {
     worker_shutdown: CancellationToken,
     /// Serializes the login/logout serves (the auth file's
     /// read-modify-write) across whichever tasks the handlers run on.
+    /// PROCESS-LOCAL: two backends sharing one auth file can still
+    /// lost-update across processes — the surgical write's atomicity
+    /// prevents a torn file, never the loss of a racing process's
+    /// key.
     auth_write: Mutex<()>,
     /// The door's one state: the armed builders (once the boot's
     /// gathering is done) and the commands that arrived before them,
@@ -1111,14 +1115,33 @@ impl Lifecycle {
         }
     }
 
-    /// `login`: validate the provider against config, write the key
-    /// (the surgical auth.toml write), refresh the world. No key
+    /// `login`: reject an empty key (a typo, not a credential),
+    /// validate the provider against config, write the key (the
+    /// surgical auth.toml write), refresh the world. No key
     /// verification request — the next run open validates (a
     /// verify-at-login refinement is parked, FRONTEND.md §5). The
     /// ack is the re-announced catalog.
     fn serve_login(&self, core: &LifecycleCore, provider: &str, api_key: &tabit_protocol::ApiKey) {
         let _write = lock(&self.auth_write);
-        if lock(&core.world).config().provider(provider).is_none() {
+        // An empty key is a typo, not a credential — storing it
+        // would flip the provider "usable" and meet the user as a
+        // 401 (`kind: provider`, off the teaching path). Reject at
+        // the door.
+        if api_key.as_str().trim().is_empty() {
+            self.sink.emit(
+                None,
+                SessionEvent::error_auth(format!(
+                    "empty api_key for `{provider}` — paste the provider's key"
+                )),
+            );
+            return;
+        }
+        if lock(&core.world)
+            .registry()
+            .config()
+            .provider(provider)
+            .is_none()
+        {
             self.sink.emit(
                 None,
                 SessionEvent::error_auth(format!(
@@ -1192,9 +1215,14 @@ impl Lifecycle {
     /// runs are untouched by construction — they bound their agent at
     /// run open.
     fn refresh_world(&self, core: &LifecycleCore, auth: tabit_config::AuthConfig) {
-        let registry =
-            crate::registry::ModelRegistry::new(lock(&core.world).config().clone(), Arc::new(auth));
-        *lock(&core.world) = registry.clone();
+        let registry = {
+            let current = lock(&core.world).registry();
+            crate::registry::ModelRegistry::new(current.config().clone(), Arc::new(auth))
+        };
+        // The swap bumps the cell's generation — how a session build
+        // racing this refresh (the `new_session`/`open_session`
+        // window below) tells the world moved under it.
+        lock(&core.world).refresh(registry.clone());
         for worker in lock(&self.workers).values() {
             worker.refresh_world(registry.config().clone(), registry.factory());
         }
@@ -1227,11 +1255,35 @@ impl Lifecycle {
         }
     }
 
+    /// Build a session against the current world, closing the
+    /// build/refresh race: the builder reads the world cell at call
+    /// time, and a login/logout landing between that read and the
+    /// caller's `workers` insert walks the resident workers without
+    /// this session. The generation bracket catches it — a bump
+    /// across the build means a refresh passed mid-build, and this
+    /// session (not yet in `workers`) is the only one it missed, so
+    /// the refresh applies here directly, ahead of the spawn. A
+    /// redundant re-application is harmless: the refresh is a state
+    /// write of a world the build may already have read.
+    fn build_on_current_world(
+        core: &LifecycleCore,
+        build: impl FnOnce() -> Result<(Session, Vec<String>), String>,
+    ) -> Result<(Session, Vec<String>), String> {
+        let before = lock(&core.world).generation();
+        let (session, notes) = build()?;
+        let world = lock(&core.world);
+        if world.generation() != before {
+            let registry = world.registry();
+            session.refresh_world(registry.config().clone(), registry.factory());
+        }
+        Ok((session, notes))
+    }
+
     /// `new_session`: announce, then spawn. The creation frame and its
     /// notes land ahead of anything the worker can emit (emitted
     /// here, before any command can have reached it).
     fn serve_new_session(&self, core: LifecycleCore) {
-        let (session, notes) = match (core.create)() {
+        let (session, notes) = match Self::build_on_current_world(&core, || (core.create)()) {
             Ok(built) => built,
             Err(message) => {
                 self.sink.emit(
@@ -1291,7 +1343,7 @@ impl Lifecycle {
             worker.deliver_replay();
             return;
         }
-        let (session, notes) = match (core.open)(id) {
+        let (session, notes) = match Self::build_on_current_world(&core, || (core.open)(id)) {
             Ok(loaded) => loaded,
             Err(message) => {
                 self.sink.emit(

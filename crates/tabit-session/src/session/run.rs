@@ -520,6 +520,18 @@ impl Session {
                         // processing resumes the stream). The log never
                         // computes — it records what the spend point
                         // computed.
+                        // Dormant assumption (the config-reload
+                        // follow-up, ROADMAP): the rate card is read
+                        // LIVE from the world config. The
+                        // bound-at-open invoice invariant holds today
+                        // only because a world refresh (login/logout)
+                        // swaps AUTH — the config Arc is shared, so
+                        // this read cannot diverge from the run's
+                        // bound world. A config reload swaps the
+                        // config mid-run and breaks it: reload must
+                        // snapshot the config into the run's bound
+                        // pair (or re-derive the invariant) when it
+                        // lands.
                         let cost =
                             crate::model::turn_cost(&self.world_config(), selection, &call.usage);
                         *crate::lock::lock(turn_costs) = cost;

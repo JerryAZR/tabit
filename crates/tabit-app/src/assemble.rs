@@ -343,7 +343,7 @@ pub fn host_data(
         // next boot reads.
         auth_path: tabit_config::auth_default_path(),
         create: Arc::new(move || {
-            let registry = tabit_session::lock::lock(&fresh_world).clone();
+            let registry = tabit_session::lock::lock(&fresh_world).registry();
             assemble(
                 &fresh_args,
                 &registry,
@@ -364,7 +364,7 @@ pub fn host_data(
                 session: Some(path),
                 ..open_args.clone()
             };
-            let registry = tabit_session::lock::lock(&open_world).clone();
+            let registry = tabit_session::lock::lock(&open_world).registry();
             assemble(
                 &args,
                 &registry,
