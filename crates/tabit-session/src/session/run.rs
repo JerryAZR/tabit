@@ -496,8 +496,14 @@ impl Session {
                     // The whole batch is already committed (the fold and
                     // the yield share one poll); announce every pair in
                     // one synchronous loop — an abort cannot split it.
-                    for (entry_id, text) in batch {
-                        sink.emit(SessionEvent::UserMessage { text, entry_id });
+                    // The event text is the session's wire fold (text
+                    // parts joined — a multi-part message, e.g. an
+                    // expanded attachment, announces its text parts).
+                    for (entry_id, message) in batch {
+                        sink.emit(SessionEvent::UserMessage {
+                            text: user_text(&message),
+                            entry_id,
+                        });
                     }
                 }
                 Ok(MultiTurnStreamItem::CompletionCall(call)) => {

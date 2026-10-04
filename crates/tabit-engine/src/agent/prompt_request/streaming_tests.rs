@@ -2357,10 +2357,10 @@ async fn a_steer_during_the_final_turn_exits_and_leaves_the_queue() {
         1,
         "the steer must not drive a second in-run call"
     );
-    let steered: Vec<&String> = items
+    let steered: Vec<&tabit_providers::completion::Message> = items
         .iter()
         .filter_map(|item| match item {
-            MultiTurnStreamItem::Steer { batch } => batch.first().map(|(_, text)| text),
+            MultiTurnStreamItem::Steer { batch } => batch.first().map(|(_, message)| message),
             _ => None,
         })
         .collect();

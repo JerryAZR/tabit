@@ -316,17 +316,7 @@ where
                 // the batch is still queued (discarded with notice) or
                 // already announced whole.
                 cell_fold_steers(conversation, &steers);
-                let batch = steers
-                    .iter()
-                    .filter_map(|(id, message)| {
-                        message
-                            .user_text()
-                            .map(|text| (id.clone(), text.to_string()))
-                    })
-                    .collect::<Vec<_>>();
-                if !batch.is_empty() {
-                    yield Ok(DriveItem::Item(MultiTurnStreamItem::Steer { batch }));
-                }
+                yield Ok(DriveItem::Item(MultiTurnStreamItem::Steer { batch: steers }));
                 // A steering user is their own circuit breaker.
                 defect_streak = 0;
                 provider_streak = 0;

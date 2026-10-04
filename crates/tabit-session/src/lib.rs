@@ -67,6 +67,7 @@
 //!
 //! [`Session::prompt`]: crate::Session::prompt
 
+mod attachments;
 mod compaction;
 pub mod edge;
 mod endpoint;

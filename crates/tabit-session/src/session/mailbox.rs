@@ -88,12 +88,15 @@ impl Mailbox {
     }
 
     pub(crate) fn push(&self, message: Message) {
-        // Receive-time skill invocation (FRONTEND.md's tag): expand
-        // before the id is minted, so the queued acknowledgment, the
-        // steers, the events, and the log all carry the one expanded
-        // text — what the model actually sees is what replay shows.
+        // Receive-time expansion (FRONTEND.md's tags), before the id is
+        // minted, so the queued acknowledgment, the steers, the events,
+        // and the log all carry the one expanded message — what the
+        // model actually sees is what replay shows. One door pass, the
+        // ruling's composition: skill invocation first (text blocks
+        // appended to the text), then attachment parts over the
+        // expanded text (attachments.rs — pure file IO, no wiring).
         // A message without resolvable tags passes through untouched
-        // (the expansion is the identity for it).
+        // (each expansion is the identity for it).
         let message = match self.expander.get() {
             Some(skills) => {
                 let text = user_text(&message);
@@ -106,6 +109,7 @@ impl Mailbox {
             }
             None => message,
         };
+        let message = crate::attachments::expand_attachments(message);
         let queued = QueuedMessage {
             id: crate::ids::new_entry_id(),
             message,

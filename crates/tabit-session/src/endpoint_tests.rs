@@ -4338,6 +4338,145 @@ async fn a_tagged_message_expands_at_the_door() {
     let _ = std::fs::remove_dir_all(&cwd);
 }
 
+/// A small PNG planted under a temp dir, returning its path string as
+/// the tag carries it.
+fn plant_png(dir: &std::path::Path, name: &str) -> (String, Vec<u8>) {
+    let img = image::RgbImage::from_pixel(8, 6, image::Rgb([200, 30, 30]));
+    let mut bytes = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgb8(img)
+        .write_to(&mut bytes, image::ImageFormat::Png)
+        .expect("encode png");
+    let bytes = bytes.into_inner();
+    let path = dir.join(name);
+    std::fs::write(&path, &bytes).expect("plant the image");
+    (path.display().to_string(), bytes)
+}
+
+/// Receive-time attachment expansion (FRONTEND.md's tag), through the
+/// real door: a message carrying `<attachment path="..."/>` expands at
+/// submit — the wire stays text (the `user_message` event carries the
+/// message text, tag as anchor, plus the basename label; image bytes
+/// never cross), while the log's `user_message` entry and the model's
+/// request carry the multi-part message.
+#[tokio::test]
+async fn an_attachment_expands_at_the_door_and_the_wire_stays_text() {
+    let store = temp_store("endpoint-attachment");
+    let cwd = std::env::temp_dir().join(format!("tabit-attach-door-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&cwd);
+    std::fs::create_dir_all(&cwd).expect("cwd");
+    let (image_path, png) = plant_png(&cwd, "shot.png");
+
+    let factory = Factory::new(vec![text_turn("done")]);
+    let session = factory
+        .clone()
+        .into_builder(store.clone())
+        .create(&cwd.display().to_string())
+        .expect("session");
+    let log_path = session.path().expect("file-backed").to_path_buf();
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store), plain_data());
+    let id = boot_id(&handle);
+
+    let text = format!("what is in <attachment path=\"{image_path}\"/>?");
+    handle.message(&id, &text);
+    let frames = drain(&mut handle).await;
+    assert_eq!(finished_outputs(&frames), vec!["done".to_string()]);
+
+    // The wire is text-only: the event text is the message verbatim
+    // (the tag the anchor) plus the basename label — never the bytes.
+    let texts = user_texts(&frames);
+    assert_eq!(texts.len(), 1, "one user message");
+    assert_eq!(
+        texts[0],
+        format!("{text}\n\nshot.png"),
+        "the event text joins the message and the label"
+    );
+    use base64::Engine as _;
+    let b64 = base64::engine::general_purpose::STANDARD.encode(&png);
+    assert!(!texts[0].contains(&b64), "image bytes never cross the wire");
+
+    // The model's request carried the image part (the door, not the
+    // engine, expanded — the request is the folded conversation).
+    let requests = factory.requests();
+    let request = requests.last().expect("one model call");
+    let serialized = serde_json::to_string(&request.chat_history).expect("serialize");
+    assert!(
+        serialized.contains(&b64),
+        "the image part rode the model's request"
+    );
+
+    // The log's user_message entry is the expanded multi-part message:
+    // text (tag intact), the basename label, the image.
+    let parsed = crate::parser::parse_file(&log_path).expect("the file reloads");
+    let chain = parsed.tree.path_to_head();
+    let entry = chain
+        .iter()
+        .find_map(|entry| match &entry.kind {
+            crate::EntryKind::UserMessage { message } => Some(message),
+            _ => None,
+        })
+        .expect("the user message entry");
+    let tabit_providers::completion::Message::User { content } = entry else {
+        panic!("a user message");
+    };
+    assert_eq!(content.len(), 3, "text, label, image");
+    let last = content.iter().last().expect("the image part");
+    assert!(
+        matches!(last, tabit_providers::message::UserContent::Image(image)
+            if image.media_type == Some(tabit_providers::message::ImageMediaType::PNG))
+    );
+    let _ = std::fs::remove_dir_all(&cwd);
+}
+
+/// The door's composition order (the ruling): skills first — the body
+/// appends to the text — then attachment parts over the expanded text,
+/// so the label lands after the skill block in the joined event text.
+#[tokio::test]
+async fn skill_and_attachment_tags_compose_skills_first() {
+    let store = temp_store("endpoint-skill-attachment");
+    let cwd = std::env::temp_dir().join(format!("tabit-compose-door-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&cwd);
+    std::fs::create_dir_all(cwd.join(".tabit/skills/commit")).expect("skill dir");
+    std::fs::write(
+        cwd.join(".tabit/skills/commit/SKILL.md"),
+        "---\nname: commit\ndescription: Make a commit.\n---\nCOMMIT-BODY-MARKER\n",
+    )
+    .expect("SKILL.md");
+    let (image_path, _png) = plant_png(&cwd, "attach.png");
+
+    let skills = std::sync::Arc::new(crate::skills::discover_with_home(None, &cwd));
+    let factory = Factory::new(vec![text_turn("done")]);
+    let session = factory
+        .clone()
+        .into_builder(store.clone())
+        .skills(skills)
+        .create(&cwd.display().to_string())
+        .expect("session");
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store), plain_data());
+    let id = boot_id(&handle);
+
+    let text = format!("run <skill name=\"commit\"/> with <attachment path=\"{image_path}\"/>");
+    handle.message(&id, &text);
+    let frames = drain(&mut handle).await;
+    assert_eq!(finished_outputs(&frames), vec!["done".to_string()]);
+
+    let texts = user_texts(&frames);
+    assert_eq!(texts.len(), 1);
+    let body_at = texts[0].find("COMMIT-BODY-MARKER").expect("skill body");
+    // The tag itself names the file (the anchor); the label is the
+    // newline-separated basename after the text.
+    let label_at = texts[0].find("\n\nattach.png").expect("the label");
+    assert!(
+        body_at < label_at,
+        "the skill block lands in the text, the attachment label after it: {}",
+        texts[0]
+    );
+    assert!(
+        texts[0].contains(&text),
+        "the message is verbatim, both tags the anchors"
+    );
+    let _ = std::fs::remove_dir_all(&cwd);
+}
+
 /// A mid-roundtrip checkout target resolves forward (the 2026-09-26
 /// ruling, replacing the old loud refusal): checking out to the tool
 /// turn's assistant entry — the announced turn id, mid-batch by
