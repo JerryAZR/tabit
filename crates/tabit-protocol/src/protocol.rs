@@ -16,7 +16,12 @@ use serde::{Deserialize, Serialize};
 /// its [`ServerControlFrame::Report`] carrying this version; the
 /// spawner reads it and kills an incompatible child (owner ruling
 /// 2026-09-25 — the report model: children report first, spawners
-/// decide). v21: models — the unconditional `models_available` boot
+/// decide). v22: providers — the unconditional `providers_available`
+/// boot announcement (every configured provider with its winning key
+/// source; absence of the frame now means "protocol older than v22"),
+/// re-announced with `models_available` on every world change; and
+/// `missing_keys` is removed from `models_available`, which returns
+/// to pure picker data. v21: models — the unconditional `models_available` boot
 /// announcement (the usable model catalog; absence of the frame now
 /// means "protocol older than v21"); amended while unreleased: the
 /// zero-config boot (nullable `session_opened.model`), then the
@@ -38,7 +43,7 @@ use serde::{Deserialize, Serialize};
 /// compaction — the `compact` command and its event family (reshaped
 /// in v15 into the
 /// `compaction_begin`/`compaction_step`/`compaction_end` envelope).
-pub const PROTOCOL_VERSION: u32 = 21;
+pub const PROTOCOL_VERSION: u32 = 22;
 
 /// Which session produced an event. The stamp is the session id
 /// itself (v3: the `"main"` alias is retired — one name per session);
@@ -263,8 +268,9 @@ pub enum SessionCommand {
     /// `provider` in auth.toml (a surgical write — comments, order,
     /// and other entries survive; a missing file is created), then
     /// refresh the world. **Backend-level, session-less** (like
-    /// `new_session`). The ack is the re-announced `models_available`
-    /// (last-wins fold); an unknown provider or an unwritable auth
+    /// `new_session`). The ack is the re-announced
+    /// `models_available`/`providers_available` pair (one act,
+    /// last-wins fold); an unknown provider or an unwritable auth
     /// file is an unstamped `error { kind: "auth" }`. The key is NOT
     /// verified at login — the next run open validates. Redaction:
     /// `api_key` never enters the session log, the model context, or
@@ -278,8 +284,9 @@ pub enum SessionCommand {
     /// Log a provider out (v21, amended): remove its auth.toml key
     /// and refresh the world. Total: an unknown provider or an absent
     /// key is an idempotent no-op, still acked by the re-announced
-    /// `models_available` — which reflects reality: a provider whose
-    /// `api_key_env` still supplies a key stays usable. Sessions on
+    /// catalog pair — which reflects reality: a provider whose
+    /// `api_key_env` still supplies a key stays usable (and reports
+    /// `auth: "env"`). Sessions on
     /// that provider keep their register; their next run open fails
     /// with `run_failed { kind: "model" }`, while in-flight runs
     /// finish on the agent they bound at open.

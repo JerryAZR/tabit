@@ -18,7 +18,7 @@ render a specific tool's `details` cargo, the interaction template
 payloads — lives in **TOOLS.md**, its companion since the shapes grew
 past one doc (2026-09 ruling).
 
-Wire shapes below are the **v21 contract**. v3 was the multi-session
+Wire shapes below are the **v22 contract**. v3 was the multi-session
 host — session-addressed commands, `new_session`/`open_session` on the
 channel, the `"main"` stream alias retired (the stream stamp is the
 session id). v4 made backend-level frames **unstamped** (§6) and
@@ -66,7 +66,12 @@ model catalog (§6) — and, amended, the zero-config boot: a nullable
 `session_opened.model` and the selection-less run-open failure (§3.1),
 then the `login`/`logout` backend-level commands with their world
 refresh, the catalog's `missing_keys` half, and the `auth` error kind
-(§5, §6). Each version landed as one protocol-version bump
+(§5, §6); v22 added `providers_available` — the backend-level,
+unconditional announcement of every configured provider with its
+winning auth source, the login/logout view's data (§6) — and removed
+`missing_keys` from `models_available`, which returns to pure picker
+data (§5, §6; §3.2's first-run predicate re-derives from
+`providers_available`). Each version landed as one protocol-version bump
 with no compatibility
 period; always check the report's `protocol_version`. (`tabit-core --list` prints a human table —
 there is no JSON listing edge.)
@@ -83,13 +88,14 @@ you read and write on the child's stdio (one frame per line; the
    `.tabit/sessions`; config resolves from the same world — a
    config-less first run is not an error: the boot announces
    `session_opened` with `model: null`, an empty
-   `models_available`, and a teaching note (§3.1)). Session
+   `models_available`, an empty `providers_available`, and a
+   teaching note (§3.2)). Session
    flags you may add: `--continue` (resume the newest stored
    session), `--session <path>`, `--model provider/model`,
    `--max-turns <n>`, `--ephemeral` (in memory, nothing persists).
    You own the lifecycle: you picked the binary, you kill it.
 2. **Read the first line — the report.**
-   `{"type":"report","protocol_version":21}`. Protocol facts only.
+   `{"type":"report","protocol_version":22}`. Protocol facts only.
    **You are the version check**: a version you do not speak is
    yours to kill and clean up (§3). After the report there is no
    handshake state — your commands may flow from your first line
@@ -100,8 +106,9 @@ you read and write on the child's stdio (one frame per line; the
    command address), then any selection notes (`error { kind: model }`
    — the zero-config teaching note rides here), then its
    `skills_available`, then the
-   backend-level `sessions_available`, `extensions_available`, and
-   `models_available` catalogs, then — for a resumed boot — the
+   backend-level `sessions_available`, `extensions_available`,
+   `models_available`, and `providers_available` catalogs, then —
+   for a resumed boot — the
    session's `model_changed` (absent when it has no selection) leading
    the replay bracket (`replay_begin` … `replay_end`).
 4. **Send your first message.**
@@ -207,7 +214,7 @@ arrive as events. Input tolerance: blank lines are skipped, a trailing
 size limit** — tool output can be large; buffer accordingly.
 
 ```
-← {"type":"report","protocol_version":21}
+← {"type":"report","protocol_version":22}
 ← {"type":"session_opened","stream":"019…","id":"019…","path":"…",
    "model":{"provider":"…","model":"…","thinking_level":null},"resumed":true}
 ← {"type":"sessions_available","sessions":[
@@ -271,7 +278,8 @@ value, switch on `type` when recognized) and log the rest.
    boot session's `skills_available` when its discovery found
    something (v20, stamped with the boot's stream), then the
    backend-level catalogs (`sessions_available`, then
-   `extensions_available`, then `models_available`), then — for a
+   `extensions_available`, then `models_available`, then
+   `providers_available`), then — for a
    resumed boot — the session's `model_changed` (absent when it has
    no selection) leading the replay pass,
    then live traffic) is today's common order, not a contract; other
@@ -297,13 +305,13 @@ value, switch on `type` when recognized) and log the rest.
    announces empty, a teaching note rides as `error { kind: model }`,
    and the first message's run fails at open with
    `run_failed { kind: "model" }` (§6). Which fix applies branches
-   on the catalog (§6) — the predicate a first-run flow branches on:
-   **both `providers` and `missing_keys` empty means no config at
-   all** — `login` validates its provider against config, so it has
-   nothing to write to; the only fix is writing `providers.toml` and
-   restarting the backend (config is not re-read per request).
-   **`missing_keys` non-empty means config exists but nothing is
-   usable** — `login` fixes it in-app, no restart. Only
+   on `providers_available` (§6) — the predicate a first-run flow
+   branches on (v22): **`providers_available` empty means no config
+   at all** — `login` validates its provider against config, so it
+   has nothing to write to; the only fix is writing `providers.toml`
+   and restarting the backend (config is not re-read per request).
+   **`auth: "none"` entries present means config exists but keys are
+   missing** — `login` fixes it in-app, no restart. Only
    non-interactive death was ever the problem.
 3. **Replay is default-on for a resumed boot** (owner ruling
    2026-09-25): a backend launched with `--continue`/`--session`
@@ -393,11 +401,11 @@ a frame.
 | `new_session` | any time | creates a fresh session (same config, tools, and `--model`/`--max-turns` as the boot); its `session_opened` follows — stamped with the new session's own stream, `resumed: false` (v10: one announcement shape for every path). Nothing replays (it is empty). Never waits on any session — lifecycle writes no session's file. |
 | `open_session { id }` | any time | loads the session if needed and streams a replay pass stamped with the id — the pass is the acknowledgment. Idempotent: an open session re-replays. Unknown id or unreadable file → unstamped, backend-level `error { kind: session }`. Creating, loading, and switching never wait on the session you are leaving; the one wait is the opened session's **own** in-flight run — its pass arrives at that run's terminal (its live streaming renders immediately; only committed history waits). |
 | `checkout { session, entry_id }` | any time | moves that session's chain to the entry (any entry in the file— an off-chain target is a branch switch); see §7. A target inside an open tool roundtrip (the assistant's tool-call entry, or a mid-batch result) is not a representable chain-end: it **resolves forward** to the first closed position — the batch's last tool result — and `checked_out` reports the landing, which may differ from the ask (2026-09; was: a loud refusal). **On receipt:** the target is verified (unknown entry → immediate `error { kind: checkout }`, nothing else happens) and the still-pending messages are discarded (`messages_discarded`, handed back as drafts). The rewind itself: a run in flight is aborted first (`run_aborted` — the user rewinding has declared its continuation obsolete), then the rewind applies at the session's pause point; idle → applies immediately. |
-| `model { session, provider, model, thinking_level? }` | any time | switches that session's model — the **register write**, never a chain move (§7). A **state write at receive**: the ref is validated against config (unknown provider/model → immediate `error { kind: model }`, nothing moves), then the entry and the live selection land at once and `model_changed` follows immediately — even mid-run (a run in flight finishes untouched on the model it bound at run open; the next run uses the new one). Validation is **config-existence only, never usability**: a `model` command naming a `missing_keys` provider validates, lands, and announces `model_changed` — then fails at the next run open (`run_failed { kind: "model" }`), when construction finds no key. The picker rule follows: **never offer a `missing_keys` entry without logging it in first** (§6) — the catalog's usable half is the pickable set. On a session that booted selection-less (`session_opened.model: null`) this is how the first selection lands. Not intent: abort never touches it, rapid switches each land (last wins). Durability: no later than the next turn (the write-behind log's prompt barrier flushes the buffer — this switch included — before any turn starts); a hard death in the window loses the switch, and resume announces the register that survived. |
+| `model { session, provider, model, thinking_level? }` | any time | switches that session's model — the **register write**, never a chain move (§7). A **state write at receive**: the ref is validated against config (unknown provider/model → immediate `error { kind: model }`, nothing moves), then the entry and the live selection land at once and `model_changed` follows immediately — even mid-run (a run in flight finishes untouched on the model it bound at run open; the next run uses the new one). Validation is **config-existence only, never usability**: a `model` command naming an `auth: "none"` provider validates, lands, and announces `model_changed` — then fails at the next run open (`run_failed { kind: "model" }`), when construction finds no key. The picker rule follows: **never offer an `auth: "none"` provider without logging it in first** (§6) — `models_available`'s usable-only list is the pickable set. On a session that booted selection-less (`session_opened.model: null`) this is how the first selection lands. Not intent: abort never touches it, rapid switches each land (last wins). Durability: no later than the next turn (the write-behind log's prompt barrier flushes the buffer — this switch included — before any turn starts); a hard death in the window loses the switch, and resume announces the register that survived. |
 | `interaction_response { session, id, payload }` | after an `interaction_request` | answers a pending request; the payload is shaped by the asking template's convention (§8) — always an answer, never a dismissal. |
 | `compact { session, directives? }` | any time | **manual compaction (v7)**: runs the context-summarization pass now — the same machinery as the automatic doors, forced regardless of thresholds and guarded only by the short-history skip (a history shorter than the retained-tail budget → `compaction_failed { message }` saying so; nothing runs). Idle: runs at the session's next beat. Running: **parks** — compaction never aborts a run (it does not move the chain, nothing is made obsolete) — and runs when the run ends. Outcomes: the `compaction_*` bracket (§6). `directives` (v16) is the user's free-text guidance for this invocation — appended to the summarization instruction, never persisted, never replayed: "focus on details relevant to task X which we will start next". Abort clears a parked compact (drop-all-pending-intent — no bracket follows). |
-| `login { provider, api_key }` | any time | **(v21) backend-level, session-less** (like `new_session`): store `api_key` for `provider` in auth.toml — a surgical write (comments, order, and other providers' entries survive; a missing file is created owner-only, 0600 on unix), then refresh the world: the model catalog re-folds and the re-announced `models_available` is the ack (last-wins), and every open session's next run open builds against the new key (a run in flight finishes on the agent it bound at open — by construction, never disturbed). An unknown provider, an empty/whitespace `api_key` (a typo, not a credential — storing it would flip the provider usable and meet the user as a 401), or an unwritable auth file is an unstamped `error { kind: "auth" }` — no write, no re-announcement. The key is **not verified** at login — the next run open validates (a verify-at-login refinement is parked). Logging in a provider **already usable via `api_key_env`** succeeds all the same: the key is stored, and auth.toml then **wins over the environment** (the resolve order is auth.toml first, `api_key_env` second), so the re-announced catalog is unchanged — and a later `logout` restores env-derived usability rather than dropping the provider (see `logout`). **Redaction:** `api_key` crosses the wire once and lands only in auth.toml — it never enters the session log, the model context, or any frame the backend emits. The command acts on the backend process that receives it; a subagent child is its own host with its own world. |
-| `logout { provider }` | any time | **(v21) backend-level**: remove the provider's auth.toml key and refresh the world (same re-announced `models_available` as the ack). **Total**: an unknown provider or an absent key is an idempotent no-op — still acked. The re-announcement reflects reality: when the provider's `api_key_env` still supplies a key, it stays usable and keeps its catalog row — logout removed the auth.toml entry, not the environment. A session on that provider keeps its register; its next run open fails with `run_failed { kind: "model" }` until a `model` command or a new login lands. |
+| `login { provider, api_key }` | any time | **(v21) backend-level, session-less** (like `new_session`): store `api_key` for `provider` in auth.toml — a surgical write (comments, order, and other providers' entries survive; a missing file is created owner-only, 0600 on unix), then refresh the world: the catalogs re-fold and the re-announced `models_available` + `providers_available` pair is the ack (one re-announcement act, both frames, last-wins), and every open session's next run open builds against the new key (a run in flight finishes on the agent it bound at open — by construction, never disturbed). An unknown provider, an empty/whitespace `api_key` (a typo, not a credential — storing it would flip the provider usable and meet the user as a 401), or an unwritable auth file is an unstamped `error { kind: "auth" }` — no write, no re-announcement. The key is **not verified** at login — the next run open validates (a verify-at-login refinement is parked). Logging in a provider **already usable via `api_key_env`** succeeds all the same: the key is stored, and auth.toml then **wins over the environment** (the resolve order is auth.toml first, `api_key_env` second), so the provider's row flips from `env` to `stored` in the re-announced `providers_available` (its `models_available` row is unchanged) — and a later `logout` restores env-derived usability rather than dropping the provider (see `logout`). **Redaction:** `api_key` crosses the wire once and lands only in auth.toml — it never enters the session log, the model context, or any frame the backend emits. The command acts on the backend process that receives it; a subagent child is its own host with its own world. |
+| `logout { provider }` | any time | **(v21) backend-level**: remove the provider's auth.toml key and refresh the world (the same re-announced catalog pair as the ack). **Total**: an unknown provider or an absent key is an idempotent no-op — still acked. The re-announcement reflects reality: when the provider's `api_key_env` still supplies a key, it stays usable and keeps its `models_available` row, and its `providers_available` row reports `env` — logout removed the auth.toml entry, not the environment. A session on that provider keeps its register; its next run open fails with `run_failed { kind: "model" }` until a `model` command or a new login lands. |
 
 `checkout` needs no idle-care — the backend aborts the run for it and
 applies the rewind at the pause point (§7), so sending it any time is
@@ -506,7 +514,8 @@ consumes (its `details` cargo) is TOOLS.md's table of shapes.
    directory to learn either). A brand-new session has no file yet and is absent until it records. |
 | `skills_available` | `skills: [{ name, description, location, level }]` | **(v20) session-level**: stamped with the session's stream, announced right after each `session_opened` (boot, `new_session`, `open_session`) — every skill that session's own discovery merged (home `~/.agents`/`~/.tabit` + workspace `.agents`/`.tabit` skills dirs over the session's cwd, plus the process's extension contribution), the same facts that session's prompt catalog carries — `level` is `user` or `workspace` (which source won). Fold skills state **per stream** (v20): a subagent child is a full session host in its own cwd and announces its own stamped catalog, which must not clobber another session's list. Only announced when the session discovered at least one skill — with per-stream folding, absence is unambiguous. Skill *invocation* is no new wire shape: the model calls the `skill` tool, an ordinary `tool_call`/`tool_result` pair on the asking session's stream; the user invokes one manually with the message-text tag (§5). |
 | `extensions_available` | `extensions: [{ name, version, description?, dir, status, reason?, tools: [{ name, description }], hooks: [string] }]`, `conflicts: [{ kind, extension, tool, incumbent? }]` | **(v9)** once, right after `skills_available`: every discovered extension with its provenance (`dir`) and standing — `status` is `alive` or `dead` (a refused handshake, a failed scan, or death since; `reason` carries why). **Unstamped, backend-level** (one process, one extension host); only announced when at least one extension was discovered — a refusal counts as discovered. **A boot-time snapshot** (2026-09 ruling): a mid-run extension death does not re-announce — stderr carries the report and the catalog stands until the next backend start. `conflicts` are the boot's name-assembly reports: `kind: "replaces_core"` (an extension tool replaced the core tool of the same name — the signal is mandatory; how loudly you present it is your call) and `kind: "refused_peer"` (the newcomer was refused, `incumbent` names the extension that holds the name). Extension tool *invocation* is no new wire shape: an ordinary `tool_call`/`tool_result` pair, attributed by the model-facing name. |
-| `models_available` | `providers: [{ id, name?, models: [{ id, name?, context_window?, max_tokens?, cost?, reasoning, input: [string], thinking_levels: [string] }] }]`, `missing_keys: [{ id, name? }]` | **(v21)** once at boot, right after `extensions_available`: every **usable** provider from config, with its models — a provider with no resolvable key (auth.toml/`api_key_env`) and no `keyless = true` declaration is not runnable and does not appear (its models go with it; no `usable` flag crosses the wire to fold). `missing_keys` (v21, amended) is the complement: the configured providers failing that predicate, identity only — **the login widget's targets** (the models list stays usable-only, the picker contract untouched). **Unstamped, backend-level** (one process, one model registry). **Always emitted, even when empty**: absence of the frame means the backend speaks a protocol older than v21, never "no models"; `providers: []` is a legal state meaning "no usable models at this backend", deliberately cause-agnostic. An empty list means no run can open at this backend: surface it as a setup-state warning rather than letting the user type into a session whose first run fails at open — the signal is mandatory; how loudly you present it is your call. Providers arrive in alphabetical id order, models in config-file order; display sorting is yours. Per model: `name` is the display name (absent = fall back to `id`); `context_window`/`max_tokens` are token counts, **absent when the config does not state them** (never zero); `cost` is the same `{ input, output, cache_read, cache_write }` shape `model_changed` carries; `reasoning` says the model produces reasoning output; `input` lists the accepted modalities as lowercase strings (`"text"`, `"image"`); `thinking_levels` carries the dial's ordered **names** (never the request-merge maps behind them), empty when the model has no dial — and `thinking_level: null` is always a legal selection (the provider/model default), so a picker cycles null → the announced names. Announced at boot and **re-announced when the world changes** — a `login`/`logout` landed (§5; the re-announcement is the command's ack), config reload when it lands; a re-announcement replaces the catalog wholesale (last-wins fold). |
+| `models_available` | `providers: [{ id, name?, models: [{ id, name?, context_window?, max_tokens?, cost?, reasoning, input: [string], thinking_levels: [string] }] }]` | **(v21)** once at boot, right after `extensions_available`: every **usable** provider from config, with its models — a provider with no resolvable key (auth.toml/`api_key_env`) and no `keyless = true` declaration is not runnable and does not appear (its models go with it; no `usable` flag crosses the wire to fold). Pure picker data (v22 — the login/logout view moved to `providers_available`; the v21 `missing_keys` half is gone). **Unstamped, backend-level** (one process, one model registry). **Always emitted, even when empty**: absence of the frame means the backend speaks a protocol older than v21, never "no models"; `providers: []` is a legal state meaning "no usable models at this backend", deliberately cause-agnostic. An empty list means no run can open at this backend: surface it as a setup-state warning rather than letting the user type into a session whose first run fails at open — the signal is mandatory; how loudly you present it is your call. Providers arrive in alphabetical id order, models in config-file order; display sorting is yours. Per model: `name` is the display name (absent = fall back to `id`); `context_window`/`max_tokens` are token counts, **absent when the config does not state them** (never zero); `cost` is the same `{ input, output, cache_read, cache_write }` shape `model_changed` carries; `reasoning` says the model produces reasoning output; `input` lists the accepted modalities as lowercase strings (`"text"`, `"image"`); `thinking_levels` carries the dial's ordered **names** (never the request-merge maps behind them), empty when the model has no dial — and `thinking_level: null` is always a legal selection (the provider/model default), so a picker cycles null → the announced names. Announced at boot and **re-announced when the world changes** — a `login`/`logout` landed (§5; the re-announcement, paired with `providers_available`'s in one act, is the command's ack), config reload when it lands; a re-announcement replaces the catalog wholesale (last-wins fold). |
+| `providers_available` | `providers: [{ id, name?, auth }]` | **(v22)** once at boot, right after `models_available`: **every configured provider, usable or not**, with its winning key source — the login/logout view's data (`models_available` stays the picker's). `auth` is `"stored" | "env" | "keyless" | "none"` — the winner in resolution order: a stored auth.toml key beats the provider's `api_key_env` variable, which beats a declared `keyless = true`, which is all that remains before `"none"`. The order is the law: a **keyless provider WITH a stored key reports `stored`** — the key genuinely rides requests (`keyless` is a fallback declaration, not a prohibition; the explicit user act wins). Consumer law: **login widgets target `auth: "none"`**; **logout is offered on `auth: "stored"`**; **`env` is display-only** — the app cannot unset a persistent environment variable, so render no logout for those (the row survives `logout` unchanged, reporting `env` still). **Unstamped, backend-level. Always emitted, even when empty** (the `models_available` law, one version later): absence of the frame means the backend speaks a protocol older than v22, never "no providers"; `providers: []` means no providers configured at all (§3.2's first-run predicate). Providers arrive in alphabetical id order. Re-announced together with `models_available` on every world change — one act, both frames, last-wins fold. |
 | `session_opened` | `id`, `path`, `cwd`, `model`, `resumed`, `parent?`, `parent_call?` | a session became visible in this backend — the boot (at spawn, right after the report), a `new_session`, an `open_session`, **or a subagent child** (v5). `cwd` (v16) is the session's working
 directory — the boot's is the backend's cwd, a child's is its spawn
 cwd. **`model` is nullable (v21)**: `null` means the session has no
@@ -514,7 +523,7 @@ selection — nothing usable at this backend (the zero-config boot,
 §3.1) — and the first `model` command lands one; until then runs fail
 at open (`run_failed { kind: "model" }`). **One announcement shape for every path** (2026-09 ruling — the report carries protocol-level facts only; the boot is not a special case). Stamped with the session's own stream. Selection notes, if any, follow on the same stream. v5: `path` is **empty for an ephemeral session** (in memory only — nothing to open or replay; subagent children are ephemeral today), and `parent` names the spawning session for a subagent child — absent for every user-facing session. A frontend branches on `parent`: user sessions update their session facts, children render nested (or not at all) — a child announcement must never overwrite the active session's facts. The child's whole run (its `user_message`, deltas, `tool_call`s, terminal) streams on its own stamp; the spawner's transcript sees only the subagent `tool_call`/`tool_result` pair. `parent_call` (v7, additive) is the spawning tool call's `internal_call_id`: the announce pairs the child with the **exact** open `tool_call` event — exact under concurrent subagent calls, where arrival order cannot disambiguate. Absent whenever `parent` is. |
 | `checked_out` | `entry_id`, `base_id` | checkout succeeded — `entry_id` is **where the chain ends** (the landing): a mid-roundtrip ask resolved forward to the batch's last tool result, so it may differ from what you sent. `base_id` is `null` today: drop everything and rebuild from the replay pass that follows. A non-null `base_id` is the reserved suffix mode (keep through `base_id`, apply the pass) — treat any non-null value as "rebuild from the pass" and you stay correct. |
-| `model_changed` | `provider`, `model`, `thinking_level`, `context_window?`, `name?`, `cost?` | the session's **active model** — a session preference: the file's last `model_change`, latest in time wins (a rewind never moves it). Announced live whenever the session becomes visible: ahead of every replay pass (boot, `open_session`, re-replay, after `checked_out`) — idempotent, the value repeats — and at every `model` command (a state write at receive; §5). **Never inside a pass** (state is announced, not reconstructed), and **never for a session with no selection** (a zero-config boot announces `session_opened.model: null` and no `model_changed` until the first `model` command lands one). The boot's `session_opened.model` is the boot session's register. v11: the announcement also carries the model record resolved against config — `context_window` (tokens; a context meter's denominator), `name` (a display name; fall back to the model id), and `cost` (`{ input, output, cache_read, cache_write }`, USD per million tokens). Each field is optional and **absent means the config does not state it** (never zero); a register stale against an edited config announces the ids with no facts, and the next validated switch repairs it. **The register can sit outside both catalog halves** — a key-less register (post-`logout`, an explicit `--model` on a key-less provider) is in `missing_keys`; a register stale against an edited config is nowhere. Render it as a **synthetic current entry** alongside the catalog (never drop the user's current state); a validated `model` command repairs it. |
+| `model_changed` | `provider`, `model`, `thinking_level`, `context_window?`, `name?`, `cost?` | the session's **active model** — a session preference: the file's last `model_change`, latest in time wins (a rewind never moves it). Announced live whenever the session becomes visible: ahead of every replay pass (boot, `open_session`, re-replay, after `checked_out`) — idempotent, the value repeats — and at every `model` command (a state write at receive; §5). **Never inside a pass** (state is announced, not reconstructed), and **never for a session with no selection** (a zero-config boot announces `session_opened.model: null` and no `model_changed` until the first `model` command lands one). The boot's `session_opened.model` is the boot session's register. v11: the announcement also carries the model record resolved against config — `context_window` (tokens; a context meter's denominator), `name` (a display name; fall back to the model id), and `cost` (`{ input, output, cache_read, cache_write }`, USD per million tokens). Each field is optional and **absent means the config does not state it** (never zero); a register stale against an edited config announces the ids with no facts, and the next validated switch repairs it. **The register can sit outside both catalogs** — a key-less register (post-`logout`, an explicit `--model` on a key-less provider) reports `auth: "none"` in `providers_available` and appears in no `models_available` row; a register stale against an edited config is nowhere. Render it as a **synthetic current entry** alongside the catalog (never drop the user's current state); a validated `model` command repairs it. |
 
 **Errors: one generic carrier with a `kind`.** Anything that goes
 wrong outside a run terminal rides `error { kind, message, … }`. A
@@ -799,8 +808,9 @@ answer or denial the model saw.
   however large. Cursors are a future addition.
 - **No unload or residency limits.** Opened sessions stay loaded for
   the process's life (lazy loading bounds *startup*; LRU unload is
-  deferred). The model catalog is the `models_available` boot
-  announcement (§6) — config-derived, still no pull-command, with an
+  deferred). The model and provider catalogs are the
+  `models_available`/`providers_available` boot announcements (§6)
+  — config-derived, still no pull-command, with an
   in-band re-announcement arriving when login/logout land and when
   config reload lands.
   `sessions_available` is announced once at startup,
@@ -878,6 +888,25 @@ v19 rode the deleted GUI's CHANGELOG.md — git history holds it.)
   run keeps its bound agent; the re-announced catalog is the ack) —
   the catalog's **`missing_keys`** half (the login widget's targets),
   and the **`auth` error kind** (§6).
+- **v22 (2026-10)** — `providers_available`: the backend-level,
+  unstamped, **unconditional** announcement of every configured
+  provider with its winning key source — `auth` is
+  `"stored" | "env" | "keyless" | "none"`, the resolution order's
+  winner (a stored auth.toml key beats the `api_key_env` variable,
+  which beats the `keyless = true` fallback declaration; a keyless
+  provider WITH a stored key reports `stored` — the explicit act
+  wins). Emitted at boot right after `models_available` and
+  re-announced with it on every world change (one act, both frames,
+  last-wins fold). Absence of the frame means protocol older than
+  v22, never "no providers"; `providers: []` is the no-config state.
+  Consumer law: login targets `auth: "none"`, logout is offered on
+  `auth: "stored"`, `env` is display-only (the app cannot unset a
+  persistent environment variable). **Breaking:**
+  `models_available.missing_keys` is **removed** — the picker
+  catalog is usable-only, and the first-run predicate re-derives
+  from `providers_available` (§3.2): empty means no config at all
+  (write providers.toml, restart); `auth: "none"` entries mean
+  `login` fixes it in-app.
 - **2026-09 (no bump — checkout execution semantics)** — a
   `checkout` target inside an open tool roundtrip (the assistant's
   tool-call entry, or a mid-batch result) resolves **forward** to the

@@ -306,8 +306,11 @@ pub enum SessionEvent {
     /// **unconditional**: emitted even when empty, so the frame's
     /// absence means "protocol older than v21", never "no models";
     /// `providers: []` is the legal "no usable models at this
-    /// backend" state. Re-announced when the world changes — a
-    /// `login`/`logout` landed (the re-announcement is the
+    /// backend" state. Pure picker data (v22: the login/logout
+    /// view's data moved to `providers_available`; the v21
+    /// `missing_keys` half is gone). Re-announced when the world
+    /// changes — a `login`/`logout` landed (the re-announcement,
+    /// paired with `providers_available`'s in one act, is the
     /// command's ack), config reload when it lands; a
     /// re-announcement replaces the catalog wholesale — last-wins
     /// fold.
@@ -315,11 +318,20 @@ pub enum SessionEvent {
         /// Every usable provider, in alphabetical id order; models
         /// in config-file order.
         providers: Vec<AvailableProvider>,
-        /// The configured providers failing the usable predicate
-        /// (v21, amended — the login widget's targets): identity
-        /// only, in alphabetical id order. `providers` stays
-        /// usable-only; this is who `login` can fix.
-        missing_keys: Vec<crate::model::MissingKeyProvider>,
+    },
+    /// The provider catalog, announced once at startup right after
+    /// `models_available` (v22): EVERY configured provider, usable
+    /// or not, with its winning key source — the login/logout
+    /// view's data. **Unstamped, backend-level**, and
+    /// **unconditional** like its picker sibling (one version
+    /// later): absence of the frame means "protocol older than
+    /// v22", never "no providers"; `providers: []` is the legal
+    /// no-config state. Re-announced together with
+    /// `models_available` on every world change — one act, both
+    /// frames, last-wins fold.
+    ProvidersAvailable {
+        /// Every configured provider, in alphabetical id order.
+        providers: Vec<crate::model::ProviderStatus>,
     },
     /// A session became visible in this backend: the boot session
     /// (emitted at spawn, ahead of the catalog and any replay), a
@@ -790,6 +802,7 @@ impl SessionEvent {
             SessionEvent::SkillsAvailable { .. } => tags::SKILLS_AVAILABLE,
             SessionEvent::ExtensionsAvailable { .. } => tags::EXTENSIONS_AVAILABLE,
             SessionEvent::ModelsAvailable { .. } => tags::MODELS_AVAILABLE,
+            SessionEvent::ProvidersAvailable { .. } => tags::PROVIDERS_AVAILABLE,
             SessionEvent::SessionOpened { .. } => tags::SESSION_OPENED,
             SessionEvent::ModelChanged { .. } => tags::MODEL_CHANGED,
             SessionEvent::NativeItem { .. } => tags::NATIVE_ITEM,
@@ -837,6 +850,7 @@ pub mod tags {
     pub const SKILLS_AVAILABLE: &str = "skills_available";
     pub const EXTENSIONS_AVAILABLE: &str = "extensions_available";
     pub const MODELS_AVAILABLE: &str = "models_available";
+    pub const PROVIDERS_AVAILABLE: &str = "providers_available";
     pub const SESSION_OPENED: &str = "session_opened";
     pub const MODEL_CHANGED: &str = "model_changed";
     pub const NATIVE_ITEM: &str = "native_item";
@@ -874,6 +888,7 @@ pub mod tags {
         SKILLS_AVAILABLE,
         EXTENSIONS_AVAILABLE,
         MODELS_AVAILABLE,
+        PROVIDERS_AVAILABLE,
         SESSION_OPENED,
         MODEL_CHANGED,
         NATIVE_ITEM,

@@ -234,7 +234,9 @@ async fn the_models_catalog_announces_once_unstamped_after_the_extension_catalog
     // announcement — exactly one frame, no stream stamp, ordered
     // after `extensions_available`, its content the registry's fold
     // (the endpoint only emits; the fold's own tests are the
-    // registry's).
+    // registry's). v22: `providers_available` follows it in the same
+    // boot act — every configured provider with its winning key
+    // source, usable or not.
     let store = temp_store("endpoint-models");
     let session = Factory::new(vec![text_turn("hi")])
         .into_builder(store.clone())
@@ -296,15 +298,17 @@ id = "l1"
 
     let mut extensions_at = None;
     let mut announced = Vec::new();
+    let mut providers_announced = Vec::new();
     for (index, frame) in frames.iter().enumerate() {
         match &frame.event {
             SessionEvent::ExtensionsAvailable { .. } => extensions_at = Some(index),
-            SessionEvent::ModelsAvailable {
-                providers,
-                missing_keys,
-            } => {
+            SessionEvent::ModelsAvailable { providers } => {
                 assert_eq!(frame.stream, None, "backend-level: no stream stamp");
-                announced.push((index, providers, missing_keys));
+                announced.push((index, providers));
+            }
+            SessionEvent::ProvidersAvailable { providers } => {
+                assert_eq!(frame.stream, None, "backend-level: no stream stamp");
+                providers_announced.push((index, providers));
             }
             _ => {}
         }
@@ -315,32 +319,48 @@ id = "l1"
         1,
         "exactly one model catalog per boot — never a per-session repeat"
     );
-    let (models_at, providers, missing_keys) = announced[0];
+    let (models_at, providers) = announced[0];
     assert!(
         models_at > extensions_at,
         "models_available follows extensions_available"
     );
     // The usable fold crossed the wire: `locked` (no key, not
-    // keyless) is absent from the picker list with its models — and
-    // named in `missing_keys`, the login widget's targets (v21,
-    // amended); the usable provider's stated facts and the dial's
-    // names ride.
+    // keyless) is absent from the picker list with its models; the
+    // usable provider's stated facts and the dial's names ride.
     assert_eq!(providers.len(), 1);
     assert_eq!(providers[0].id, "local");
-    assert_eq!(
-        missing_keys
-            .iter()
-            .map(|p| p.id.as_str())
-            .collect::<Vec<_>>(),
-        vec!["locked"],
-        "the locked provider is the login target"
-    );
     assert_eq!(providers[0].models.len(), 1);
     let model = &providers[0].models[0];
     assert_eq!(model.id, "m");
     assert_eq!(model.context_window, Some(128_000));
     assert_eq!(model.max_tokens, None, "unstated stays absent");
     assert_eq!(model.thinking_levels, vec!["off", "high"]);
+    // v22: the provider catalog follows the model catalog in the
+    // same act, once, covering EVERY configured provider — `locked`
+    // reports `auth: "none"` (the login target), `local` reports
+    // `keyless`.
+    assert_eq!(
+        providers_announced.len(),
+        1,
+        "exactly one provider catalog per boot"
+    );
+    let (providers_at, statuses) = providers_announced[0];
+    assert_eq!(
+        providers_at,
+        models_at + 1,
+        "providers_available immediately follows models_available"
+    );
+    assert_eq!(
+        statuses
+            .iter()
+            .map(|p| (p.id.as_str(), p.auth))
+            .collect::<Vec<_>>(),
+        vec![
+            ("local", tabit_protocol::ProviderAuth::Keyless),
+            ("locked", tabit_protocol::ProviderAuth::None),
+        ],
+        "every configured provider, usable or not, with its key source"
+    );
     std::fs::remove_dir_all(store.dir()).ok();
 }
 
@@ -371,6 +391,113 @@ async fn an_empty_models_catalog_still_announces() {
     assert_eq!(catalogs.len(), 1, "exactly one announcement, even empty");
     assert_eq!(catalogs[0].0, None, "backend-level: no stream stamp");
     assert_eq!(catalogs[0].1, 0, "no usable models at this backend");
+    std::fs::remove_dir_all(store.dir()).ok();
+}
+
+#[tokio::test]
+async fn the_providers_catalog_announces_all_four_auth_states() {
+    // v22: `providers_available` is unstamped, unconditional, and
+    // covers every configured provider with its winning key source —
+    // stored (auth.toml) over env (a set `api_key_env` var) over
+    // declared keyless over none.
+    let var = "TABIT_SESSION_TEST_ENDPOINT_ENV_KEY";
+    // SAFETY: unique variable name; set and removed around the test.
+    unsafe {
+        std::env::set_var(var, "env-secret");
+    }
+    let store = temp_store("endpoint-providers");
+    let session = Factory::new(vec![text_turn("hi")])
+        .into_builder(store.clone())
+        .create("C:/w")
+        .expect("session");
+    let registry = crate::ModelRegistry::new(
+        std::sync::Arc::new(
+            tabit_config::TabitConfig::from_toml_str(
+                &format!(
+                    r#"
+[providers.env-backed]
+base_url = "https://env.example/v1"
+api = "openai-completions"
+api_key_env = "{var}"
+
+[[providers.env-backed.models]]
+id = "e1"
+
+[providers.keyless]
+base_url = "http://127.0.0.1:1234/v1"
+api = "openai-completions"
+keyless = true
+
+[[providers.keyless.models]]
+id = "k1"
+
+[providers.locked]
+base_url = "https://locked.example/v1"
+api = "openai-completions"
+
+[[providers.locked.models]]
+id = "l1"
+
+[providers.stored]
+base_url = "https://stored.example/v1"
+api = "openai-completions"
+keyless = true
+
+[[providers.stored.models]]
+id = "s1"
+"#
+                ),
+                std::path::Path::new("providers.toml"),
+            )
+            .expect("config"),
+        ),
+        std::sync::Arc::new(
+            tabit_config::AuthConfig::from_toml_str(
+                "[providers.stored]\napi_key = \"sk-stored\"\n",
+                std::path::Path::new("auth.toml"),
+            )
+            .expect("auth"),
+        ),
+    );
+    let data = SessionHostData {
+        world: crate::registry::current_world(registry),
+        auth_path: None,
+        ..plain_data()
+    };
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store), data);
+    handle.message(&boot_id(&handle), "go");
+    let frames = drain(&mut handle).await;
+
+    let announced: Vec<&Vec<tabit_protocol::ProviderStatus>> = frames
+        .iter()
+        .filter_map(|frame| match &frame.event {
+            SessionEvent::ProvidersAvailable { providers } => {
+                assert_eq!(frame.stream, None, "backend-level: no stream stamp");
+                Some(providers)
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(announced.len(), 1, "exactly one provider catalog per boot");
+    assert_eq!(
+        announced[0]
+            .iter()
+            .map(|p| (p.id.as_str(), p.auth))
+            .collect::<Vec<_>>(),
+        vec![
+            ("env-backed", tabit_protocol::ProviderAuth::Env),
+            ("keyless", tabit_protocol::ProviderAuth::Keyless),
+            ("locked", tabit_protocol::ProviderAuth::None),
+            // Keyless WITH a stored key reports stored — the explicit
+            // act wins over the fallback declaration.
+            ("stored", tabit_protocol::ProviderAuth::Stored),
+        ],
+        "all four auth states, in resolution order's winning form"
+    );
+    // SAFETY: see above.
+    unsafe {
+        std::env::remove_var(var);
+    }
     std::fs::remove_dir_all(store.dir()).ok();
 }
 
@@ -535,6 +662,7 @@ async fn abort_while_idle_discards_queued_messages() {
             SessionEvent::SessionOpened { .. } => "session_opened",
             SessionEvent::SessionsAvailable { .. } => "sessions_available",
             SessionEvent::ModelsAvailable { .. } => "models_available",
+            SessionEvent::ProvidersAvailable { .. } => "providers_available",
             SessionEvent::MessagesDiscarded { .. } => "messages_discarded",
             _ => "other",
         })
@@ -545,10 +673,11 @@ async fn abort_while_idle_discards_queued_messages() {
             "session_opened",
             "sessions_available",
             "models_available",
+            "providers_available",
             "messages_discarded"
         ]
     );
-    let texts: Vec<String> = match &frames[3].event {
+    let texts: Vec<String> = match &frames[4].event {
         SessionEvent::MessagesDiscarded { messages } => {
             messages.iter().map(|m| m.text.clone()).collect()
         }
@@ -1004,7 +1133,10 @@ async fn open_session_loads_a_stored_session_and_replays_it() {
             .expect("the stream stays open through the pass");
         // The boot's backend-level catalogs may still be draining
         // (they are not the pass); the pass frames are stamped.
-        if matches!(frame.event, SessionEvent::ModelsAvailable { .. }) {
+        if matches!(
+            frame.event,
+            SessionEvent::ModelsAvailable { .. } | SessionEvent::ProvidersAvailable { .. }
+        ) {
             continue;
         }
         assert_eq!(
@@ -1225,7 +1357,8 @@ async fn a_replay_request_streams_the_pass_onto_the_event_channel() {
             // content.
             SessionEvent::SessionOpened { .. }
             | SessionEvent::SessionsAvailable { .. }
-            | SessionEvent::ModelsAvailable { .. } => {}
+            | SessionEvent::ModelsAvailable { .. }
+            | SessionEvent::ProvidersAvailable { .. } => {}
             SessionEvent::ReplayBegin { .. } => pass.push("started".to_string()),
             SessionEvent::ReplayEnd => {
                 pass.push("done".to_string());
@@ -3849,12 +3982,14 @@ async fn the_stream_is_live_from_the_mount_in_arrival_order() {
     let tags: Vec<&str> = frames.iter().map(|f| f.event.tag()).collect();
     assert_eq!(
         tags,
-        // (the model catalog is the v21 unconditional boot emission)
+        // (the model/provider catalogs are the v21/v22 unconditional
+        // boot emissions)
         vec![
             "error",
             "session_opened",
             "sessions_available",
-            "models_available"
+            "models_available",
+            "providers_available"
         ],
         "live from the mount, in arrival order — no buffer, no drop"
     );
@@ -4464,25 +4599,36 @@ id = "l1"
     }
 }
 
-/// The models_available announcements among `frames`, as
-/// (usable ids, missing-key ids).
-fn catalogs(frames: &[EventFrame]) -> Vec<(Vec<String>, Vec<String>)> {
-    frames
+/// The catalog announcements among `frames`: models catalogs as
+/// usable ids, provider catalogs as (id, auth) pairs — the pair is
+/// one re-announcement act, so the two vectors walk in lockstep.
+type CatalogPair = (
+    Vec<Vec<String>>,
+    Vec<Vec<(String, tabit_protocol::ProviderAuth)>>,
+);
+
+fn catalogs(frames: &[EventFrame]) -> CatalogPair {
+    let models = frames
         .iter()
         .filter_map(|frame| match &frame.event {
-            SessionEvent::ModelsAvailable {
-                providers,
-                missing_keys,
-            } => {
+            SessionEvent::ModelsAvailable { providers } => {
                 assert_eq!(frame.stream, None, "backend-level: no stream stamp");
-                Some((
-                    providers.iter().map(|p| p.id.clone()).collect(),
-                    missing_keys.iter().map(|p| p.id.clone()).collect(),
-                ))
+                Some(providers.iter().map(|p| p.id.clone()).collect())
             }
             _ => None,
         })
-        .collect()
+        .collect();
+    let providers = frames
+        .iter()
+        .filter_map(|frame| match &frame.event {
+            SessionEvent::ProvidersAvailable { providers } => {
+                assert_eq!(frame.stream, None, "backend-level: no stream stamp");
+                Some(providers.iter().map(|p| (p.id.clone(), p.auth)).collect())
+            }
+            _ => None,
+        })
+        .collect();
+    (models, providers)
 }
 
 #[tokio::test]
@@ -4509,17 +4655,29 @@ async fn login_stores_the_key_and_re_announces_the_catalog() {
     handle.message(&id, "go");
     let frames = drain(&mut handle).await;
 
-    // The boot's announcement, then the login's re-announcement (the
-    // ack — last-wins fold): `locked` moves from missing_keys into
-    // the usable catalog.
-    let catalogs = catalogs(&frames);
+    // The boot's announcements, then the login's re-announcement (the
+    // ack — one act, both frames, last-wins fold): `locked` joins the
+    // usable catalog, and its provider row flips `none` to `stored`.
+    let (models, providers) = catalogs(&frames);
     assert_eq!(
-        catalogs,
+        models,
         vec![
-            (vec!["local".to_string()], vec!["locked".to_string()]),
-            (vec!["local".to_string(), "locked".to_string()], vec![]),
+            vec!["local".to_string()],
+            vec!["local".to_string(), "locked".to_string()],
         ],
-        "login re-announces with the provider usable and missing_keys shrunk"
+        "login re-announces with the provider usable"
+    );
+    use tabit_protocol::ProviderAuth;
+    let rows = |locked: ProviderAuth| {
+        vec![
+            ("local".to_string(), ProviderAuth::Keyless),
+            ("locked".to_string(), locked),
+        ]
+    };
+    assert_eq!(
+        providers,
+        vec![rows(ProviderAuth::None), rows(ProviderAuth::Stored)],
+        "the login/logout view re-announces in the same act"
     );
     // The key landed in the auth file.
     let auth = tabit_config::AuthConfig::load(&auth_path).expect("the auth file exists");
@@ -4581,17 +4739,19 @@ async fn login_to_an_unknown_provider_errors_auth_and_changes_nothing() {
         .find(|frame| matches!(&frame.event, SessionEvent::Error { kind, .. } if kind == "auth"))
         .expect("the auth error");
     assert_eq!(auth_error.stream, None, "backend-level");
+    let (models, providers) = catalogs(&frames);
     assert_eq!(
-        catalogs(&frames).len(),
+        models.len(),
         1,
         "only the boot's announcement — a failed login does not re-announce"
     );
+    assert_eq!(providers.len(), 1, "the boot's provider catalog only");
     assert!(!auth_path.exists(), "nothing was written");
     std::fs::remove_dir_all(store.dir()).ok();
 }
 
 #[tokio::test]
-async fn logout_drops_the_provider_to_missing_keys_and_is_idempotent() {
+async fn logout_drops_the_provider_to_none_and_is_idempotent() {
     let store = temp_store("endpoint-logout");
     let auth_path = store.dir().join("auth.toml");
     let session = Factory::new(vec![text_turn("hi")])
@@ -4619,15 +4779,33 @@ async fn logout_drops_the_provider_to_missing_keys_and_is_idempotent() {
     });
     let frames = drain(&mut handle).await;
 
+    let (models, providers) = catalogs(&frames);
     assert_eq!(
-        catalogs(&frames),
+        models,
         vec![
-            (vec!["local".to_string()], vec!["locked".to_string()]),
-            (vec!["local".to_string(), "locked".to_string()], vec![]),
-            (vec!["local".to_string()], vec!["locked".to_string()]),
-            (vec!["local".to_string()], vec!["locked".to_string()]),
+            vec!["local".to_string()],
+            vec!["local".to_string(), "locked".to_string()],
+            vec!["local".to_string()],
+            vec!["local".to_string()],
         ],
         "login, then logout, then the idempotent logout — each acked by the catalog"
+    );
+    use tabit_protocol::ProviderAuth;
+    let rows = |locked: ProviderAuth| {
+        vec![
+            ("local".to_string(), ProviderAuth::Keyless),
+            ("locked".to_string(), locked),
+        ]
+    };
+    assert_eq!(
+        providers,
+        vec![
+            rows(ProviderAuth::None),
+            rows(ProviderAuth::Stored),
+            rows(ProviderAuth::None),
+            rows(ProviderAuth::None),
+        ],
+        "the provider row flips with each world refresh"
     );
     assert!(
         !frames.iter().any(
@@ -4745,14 +4923,19 @@ async fn a_login_before_attach_parks_and_serves_at_attach() {
 
     let mut handle = mount.attach(session, Vec::new(), auth_world(&auth_path));
     let frames = drain(&mut handle).await;
-    let catalogs = catalogs(&frames);
+    let (models, providers) = catalogs(&frames);
     assert_eq!(
-        catalogs,
+        models,
         vec![
-            (vec!["local".to_string()], vec!["locked".to_string()]),
-            (vec!["local".to_string(), "locked".to_string()], vec![]),
+            vec!["local".to_string()],
+            vec!["local".to_string(), "locked".to_string()],
         ],
         "the parked login drains at attach: the boot's catalog, then its re-announcement"
+    );
+    assert_eq!(
+        providers.len(),
+        2,
+        "the provider catalog rides the same act"
     );
     let auth = tabit_config::AuthConfig::load(&auth_path).expect("the auth file exists");
     assert_eq!(auth.api_key("locked"), Some("sk-parked"));
@@ -4798,7 +4981,7 @@ async fn a_login_without_a_resolvable_auth_path_errors_auth() {
         errors[0]
     );
     assert_eq!(
-        catalogs(&frames).len(),
+        catalogs(&frames).0.len(),
         1,
         "a failed login does not re-announce"
     );
@@ -4854,13 +5037,19 @@ id = "m"
         provider: "envfront".to_string(),
     });
     let frames = drain(&mut handle).await;
+    let (models, providers) = catalogs(&frames);
     assert_eq!(
-        catalogs(&frames),
-        vec![
-            (vec!["envfront".to_string()], vec![]),
-            (vec!["envfront".to_string()], vec![]),
-        ],
+        models,
+        vec![vec!["envfront".to_string()], vec!["envfront".to_string()],],
         "usable before and after: the env var still supplies the key"
+    );
+    assert_eq!(
+        providers,
+        vec![
+            vec![("envfront".to_string(), tabit_protocol::ProviderAuth::Env)],
+            vec![("envfront".to_string(), tabit_protocol::ProviderAuth::Env)],
+        ],
+        "env survives logout unchanged — the app cannot unset it"
     );
     assert!(
         !frames.iter().any(
@@ -4910,7 +5099,7 @@ async fn login_with_an_empty_key_errors_auth_and_writes_nothing() {
         "the message names the provider"
     );
     assert_eq!(
-        catalogs(&frames).len(),
+        catalogs(&frames).0.len(),
         1,
         "a rejected login does not re-announce"
     );
