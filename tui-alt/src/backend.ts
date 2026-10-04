@@ -131,6 +131,13 @@ export class Backend {
 		this.send({ type: "checkout", session, entry_id: entryId });
 	}
 
+	/** Switch a session's model: a state write at receive — `model_changed`
+	 *  answers at once (or `error { kind: "model" }` when the ref is
+	 *  unknown). No thinking_level: null is always legal (the default). */
+	setModel(session: string, provider: string, model: string): void {
+		this.send({ type: "model", session, provider, model });
+	}
+
 	interactionResponse(session: string, id: string, payload: unknown): void {
 		this.send({ type: "interaction_response", session, id, payload });
 	}

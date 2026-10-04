@@ -35,6 +35,7 @@ import { ToolBlock } from "./components/tool-block.ts";
 import { UserBlock } from "./components/user-block.ts";
 import { TranscriptRegistry } from "./components/transcript-registry.ts";
 import { TreeCardView } from "./components/tree-card.ts";
+import { ModelPickerView } from "./model-picker.ts";
 import { cardViewFor } from "./card-view.ts";
 import { InputController } from "./input-controller.ts";
 import { AtPathCompletionProvider } from "./path-completion.ts";
@@ -60,6 +61,8 @@ export class AltRoot implements ModeView {
 	#input: InputController | undefined;
 	/** The open session-tree card, when the tree owns the dock slot. */
 	#treeCard: TreeCardView | undefined;
+	/** The open model picker, when it owns the dock slot. */
+	#modelPicker: ModelPickerView | undefined;
 
 	constructor() {
 		this.tui = new TuiAltScreen(new ProcessTerminal(), false, undefined, {
@@ -111,6 +114,7 @@ export class AltRoot implements ModeView {
 		);
 		this.editor.onSubmit = (text: string) => mode.submit(text);
 		mode.onTree = () => this.showTree();
+		mode.onModel = () => this.showModelPicker();
 		// The command table exists now — the dropdown can list it before
 		// skills arrive (a skill-less machine still sees the commands).
 		this.#attachProvider();
@@ -119,7 +123,7 @@ export class AltRoot implements ModeView {
 			tui: this.tui,
 			editor: this.editor,
 			isRunning: () => mode.running,
-			isCardOpen: () => mode.hasOpenCard || this.#treeCard !== undefined,
+			isCardOpen: () => mode.hasOpenCard || this.#treeCard !== undefined || this.#modelPicker !== undefined,
 			interrupt: () => mode.interrupt(),
 			onTree: () => this.showTree(),
 			toggleAllCollapsibles: () => {
@@ -262,6 +266,7 @@ export class AltRoot implements ModeView {
 		// reopens with ctrl+t). Without this the gate would keep standing
 		// down after the card closes — the tree field outlived its slot.
 		this.#treeCard = undefined;
+		this.#modelPicker = undefined;
 		this.#cardSlot.clear();
 		this.#cardSlot.addChild(cardViewFor(card, (selected, text) => this.#mode?.answerCard(card.id, selected, text)));
 		this.tui.setFocus(this.#cardSlot.children[0]!);
@@ -307,6 +312,50 @@ export class AltRoot implements ModeView {
 	closeTree(): void {
 		if (this.#treeCard === undefined) return;
 		this.#treeCard = undefined;
+		this.#cardSlot.clear();
+		this.tui.setFocus(this.editor);
+		this.#touch();
+	}
+
+	// --- model picker ---------------------------------------------------------
+
+	/** Open the `/model` picker over the announced catalog (v21). A pending
+	 *  interaction card keeps the slot — it owns the run; an empty catalog
+	 *  is the setup state, noted instead of opened on. */
+	showModelPicker(): void {
+		const mode = this.#mode;
+		if (mode === undefined) return;
+		if (mode.hasOpenCard) {
+			this.addNote("answer the open question first — the picker can wait", "warn");
+			return;
+		}
+		if (this.#modelPicker !== undefined) return;
+		if (mode.modelsCatalog.length === 0) {
+			this.addNote("no usable models at this backend — configure providers or log in first", "warn");
+			return;
+		}
+		this.#treeCard = undefined;
+		this.#modelPicker = new ModelPickerView(
+			mode.modelsCatalog,
+			mode.currentSelection,
+			{
+				onSelect: (provider, model) => {
+					this.closeModelPicker();
+					mode.switchModel(provider, model);
+				},
+				onClose: () => this.closeModelPicker(),
+			},
+			() => this.#touch(),
+		);
+		this.#cardSlot.clear();
+		this.#cardSlot.addChild(this.#modelPicker);
+		this.tui.setFocus(this.#modelPicker);
+		this.#touch();
+	}
+
+	closeModelPicker(): void {
+		if (this.#modelPicker === undefined) return;
+		this.#modelPicker = undefined;
 		this.#cardSlot.clear();
 		this.tui.setFocus(this.editor);
 		this.#touch();

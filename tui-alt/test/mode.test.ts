@@ -17,7 +17,18 @@ const SESSION = "0199aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const CHILD = "0199bbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
 class FakeBackend implements BackendLink {
-	readonly sent: Array<{ kind: string; session?: string; id?: string; payload?: unknown; text?: string; directives?: string; entryId?: string }> = [];
+	readonly sent: Array<{
+		kind: string;
+		session?: string;
+		id?: string;
+		payload?: unknown;
+		text?: string;
+		directives?: string;
+		entryId?: string;
+		provider?: string;
+		model?: string;
+		apiKey?: string;
+	}> = [];
 	message(session: string, text: string): void {
 		this.sent.push({ kind: "message", session, text });
 	}
@@ -33,14 +44,17 @@ class FakeBackend implements BackendLink {
 	checkout(session: string, entryId: string): void {
 		this.sent.push({ kind: "checkout", session, entryId });
 	}
+	setModel(session: string, provider: string, model: string): void {
+		this.sent.push({ kind: "model", session, provider, model });
+	}
 	interactionResponse(session: string, id: string, payload: unknown): void {
 		this.sent.push({ kind: "interaction_response", session, id, payload });
 	}
 	login(provider: string, apiKey: string): void {
-		this.sent.push({ kind: "login", text: apiKey, id: provider });
+		this.sent.push({ kind: "login", provider, apiKey });
 	}
 	logout(provider: string): void {
-		this.sent.push({ kind: "logout", id: provider });
+		this.sent.push({ kind: "logout", provider });
 	}
 }
 
@@ -354,13 +368,13 @@ describe("InteractiveMode", () => {
 		boot(control, feed);
 		// Static commands first, none display-only — each carries its behavior.
 		const before = mode.slashCommands();
-		assert.deepStrictEqual(before.map(c => c.name), ["compact", "help", "tree", "exit", "quit"]);
+		assert.deepStrictEqual(before.map(c => c.name), ["compact", "help", "model", "tree", "exit", "quit"]);
 		assert.strictEqual(before.some(c => c.displayOnly), false);
 
 		// Skills join the same table as display-only entries.
 		feed({ type: "skills_available", skills: [{ name: "my-skill", description: "d", location: "l", level: "user" }] });
 		const after = mode.slashCommands();
-		assert.strictEqual((after).length, 6);
+		assert.strictEqual((after).length, 7);
 		assert.partialDeepStrictEqual(after.find(c => c.name === "my-skill"), { displayOnly: true });
 	});
 
@@ -403,6 +417,24 @@ describe("InteractiveMode", () => {
 		feed({ type: "interaction_request", id: "ask2", ui_type: "native:select_one", payload: { title: "t", body: "b", options: [{ label: "A" }] } });
 		feed({ type: "run_finished", output: "", durable: true, started_at_ms: 1, completed_at_ms: 2 });
 		assert.strictEqual(view.closed.some(c => c.id === "ask2" && c.note === "run finished"), true);
+	});
+
+	test("the model picker dispatch: /model routes to the root, select sends the command", () => {
+		const { backend, mode, feed, control } = harness();
+		boot(control, feed);
+		let opened = 0;
+		mode.onModel = () => opened++;
+		mode.submit("/model");
+		assert.strictEqual(opened, 1);
+		assert.strictEqual(backend.sent.length, 0); // opening is local
+
+		// The register tracks session_opened / model_changed for the ✓.
+		assert.deepStrictEqual(mode.currentSelection, { provider: "p", model: "m1" });
+		feed({ type: "model_changed", provider: "q", model: "m2", thinking_level: null });
+		assert.deepStrictEqual(mode.currentSelection, { provider: "q", model: "m2" });
+
+		mode.switchModel("anthropic", "claude-opus");
+		assert.deepStrictEqual(backend.sent, [{ kind: "model", session: SESSION, provider: "anthropic", model: "claude-opus" }]);
 	});
 
 	test("interaction_settled closes the card (v17); already-answered and unknown ids are no-ops", () => {

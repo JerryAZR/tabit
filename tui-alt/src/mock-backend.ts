@@ -570,6 +570,27 @@ stdin.on("line", line => {
 			}
 			return;
 		}
+		case "model": {
+			// v21 picker path: existence-only validation against the usable
+			// catalog; a known ref announces model_changed at once.
+			const provider = String(frame.provider);
+			const modelId = String(frame.model);
+			const row = world.usable.find(p => p.id === provider)?.models.find(m => m.id === modelId);
+			if (row === undefined) {
+				emitEvent(String(frame.session), { type: "error", kind: "model", message: `unknown model: ${provider}/${modelId}` });
+				return;
+			}
+			emitEvent(String(frame.session), {
+				type: "model_changed",
+				provider,
+				model: modelId,
+				thinking_level: null,
+				context_window: row.context_window,
+				name: row.name,
+				cost: row.cost,
+			});
+			return;
+		}
 		case "login": {
 			// v21: validate against config, then fold + re-announce (the ack).
 			const provider = String(frame.provider);

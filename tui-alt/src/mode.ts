@@ -139,6 +139,9 @@ export interface BackendLink {
 	 *  an off-chain target is a branch switch). The backend composes abort;
 	 *  the outcome is `checked_out` + a full replay pass. */
 	checkout(session: string, entryId: string): void;
+	/** Switch the session's model (the `/model` picker's select).
+	 *  `model_changed` lands the resolved facts. */
+	setModel(session: string, provider: string, model: string): void;
 	interactionResponse(session: string, id: string, payload: unknown): void;
 	/** Store a provider key (v21) — the re-announced catalog is the ack. */
 	login(provider: string, apiKey: string): void;
@@ -162,6 +165,7 @@ export class InteractiveMode {
 	#session: string | undefined;
 	#running = false;
 	#replaying = false;
+	#provider: string | undefined;
 	#model: string | undefined;
 	#modelName: string | undefined;
 	#contextWindow: number | undefined;
@@ -197,6 +201,8 @@ export class InteractiveMode {
 	onFatal: ((reason: string) => void) | undefined;
 	/** Set by the entry: the graceful shutdown path (`/exit`, `/quit`). */
 	onQuit: (() => void) | undefined;
+	/** Set by the root: opens the model picker (`/model`). */
+	onModel: (() => void) | undefined;
 	/** Set by the root: opens the session-tree card (`/tree`; the ctrl+t
 	 *  action routes through the root too). */
 	onTree: (() => void) | undefined;
@@ -229,6 +235,13 @@ export class InteractiveMode {
 	/** Providers configured but missing keys, latest announcement (v21). */
 	get missingKeyProviders(): readonly MissingKeyProvider[] {
 		return this.#missingKeys;
+	}
+
+	/** The session's register (provider + model ids), for the picker's
+	 *  current marker. Undefined when the session has no selection (v21's
+	 *  zero-config boot). */
+	get currentSelection(): { provider: string; model: string } | undefined {
+		return this.#provider === undefined || this.#model === undefined ? undefined : { provider: this.#provider, model: this.#model };
 	}
 
 	/** The session tree — read-only for the view; the mode feeds it. */
@@ -287,6 +300,7 @@ export class InteractiveMode {
 				},
 			},
 			{ name: "help", description: "list keys and commands", run: () => this.#showHelp() },
+			{ name: "model", description: "switch the model", run: () => this.onModel?.() },
 			{ name: "tree", description: "browse the session tree, rewind to an entry", run: () => this.onTree?.() },
 			{ name: "exit", description: "quit the TUI (shuts the backend down)", run: () => this.onQuit?.() },
 			{ name: "quit", description: "quit the TUI (shuts the backend down)", run: () => this.onQuit?.() },
@@ -300,6 +314,12 @@ export class InteractiveMode {
 		for (const fact of this.#keybindings) {
 			this.#view.addNote(`keys ·  ${fact.description}: ${fact.keys.join(" / ")}`, "info");
 		}
+	}
+
+	/** The picker's select: fire the `model` command at the active session
+	 *  (a state write at receive; `model_changed` answers). */
+	switchModel(provider: string, model: string): void {
+		if (this.#session) this.#backend.setModel(this.#session, provider, model);
 	}
 
 	interrupt(): void {
@@ -593,6 +613,7 @@ export class InteractiveMode {
 			this.#session = event.id;
 			// v21: null = no selection (the zero-config boot) — footer facts
 			// stay undefined until the first model command lands one.
+			this.#provider = event.model?.provider;
 			this.#model = event.model?.model;
 			// Empty path = ephemeral session (nothing on disk to open).
 			this.#path = event.path === "" ? undefined : event.path;
@@ -622,6 +643,7 @@ export class InteractiveMode {
 			if (!this.#running) this.#view.setStatus("idle");
 		},
 		model_changed: event => {
+			this.#provider = event.provider;
 			this.#model = event.model;
 			this.#modelName = event.name;
 			this.#contextWindow = event.context_window;
