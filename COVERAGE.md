@@ -786,7 +786,15 @@ the json startup-failure pair — a broken `TABIT_CONFIG` carries
 the first-run guide (report line first, the error event, the
 stderr echo, exit 1) while an unreadable `--session` carries the
 plain `could not start the session` reason and NOT the guide —
-the other standing deferral, closed.
+the other standing deferral, closed. The first-run ruling
+reversal's shapes ride the same e2e (2026-10): the zero-config
+JSON boot (null `session_opened.model`, empty `models_available`,
+the teaching note, the run-open `run_failed { kind: "model" }`,
+exit 0 on stdin close), the explicit `--model` pair (a
+known-but-unusable ref boots and fails at run open; an unknown
+ref still rejects startup), the set-but-missing `$TABIT_CONFIG`
+stay-loud pin, and print mode's no-selection run failure
+(stderr teaching, exit 1).
 
 **Justified (standing classes, renumbered to the split):** main.rs
 0% attributed — `run`/`main`/the failure reporters execute only in

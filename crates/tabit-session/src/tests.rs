@@ -31,7 +31,23 @@ pub(crate) fn plain_data() -> crate::SessionHostData {
         create: std::sync::Arc::new(|| Err("new_session is not driven".to_string())),
         open: std::sync::Arc::new(|_| Err("open_session is not driven".to_string())),
         extensions: Default::default(),
+        world: plain_world(),
+        auth_path: None,
     }
+}
+
+/// The test world cell: an EMPTY config behind the registry — the
+/// empty catalog the boot announcement folds (the previous frozen
+/// `models: Vec::new()`, now folded live from the cell). Tests that
+/// care about catalog content build their own registry.
+pub(crate) fn plain_world() -> crate::registry::CurrentWorld {
+    crate::registry::current_world(crate::ModelRegistry::new(
+        std::sync::Arc::new(
+            tabit_config::TabitConfig::from_toml_str("", Path::new("providers.toml"))
+                .expect("empty config"),
+        ),
+        std::sync::Arc::new(tabit_config::AuthConfig::default()),
+    ))
 }
 
 pub(crate) fn temp_store(tag: &str) -> SessionStore {
@@ -143,6 +159,11 @@ api_key = "dummy"
     )
 }
 
+/// The empty auth — nothing keyed (the pre-login world).
+pub(crate) fn test_auth_empty() -> Arc<tabit_config::AuthConfig> {
+    Arc::new(tabit_config::AuthConfig::default())
+}
+
 /// Stream-scripted turn: text chunks then the terminal record.
 pub(crate) fn text_turn(text: &str) -> Vec<MockStreamEvent> {
     vec![
@@ -233,7 +254,7 @@ impl Factory {
         config: Arc<TabitConfig>,
         selection: ModelSelection,
     ) -> SessionBuilder {
-        SessionBuilder::new(store, config, test_auth(), selection)
+        SessionBuilder::new(store, config, test_auth(), Some(selection))
             .expect("builder")
             .model_factory(std::sync::Arc::new(move |provider, model, _cache_key| {
                 if let Ok(mut guard) = self.requested.lock() {
@@ -970,7 +991,7 @@ async fn set_model_records_the_change_and_splits_stats() -> Result<(), SessionEr
         .expect("switch");
     session.prompt("two").await;
 
-    assert_eq!(session.selection().provider, "q");
+    assert_eq!(session.selection().expect("selected").provider, "q");
 
     let changes = load_records(file_path(&session))
         .into_iter()
@@ -997,8 +1018,9 @@ async fn set_model_records_the_change_and_splits_stats() -> Result<(), SessionEr
     assert!((stats.total_cost - 0.00035).abs() < 1e-12);
     assert_eq!(stats.total_usage.input_tokens, 200);
 
-    // The cache ledger: the opening build, then one derivation for the
-    // switch at its first run open — nothing per run.
+    // The cache ledger: the first run open's build, then one
+    // derivation for the switch at its first run open — nothing per
+    // run.
     assert_eq!(
         factory.built_for(),
         vec![
@@ -1019,7 +1041,7 @@ async fn the_session_threads_its_id_as_the_factory_cache_key() -> Result<(), Ses
         store.clone(),
         test_config(),
         test_auth(),
-        ModelSelection::new("p", "m"),
+        Some(ModelSelection::new("p", "m")),
     )
     .expect("builder")
     .model_factory(Arc::new(move |_provider, _model, cache_key| {
@@ -1056,10 +1078,10 @@ async fn the_agent_builds_once_per_selection() -> Result<(), SessionError> {
         text_turn("d"),
     ]);
     let mut session = factory.clone().into_builder(store.clone()).create("C:/w")?;
-    assert_eq!(
-        factory.built_for(),
-        vec![("p".to_string(), "m".to_string())],
-        "assembly derives the opening agent"
+    assert!(
+        factory.built_for().is_empty(),
+        "the agent cache is lazy: assembly builds nothing (the \
+         zero-config boot has no selection to build)"
     );
 
     session.prompt("one").await;
@@ -1067,7 +1089,7 @@ async fn the_agent_builds_once_per_selection() -> Result<(), SessionError> {
     assert_eq!(
         factory.built_for(),
         vec![("p".to_string(), "m".to_string())],
-        "runs reuse the standing agent"
+        "the first run open derives the agent; later runs reuse it"
     );
 
     session
@@ -1115,7 +1137,7 @@ async fn a_selection_that_cannot_construct_fails_the_run_at_open() -> Result<(),
         store.clone(),
         test_config(),
         test_auth(),
-        ModelSelection::new("p", "m"),
+        Some(ModelSelection::new("p", "m")),
     )
     .expect("builder")
     .model_factory(Arc::new(move |provider, model, _cache_key| {
@@ -1199,7 +1221,7 @@ async fn resume_uses_the_builder_selection_and_records_the_switch() -> Result<()
         store.clone(),
         test_config(),
         test_auth(),
-        ModelSelection::new("p", "m"),
+        Some(ModelSelection::new("p", "m")),
     )
     .expect("builder")
     .model_factory(std::sync::Arc::new(move |provider, model, _cache_key| {
@@ -1219,7 +1241,13 @@ async fn resume_uses_the_builder_selection_and_records_the_switch() -> Result<()
     );
     // ...but the builder's selection (the caller's explicit choice, or
     // the registry-resolved default) is what continues.
-    assert_eq!(session.selection().provider, "p");
+    assert_eq!(session.selection().expect("selected").provider, "p");
+    // The derivation is lazy (run open, never assembly): nothing has
+    // built yet; the first run over the resumed session builds p/m.
+    let mut session = session;
+    assert!(requested.lock().expect("sink").is_empty());
+    let run = session.prompt("go").await;
+    assert_eq!(run.output, "b");
     assert_eq!(
         requested.lock().expect("sink").as_slice(),
         [("p".to_string(), "m".to_string())]
@@ -1246,7 +1274,7 @@ async fn selection_errors_are_loud_at_builder_time() -> Result<(), SessionError>
         store.clone(),
         test_config(),
         test_auth(),
-        ModelSelection::new("missing", "model"),
+        Some(ModelSelection::new("missing", "model")),
     );
     match result {
         Err(SessionError::Config { message }) => {
@@ -1409,9 +1437,16 @@ async fn thinking_level_changes_are_validated_and_recorded() -> Result<(), Sessi
     session
         .set_thinking_level(Some("high"))
         .expect("defined level switches");
-    assert_eq!(session.selection().thinking_level.as_deref(), Some("high"));
+    assert_eq!(
+        session
+            .selection()
+            .expect("selected")
+            .thinking_level
+            .as_deref(),
+        Some("high")
+    );
     session.set_thinking_level(None).expect("clearing works");
-    assert_eq!(session.selection().thinking_level, None);
+    assert_eq!(session.selection().expect("selected").thinking_level, None);
     match session.set_thinking_level(Some("maximum")) {
         Err(SessionError::Config { message }) => {
             assert!(message.contains("`maximum`"), "{message}")
@@ -1977,7 +2012,7 @@ async fn a_rewind_never_moves_the_model_register() -> Result<(), SessionError> {
     session
         .set_model(ModelSelection::new("q", "m2"))
         .expect("switch");
-    assert_eq!(session.selection().model, "m2");
+    assert_eq!(session.selection().expect("selected").model, "m2");
 
     // The register is a session preference (owner ruling 2026-08): the
     // rewind moves the chain — dropping the switch's entry with the
@@ -1985,7 +2020,7 @@ async fn a_rewind_never_moves_the_model_register() -> Result<(), SessionError> {
     // entry: the file's last model_change (now on the abandoned side of
     // the branch) is still the register.
     session.rewind(1).expect("rewind");
-    assert_eq!(session.selection().model, "m2");
+    assert_eq!(session.selection().expect("selected").model, "m2");
     assert_eq!(
         factory.built_for(),
         vec![("p".to_string(), "m".to_string())],
@@ -1995,7 +2030,7 @@ async fn a_rewind_never_moves_the_model_register() -> Result<(), SessionError> {
     // Model changes are side records now: the register never rode the
     // branch. The ruling still holds — the checkout moved the branch,
     // not the register.
-    assert_eq!(session.selection().model, "m2");
+    assert_eq!(session.selection().expect("selected").model, "m2");
     // And the register is what resume READS: the report's resumed_model
     // is the file's last model_change — the switch the rewind dropped
     // from the chain — while the builder's explicit selection (the
@@ -2013,7 +2048,7 @@ async fn a_rewind_never_moves_the_model_register() -> Result<(), SessionError> {
         ("q", "m2"),
         "resume consulted the file's last model_change, not the rewound chain's"
     );
-    assert_eq!(session.selection().model, "m");
+    assert_eq!(session.selection().expect("selected").model, "m");
     let parsed = store.open_path(&path).expect("reload");
     let last = parsed.register.expect("recorded");
     assert_eq!(
@@ -2304,7 +2339,7 @@ async fn rewind_to_the_root_leaves_the_register_untouched() -> Result<(), Sessio
     let rewind = session.rewind(1).expect("rewind");
     assert_eq!(rewind.to_entry, "");
     assert!(session.context().is_empty());
-    assert_eq!(session.selection().model, "m");
+    assert_eq!(session.selection().expect("selected").model, "m");
     let records = load_records(&path);
     assert!(
         matches!(
@@ -2380,7 +2415,7 @@ async fn a_ghost_model_in_history_does_not_block_a_rewind() -> Result<(), Sessio
         .expect("resume");
 
     session.rewind(1).expect("the ghost is inert history");
-    assert_eq!(session.selection().model, "m");
+    assert_eq!(session.selection().expect("selected").model, "m");
     assert!(session.context().is_empty());
     session.prompt("still here").await;
     assert_eq!(user_messages(&session.context()), vec!["still here"]);
@@ -2794,4 +2829,206 @@ fn discriminant(event: &SessionEvent) -> &'static str {
         SessionEvent::RunFinished { .. } => "run_finished",
         _ => "other",
     }
+}
+
+#[tokio::test]
+async fn a_never_selected_session_records_no_model_change_and_resumes_selection_less()
+-> Result<(), SessionError> {
+    // The zero-config boot's durability shape: a selection-less
+    // session writes no `model_change` record (the create-time
+    // prequeue is selection-gated), so its resume re-derives None
+    // from the file alone.
+    let store = temp_store("never-selected");
+    let mut session =
+        SessionBuilder::new(store.clone(), test_config(), test_auth(), None)?.create("C:/w")?;
+    assert_eq!(session.selection(), None, "selection-less from birth");
+    // A message commits even though its run cannot open (the failed
+    // open acknowledges the batch), so the file materializes with no
+    // register record.
+    let run = session.prompt("hi").await;
+    assert!(matches!(run.outcome, RunOutcome::Failed));
+    assert!(
+        run.events.iter().any(|event| matches!(
+            event,
+            SessionEvent::RunFailed { kind, message, .. }
+                if kind == tabit_protocol::RunFailedKind::MODEL
+                    && message.contains("no model selected")
+        )),
+        "the run-open failure is the carrier: {:?}",
+        run.events
+    );
+    let path = file_path(&session).to_path_buf();
+    drop(session);
+
+    let parsed = store.open_path(&path).expect("parse");
+    assert_eq!(parsed.register, None, "no model_change was ever written");
+
+    // Resume re-derives None cleanly and writes nothing back.
+    let (session, report) = SessionBuilder::new(store.clone(), test_config(), test_auth(), None)?
+        .resume(&path, "C:/w")?;
+    assert_eq!(report.resumed_model, None, "the log never selected");
+    assert_eq!(session.selection(), None, "still selection-less");
+    drop(session);
+    let parsed = store.open_path(&path).expect("reload");
+    assert_eq!(parsed.register, None, "resume wrote no register either");
+    std::fs::remove_dir_all(store.dir()).ok();
+    Ok(())
+}
+
+// --- the world refresh (login/logout's session half) ---
+
+/// One keyed provider on a dead local port (not keyless): buildable
+/// only once auth carries a key — and then the request fails fast at
+/// connect (`run_failed { kind: "provider" }`), which is how these
+/// tests see "the build resolved the new key" without any network
+/// service.
+fn locked_provider_config() -> Arc<TabitConfig> {
+    Arc::new(
+        tabit_config::TabitConfig::from_toml_str(
+            r#"
+[providers.p]
+base_url = "http://127.0.0.1:9/v1"
+api = "openai-completions"
+
+[[providers.p.models]]
+id = "m"
+"#,
+            Path::new("providers.toml"),
+        )
+        .expect("config"),
+    )
+}
+
+#[tokio::test]
+async fn a_world_refresh_swaps_the_world_factory_and_rebuilds_at_open() {
+    // The login/logout semantics at the session's own level (the
+    // endpoint tests use scripted factories, which refresh skips —
+    // this one rides a REAL registry factory, `world_factory`
+    // provenance): pre-login the run open fails `kind: "model"` (no
+    // key); the refresh swaps the factory to the keyed registry's and
+    // clears the agent cache, so the next open builds with the new
+    // key (the request is attempted — `kind: "provider"` at the dead
+    // port); a logout-shaped refresh (keyless auth again) returns the
+    // open failure to `kind: "model"`.
+    let store = temp_store("world-refresh");
+    let config = locked_provider_config();
+    let registry = crate::ModelRegistry::new(config.clone(), test_auth_empty());
+    let mut session = SessionBuilder::new(
+        store.clone(),
+        config.clone(),
+        test_auth_empty(),
+        Some(ModelSelection::new("p", "m")),
+    )
+    .expect("builder")
+    .world_factory(registry.factory())
+    .create("C:/w")
+    .expect("session");
+
+    let failed_kinds = |summary: &crate::session::RunSummary| -> Vec<String> {
+        summary
+            .events
+            .iter()
+            .filter_map(|event| match event {
+                SessionEvent::RunFailed { kind, .. } => Some(kind.clone()),
+                _ => None,
+            })
+            .collect()
+    };
+
+    let run = session.prompt("hi").await;
+    assert_eq!(
+        failed_kinds(&run),
+        vec![tabit_protocol::RunFailedKind::MODEL.to_string()],
+        "no key: the run never opens"
+    );
+
+    // Login's world swap: same config, the keyed auth's registry.
+    let keyed = crate::ModelRegistry::new(
+        config.clone(),
+        Arc::new(
+            tabit_config::AuthConfig::from_toml_str(
+                "[providers.p]\napi_key = \"sk-test\"\n",
+                Path::new("auth.toml"),
+            )
+            .expect("auth"),
+        ),
+    );
+    session.refresh_world(config.clone(), keyed.factory());
+    let run = session.prompt("again").await;
+    assert_eq!(
+        failed_kinds(&run),
+        vec![tabit_protocol::RunFailedKind::PROVIDER.to_string()],
+        "the build resolved the new key; the dead port fails the request instead"
+    );
+
+    // Logout's world swap: back to keyless auth.
+    let unkeyed = crate::ModelRegistry::new(config.clone(), test_auth_empty());
+    session.refresh_world(config.clone(), unkeyed.factory());
+    let run = session.prompt("third").await;
+    assert_eq!(
+        failed_kinds(&run),
+        vec![tabit_protocol::RunFailedKind::MODEL.to_string()],
+        "the key is gone; the run open fails again"
+    );
+    std::fs::remove_dir_all(store.dir()).ok();
+}
+
+#[tokio::test]
+async fn a_custom_factory_survives_the_world_refresh() {
+    // Provenance: `model_factory()` is the caller's own — a refresh
+    // swaps the session's config but never this factory. The agent
+    // cache still clears: the next open REBUILDS, through the
+    // surviving factory.
+    let store = temp_store("world-refresh-custom");
+    let factory = Factory::new(vec![text_turn("first"), text_turn("second")]);
+    let mut session = factory
+        .clone()
+        .into_builder(store.clone())
+        .create("C:/w")
+        .expect("session");
+    session.prompt("one").await;
+    assert_eq!(factory.built_for().len(), 1, "the first run's open built");
+
+    // A refresh carrying a DIFFERENT config and a real registry
+    // factory: the config swap is live at the receive-time probe
+    // (`p`/`q` gone, `z` in), the scripted factory still serves.
+    let other_config = Arc::new(
+        tabit_config::TabitConfig::from_toml_str(
+            r#"
+[providers.z]
+base_url = "http://127.0.0.1:1234/v1"
+api = "openai-completions"
+keyless = true
+
+[[providers.z.models]]
+id = "z1"
+"#,
+            Path::new("providers.toml"),
+        )
+        .expect("config"),
+    );
+    let registry = crate::ModelRegistry::new(other_config.clone(), test_auth_empty());
+    session.refresh_world(other_config, registry.factory());
+
+    let probe = session.model_probe();
+    assert!(
+        probe(&ModelSelection::new("z", "z1")).is_ok(),
+        "the probe reads the swapped-in config"
+    );
+    assert!(
+        probe(&ModelSelection::new("p", "m")).is_err(),
+        "the old config no longer validates"
+    );
+
+    let run = session.prompt("two").await;
+    // The rebuilt agent serves a FRESH instance of the factory's
+    // script (the factory's per-build mocks restart their turns), so
+    // the answer repeats — the rebuild, not the text, is the signal.
+    assert_eq!(run.output, "first", "the custom factory still serves");
+    assert_eq!(
+        factory.built_for().len(),
+        2,
+        "the refresh cleared the cache; the open rebuilt through the surviving factory"
+    );
+    std::fs::remove_dir_all(store.dir()).ok();
 }

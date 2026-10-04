@@ -82,8 +82,10 @@ pub struct SessionInfo {
     pub session_path: String,
     /// The session's working directory.
     pub session_cwd: String,
-    /// The active model selection.
-    pub model: ModelSelection,
+    /// The active model selection — `None` when the session is
+    /// selection-less (the zero-config boot; the first `model`
+    /// command lands one).
+    pub model: Option<ModelSelection>,
     /// Whether the session continues an existing chain (or started
     /// fresh — see [`Session::resumed`]).
     pub resumed: bool,
@@ -128,8 +130,9 @@ pub struct SessionHostWiring {
 
 /// The host's DATA — the parts that only exist once the boot's
 /// gathering is done (the extension handshakes resolved, the tools
-/// mounted): the two session builders and the startup catalogs.
-/// Arrives with the boot session at [`SessionHostMount::attach`].
+/// mounted): the two session builders, the startup catalogs, and the
+/// world the login/logout handler refreshes. Arrives with the boot
+/// session at [`SessionHostMount::attach`].
 #[derive(Clone)]
 pub struct SessionHostData {
     /// Build a fresh session (`new_session`).
@@ -141,6 +144,18 @@ pub struct SessionHostData {
     /// the binary's boot-time assembly verdict: provenance, standing,
     /// and the load-time conflict reports.
     pub extensions: tabit_protocol::ExtensionsCatalog,
+    /// The current-world cell (v21's login/logout): the model
+    /// registry the create/open closures read AT CALL TIME and the
+    /// login/logout handler swaps whole. The boot's model catalog
+    /// folds from it at attach (unconditionally — absence of the
+    /// frame means "protocol older than v21", never "no models");
+    /// login/logout re-fold and re-announce.
+    pub world: crate::registry::CurrentWorld,
+    /// The auth file `login`/`logout` write surgically
+    /// (`tabit_config::auth_default_path` — `$TABIT_AUTH`, else
+    /// `~/.tabit/auth.toml`). `None` when neither resolves: a login
+    /// then fails gracefully with `error { kind: "auth" }`.
+    pub auth_path: Option<std::path::PathBuf>,
 }
 
 /// One session's delivery surface — the module's handler at the
@@ -185,6 +200,12 @@ struct Worker {
     /// checkout probe's sibling): an unusable ref is an
     /// `error { kind: model }` at the command, even mid-run.
     model_probe: crate::session::ModelProbe,
+    /// The session's world cell — the login/logout refresh's entry
+    /// point: a state write at receive (the model register's
+    /// pattern), never parked intent. The worker task owns the
+    /// session; the world is shared precisely so this write can land
+    /// off-task.
+    world: crate::session::SharedWorld,
     /// A parked replay request (idempotent read — one flag collapses
     /// any number of requests; the beat serves it before batching).
     replay_due: Arc<std::sync::atomic::AtomicBool>,
@@ -317,6 +338,9 @@ impl Worker {
             SessionCommand::NewSession | SessionCommand::OpenSession { .. } => {
                 unreachable!("lifecycle commands are routed to the lifecycle handler")
             }
+            SessionCommand::Login { .. } | SessionCommand::Logout { .. } => {
+                unreachable!("auth commands are session-less — routed by type")
+            }
         }
     }
 
@@ -330,6 +354,20 @@ impl Worker {
         self.replay_due
             .store(true, std::sync::atomic::Ordering::Release);
         self.mailbox.work_signal().notify_one();
+    }
+
+    /// The login/logout world refresh at this worker (the host's
+    /// walk): swap the session's config, swap its factory unless the
+    /// session's own (custom provenance survives), clear the derived
+    /// agent cache — a state write at receive, so a run in flight
+    /// keeps its bound agent and the next run open builds against the
+    /// new world.
+    fn refresh_world(
+        &self,
+        config: Arc<tabit_config::TabitConfig>,
+        factory: crate::session::ModelFactory,
+    ) {
+        lock(&self.world).refresh(config, factory);
     }
 }
 
@@ -534,6 +572,12 @@ impl SessionHost {
             joins: joins.clone(),
             stats: closing_stats.clone(),
             worker_shutdown: worker_shutdown.clone(),
+            // The auth file is the one shared mutable resource behind
+            // this door, and handlers run synchronously on the
+            // CALLER's task (an extension, the attach drain) — so the
+            // login/logout read-modify-write serializes here, never
+            // losing a key to a racing pair.
+            auth_write: Mutex::new(()),
             door: Mutex::new(DoorState {
                 armed: None,
                 parked: Vec::new(),
@@ -558,6 +602,20 @@ impl SessionHost {
                     }
                 },
             );
+            // The auth commands (v21, amended): session-less, by-type
+            // like the lifecycle pair — the world refresh's door.
+            let login = door.clone();
+            node.handle(command_tags::LOGIN, move |command: &SessionCommand| {
+                if let SessionCommand::Login { provider, api_key } = command {
+                    login.login(provider, api_key);
+                }
+            });
+            let logout = door.clone();
+            node.handle(command_tags::LOGOUT, move |command: &SessionCommand| {
+                if let SessionCommand::Logout { provider } = command {
+                    logout.logout(provider);
+                }
+            });
         }
 
         // The wind-down task: once the shutdown token is pulled, await
@@ -740,6 +798,16 @@ impl SessionHostMount {
                 },
             );
         }
+        // The model catalog closes the startup announcements (v21),
+        // backend-level like the others (one process, one model
+        // registry) but UNCONDITIONAL: unlike skills and extensions
+        // it emits even when empty — absence of the frame means
+        // "protocol older than v21", never "no models", and an empty
+        // `providers` is the legal no-usable-models state a frontend
+        // should surface as a setup warning (FRONTEND.md §6). Folded
+        // from the current-world cell at attach — the same fold
+        // login/logout re-run for their re-announcement.
+        announce_catalog(&sink, &lock(&data.world).registry());
 
         // A resumed boot replays automatically (owner ruling
         // 2026-09-25): the resident chain re-emits right after the
@@ -919,11 +987,13 @@ impl SessionHost {
 /// live from the MOUNT — the prepared-supervisor law: any node may
 /// speak from its handshake onward, so the command surface exists
 /// before the first child boots). `new_session` builds through the
-/// data, `open_session` loads or re-replays, and every spawned
-/// worker's channel is registered into the learning table by its own
-/// announcement (the emit teaches). The builders are the boot's DATA
-/// — they arrive at attach; an arrival before that parks, and is
-/// served in arrival order once armed.
+/// data, `open_session` loads or re-replays, and the session-less
+/// auth pair (`login`/`logout`) writes auth.toml and refreshes the
+/// world; every spawned worker's channel is registered into the
+/// learning table by its own announcement (the emit teaches). The
+/// data — the builders, the world cell, the auth path — arrives at
+/// attach; an arrival before that parks, and is served in arrival
+/// order once armed.
 struct Lifecycle {
     node: Arc<Node>,
     sink: HostSink,
@@ -931,6 +1001,13 @@ struct Lifecycle {
     joins: Arc<Mutex<Vec<JoinHandle<()>>>>,
     stats: Arc<Mutex<HashMap<String, SessionStats>>>,
     worker_shutdown: CancellationToken,
+    /// Serializes the login/logout serves (the auth file's
+    /// read-modify-write) across whichever tasks the handlers run on.
+    /// PROCESS-LOCAL: two backends sharing one auth file can still
+    /// lost-update across processes — the surgical write's atomicity
+    /// prevents a torn file, never the loss of a racing process's
+    /// key.
+    auth_write: Mutex<()>,
     /// The door's one state: the armed builders (once the boot's
     /// gathering is done) and the commands that arrived before them,
     /// under ONE lock — the park decision and the arm-and-take are
@@ -951,12 +1028,27 @@ struct DoorState {
 struct LifecycleCore {
     create: SessionSource,
     open: OpenSessionSource,
+    /// The current-world cell (the login/logout refresh swaps it;
+    /// the builders read it at call time).
+    world: crate::registry::CurrentWorld,
+    /// The auth file `login`/`logout` write (`None`: no path
+    /// resolves — the command fails gracefully, `kind: "auth"`).
+    auth_path: Option<std::path::PathBuf>,
 }
 
-/// One lifecycle command that arrived before the data did.
+/// One by-type command that arrived before the data did.
 enum ParkedLifecycle {
     NewSession,
-    OpenSession { id: String },
+    OpenSession {
+        id: String,
+    },
+    Login {
+        provider: String,
+        api_key: tabit_protocol::ApiKey,
+    },
+    Logout {
+        provider: String,
+    },
 }
 
 impl Lifecycle {
@@ -972,6 +1064,8 @@ impl Lifecycle {
             door.armed = Some(LifecycleCore {
                 create: data.create,
                 open: data.open,
+                world: data.world,
+                auth_path: data.auth_path,
             });
             std::mem::take(&mut door.parked)
         };
@@ -994,8 +1088,145 @@ impl Lifecycle {
             match parked {
                 ParkedLifecycle::NewSession => self.serve_new_session(core),
                 ParkedLifecycle::OpenSession { id } => self.serve_open_session(core, &id),
+                ParkedLifecycle::Login { provider, api_key } => {
+                    self.serve_login(&core, &provider, &api_key);
+                }
+                ParkedLifecycle::Logout { provider } => self.serve_logout(&core, &provider),
             }
         }
+    }
+
+    fn login(&self, provider: &str, api_key: &tabit_protocol::ApiKey) {
+        let parked = ParkedLifecycle::Login {
+            provider: provider.to_string(),
+            api_key: api_key.clone(),
+        };
+        if let Some(core) = self.enter(parked) {
+            self.serve_login(&core, provider, api_key);
+        }
+    }
+
+    fn logout(&self, provider: &str) {
+        let parked = ParkedLifecycle::Logout {
+            provider: provider.to_string(),
+        };
+        if let Some(core) = self.enter(parked) {
+            self.serve_logout(&core, provider);
+        }
+    }
+
+    /// `login`: reject an empty key (a typo, not a credential),
+    /// validate the provider against config, write the key (the
+    /// surgical auth.toml write), refresh the world. No key
+    /// verification request — the next run open validates (a
+    /// verify-at-login refinement is parked, FRONTEND.md §5). The
+    /// ack is the re-announced catalog.
+    fn serve_login(&self, core: &LifecycleCore, provider: &str, api_key: &tabit_protocol::ApiKey) {
+        let _write = lock(&self.auth_write);
+        // An empty key is a typo, not a credential — storing it
+        // would flip the provider "usable" and meet the user as a
+        // 401 (`kind: provider`, off the teaching path). Reject at
+        // the door.
+        if api_key.as_str().trim().is_empty() {
+            self.sink.emit(
+                None,
+                SessionEvent::error_auth(format!(
+                    "empty api_key for `{provider}` — paste the provider's key"
+                )),
+            );
+            return;
+        }
+        if lock(&core.world)
+            .registry()
+            .config()
+            .provider(provider)
+            .is_none()
+        {
+            self.sink.emit(
+                None,
+                SessionEvent::error_auth(format!(
+                    "unknown provider `{provider}` — not in providers.toml"
+                )),
+            );
+            return;
+        }
+        let Some(path) = &core.auth_path else {
+            self.sink.emit(
+                None,
+                SessionEvent::error_auth(
+                    "cannot resolve the auth file path ($TABIT_AUTH or ~/.tabit/auth.toml)"
+                        .to_string(),
+                ),
+            );
+            return;
+        };
+        match tabit_config::AuthConfig::set_api_key(path, provider, api_key.as_str()) {
+            Ok(auth) => self.refresh_world(core, auth),
+            Err(error) => {
+                self.sink.emit(
+                    None,
+                    SessionEvent::error_auth(format!(
+                        "could not write `{}`: {error}",
+                        path.display()
+                    )),
+                );
+            }
+        }
+    }
+
+    /// `logout`: remove the key — total (an unknown provider or an
+    /// absent key is an idempotent no-op), then refresh the world.
+    /// The re-announced catalog reflects reality: a provider whose
+    /// `api_key_env` still supplies a key stays usable.
+    fn serve_logout(&self, core: &LifecycleCore, provider: &str) {
+        let _write = lock(&self.auth_write);
+        let Some(path) = &core.auth_path else {
+            self.sink.emit(
+                None,
+                SessionEvent::error_auth(
+                    "cannot resolve the auth file path ($TABIT_AUTH or ~/.tabit/auth.toml)"
+                        .to_string(),
+                ),
+            );
+            return;
+        };
+        match tabit_config::AuthConfig::remove_api_key(path, provider) {
+            Ok(auth) => self.refresh_world(core, auth),
+            Err(error) => {
+                self.sink.emit(
+                    None,
+                    SessionEvent::error_auth(format!(
+                        "could not write `{}`: {error}",
+                        path.display()
+                    )),
+                );
+            }
+        }
+    }
+
+    /// The world refresh (login/logout's mechanism — config reload
+    /// reuses it when it lands): mint the process's new registry over
+    /// the SAME config with the new auth, swap the current-world
+    /// cell, and push the new world into every resident session (its
+    /// config swaps always; its factory unless custom; the derived
+    /// agent cache clears) — THEN re-fold and re-announce the
+    /// catalog, so the ack is strictly true (every open session's
+    /// next run open already builds against the new world). In-flight
+    /// runs are untouched by construction — they bound their agent at
+    /// run open.
+    fn refresh_world(&self, core: &LifecycleCore, auth: tabit_config::AuthConfig) {
+        let registry = {
+            let current = lock(&core.world).registry();
+            crate::registry::ModelRegistry::new(current.config().clone(), Arc::new(auth))
+        };
+        // The swap bumps the cell's generation — how a session build
+        // racing this refresh (the `new_session`/`open_session`
+        // window below) tells the world moved under it.
+        lock(&core.world).refresh(registry.clone());
+        for worker in lock(&self.workers).values() {
+            worker.refresh_world(registry.config().clone(), registry.factory());
+        }
+        announce_catalog(&self.sink, &registry);
     }
 
     fn new_session(&self) {
@@ -1024,11 +1255,35 @@ impl Lifecycle {
         }
     }
 
+    /// Build a session against the current world, closing the
+    /// build/refresh race: the builder reads the world cell at call
+    /// time, and a login/logout landing between that read and the
+    /// caller's `workers` insert walks the resident workers without
+    /// this session. The generation bracket catches it — a bump
+    /// across the build means a refresh passed mid-build, and this
+    /// session (not yet in `workers`) is the only one it missed, so
+    /// the refresh applies here directly, ahead of the spawn. A
+    /// redundant re-application is harmless: the refresh is a state
+    /// write of a world the build may already have read.
+    fn build_on_current_world(
+        core: &LifecycleCore,
+        build: impl FnOnce() -> Result<(Session, Vec<String>), String>,
+    ) -> Result<(Session, Vec<String>), String> {
+        let before = lock(&core.world).generation();
+        let (session, notes) = build()?;
+        let world = lock(&core.world);
+        if world.generation() != before {
+            let registry = world.registry();
+            session.refresh_world(registry.config().clone(), registry.factory());
+        }
+        Ok((session, notes))
+    }
+
     /// `new_session`: announce, then spawn. The creation frame and its
     /// notes land ahead of anything the worker can emit (emitted
     /// here, before any command can have reached it).
     fn serve_new_session(&self, core: LifecycleCore) {
-        let (session, notes) = match (core.create)() {
+        let (session, notes) = match Self::build_on_current_world(&core, || (core.create)()) {
             Ok(built) => built,
             Err(message) => {
                 self.sink.emit(
@@ -1088,7 +1343,7 @@ impl Lifecycle {
             worker.deliver_replay();
             return;
         }
-        let (session, notes) = match (core.open)(id) {
+        let (session, notes) = match Self::build_on_current_world(&core, || (core.open)(id)) {
             Ok(loaded) => loaded,
             Err(message) => {
                 self.sink.emit(
@@ -1159,6 +1414,20 @@ fn announce_session(
     }
 }
 
+/// The model catalog announcement — the one assembly for both
+/// emission sites (the boot's attach, the login/logout refresh's
+/// ack): backend-level (unstamped), unconditional, folded from the
+/// registry that owns the usable predicate.
+fn announce_catalog(sink: &HostSink, registry: &crate::registry::ModelRegistry) {
+    sink.emit(
+        None,
+        SessionEvent::ModelsAvailable {
+            providers: registry.available_catalog(),
+            missing_keys: registry.missing_keys(),
+        },
+    );
+}
+
 /// Spawn one session's resident worker: the classic loop — ownership
 /// never moves (idle is the wait below, running is the pump call),
 /// with the session's id as its stream stamp. Returns the routing
@@ -1181,6 +1450,7 @@ fn spawn_worker(
     let entry_probe = session.entry_id_probe();
     let model_probe = session.model_probe();
     let model_register = session.model_register();
+    let world = session.world_cell();
     // The worker's emission sink attaches after the channel exists (a
     // sink is the channel it emits from).
     let notices: Arc<NoticeSlot> = Arc::new(std::sync::OnceLock::new());
@@ -1192,6 +1462,7 @@ fn spawn_worker(
         checkout_slot: checkout_slot.clone(),
         model_register,
         model_probe,
+        world,
         replay_due: replay_due.clone(),
         compact_slot: compact_slot.clone(),
     });
@@ -1370,11 +1641,15 @@ fn execute_checkout(session: &mut Session, sink: &NoticeSink, entry_id: String) 
 /// repeats; replayed history itself never carries `model_changed` (the
 /// register ruling: state is announced live, not reconstructed).
 fn emit_replay(session: &Session, sink: &NoticeSink) {
-    let selection = session.selection();
-    sink.emit(SessionEvent::model_changed(
-        &selection,
-        session.model_facts(&selection),
-    ));
+    // A selection-less session (the zero-config boot) announces no
+    // `model_changed` — until the first `model` command lands one
+    // (v21, amended); the pass itself is unaffected.
+    if let Some(selection) = session.selection() {
+        sink.emit(SessionEvent::model_changed(
+            &selection,
+            session.model_facts(&selection),
+        ));
+    }
     let events = session.replay_events();
     let total = events.len() as u64;
     sink.emit(SessionEvent::ReplayBegin { total });

@@ -15,9 +15,17 @@ use tabit_session::{SessionHost, SessionHostWiring, SessionStore};
 use crate::assemble::{ContinueMiss, assemble, host_data, host_node, mount_world, world_registry};
 use crate::options::AppOptions;
 
-/// The first-run setup guide: a fresh install has no config, which is
-/// normal — the failure message must teach, not scare. (Pub for the
-/// binary's print arm, which shares the guidance on stderr.)
+/// The first-run setup guide, for the config errors that remain
+/// fatal (a broken file, an explicit `$TABIT_CONFIG` pointer that
+/// misses) — the message must teach, not scare. (Pub for the
+/// binary's print arm, which shares the guidance on stderr.) A
+/// MISSING default providers.toml is no longer an error at all (the
+/// owner's first-run ruling, reversed 2026-10 on the pi precedent):
+/// zero config boots on the empty config — the session announces
+/// `model: null`, `models_available` emits empty, the registry's
+/// teaching note rides the startup notes, and a selection-less run
+/// fails at open with `run_failed { kind: "model" }`. The teaching
+/// moved from process-death to those three carriers.
 pub fn setup_guide(detail: &str) -> String {
     let example = r#"create ~/.tabit/providers.toml (or point $TABIT_CONFIG at a file):
 
@@ -38,18 +46,22 @@ API keys (only if the endpoint needs one) go in ~/.tabit/auth.toml:
     format!("first-run setup needed: {detail}\n\n{example}\n")
 }
 
-/// JSON-mode setup failure — the config/auth file is the problem — so
-/// the failure carries the first-run guide (a fresh install has no
-/// providers.toml — the most common first run; the message must teach,
-/// not scare).
+/// JSON-mode setup failure — a config/auth file exists but is
+/// unreadable or unparseable — so the failure carries the first-run
+/// guide (the message must teach, not scare). A MISSING default file
+/// never reaches here: `load_default` answers the empty config (the
+/// reversed first-run ruling — see [`setup_guide`]).
 fn json_setup_failure(detail: &str) -> ! {
     json_reject(setup_guide(detail))
 }
 
 /// JSON-mode startup failure that is *not* a config problem (session
-/// unreadable, model unbuildable, cwd gone): fail with the plain
-/// reason — the setup guide would be advice for a problem the user
-/// does not have.
+/// unreadable, an explicit `--model` naming a ref config does not
+/// know, cwd gone): fail with the plain reason — the setup guide
+/// would be advice for a problem the user does not have. ("Model
+/// unbuildable" is no longer in this class: the lazy agent cache
+/// moves construction failure to the run-open `run_failed`, and the
+/// no-usable-model case boots selection-less.)
 fn json_startup_failure(detail: &str) -> ! {
     json_reject(format!("could not start the session: {detail}"))
 }
@@ -80,9 +92,10 @@ fn json_reject(reason: String) -> ! {
 /// call — the extension world, the session host, the boot session,
 /// and the edge loop over the real stdin/stdout. This is the
 /// `tabit-core` binary's `--json` arm, and an embedder's child-role
-/// entry. `config`/`auth` arrive as `load_default`'s outcomes so the
-/// first-run shape (the wire rejection carrying the setup guide) is
-/// part of the entry, not the caller's problem.
+/// entry. `config`/`auth` arrive as `load_default`'s outcomes; the
+/// first-run shape is theirs (a missing default file loads as the
+/// empty config — the reversed ruling), and what remains fatal here
+/// is the genuinely broken file.
 ///
 /// **This function does not return** — every path ends in
 /// `std::process::exit`: rejection paths exit 1 after the wire
@@ -96,10 +109,13 @@ pub fn serve_json_stdio(
     config: Result<TabitConfig, String>,
     auth: Result<AuthConfig, String>,
 ) -> ! {
-    // A fresh install has no providers.toml — perfectly normal, and
-    // the most common first run. Fail gracefully: reject the
-    // handshake with a setup guide instead of dying stderr-only (the
-    // owner's first-run ruling).
+    // A broken config file is a graceful wire rejection carrying the
+    // setup guide; a MISSING default file never reaches here (the
+    // reversed first-run ruling: zero config boots —
+    // `load_default` answers the empty config, the registry degrades
+    // to a selection-less session, and the teaching rides the
+    // announced catalog, the null selection, and the run-open
+    // failure).
     let (config, auth) = match (config, auth) {
         (Ok(config), Ok(auth)) => (config, auth),
         (Err(detail), _) | (_, Err(detail)) => json_setup_failure(&detail),
@@ -144,12 +160,13 @@ pub fn serve_json_stdio(
         )
     });
     let mounted = mount_world(launchable, &runtime);
-    // Assemble failures (session unreadable, model unbuildable)
-    // reject the handshake with the plain reason — not the config
-    // setup guide, which would be advice for a problem the user does
-    // not have. A `--continue` that finds no sessions is absorbed
-    // into a fresh start (the pinned startup contract;
-    // `session_opened`'s `resumed: false` says so).
+    // Assemble failures (a session unreadable, an explicit `--model`
+    // naming a ref config does not know) reject the handshake with
+    // the plain reason — not the config setup guide, which would be
+    // advice for a problem the user does not have. A `--continue`
+    // that finds no sessions is absorbed into a fresh start (the
+    // pinned startup contract; `session_opened`'s `resumed: false`
+    // says so).
     let (session, startup_notes) = match assemble(
         options,
         &registry,

@@ -38,7 +38,10 @@ The foundation is shipped and hardened. In build order, all closed:
   no model catalog, ever.
 - **Session layer** (`tabit-session`, `tabit-log`): the durable
   tree-format session log (format v5), write-behind persistence,
-  rewind/branch, model registry + keyless providers, session-level
+  rewind/branch, model registry + keyless providers, built-in
+  `login`/`logout` over the world refresh (protocol v21 — the
+  surgical auth.toml write, the current-world cell, every open
+  session's next run open on the new world), session-level
   skills (protocol v20), the system-prompt builder, compaction +
   overflow recovery (the record below).
 - **Coding tools** (`tabit-tools`): read/write/edit/bash per the
@@ -56,7 +59,7 @@ The foundation is shipped and hardened. In build order, all closed:
   the host, the SDK, install/management — the checklist is complete;
   EXTENSIONS.md is the contract and the record.
 - **The wire** (`tabit-protocol`, `tabit-wire`, the session edge):
-  protocol v20, the node runtime (locality routing, asks, the report
+  protocol v21, the node runtime (locality routing, asks, the report
   model), the json stdio edge.
 - **Prompt caching** (shipped 2026-08): all-1h Anthropic, session-id
   cache keys for OpenAI Responses, subagents keyed separately — the
@@ -150,21 +153,62 @@ engine's own fact. When the discussion returns: rule abort's discard
 record (or `aborted { usage }`) versus unbilled-by-decision, and have
 the engine stamp the attempt's usage on the discard item directly.
 
+Residual from the 2026-10 billing-architecture change (the `TurnCost`
+closure seam deleted; cost is computed once at the spend point and
+rides the log entries as plain data): in the mid-run-switch window a
+`model` command lands at receive, so its `model_change` record
+precedes the in-flight run's committing turns in the file. Live,
+every sink bills the run's bound selection correctly (one computed
+value to the ledger, the `completion_call` event, and the durable
+entry); on REPLAY/reload the parser attributes those windowed turns
+to the NEW model — the dollars are the recorded ones (replay never
+recomputes), only the per-model attribution shifts. The full fix is
+turn entries carrying their producing selection — a format-versioned
+log decision, parked here.
+
 ### Config / registry follow-ups
 
 - **Dynamic model listing — deferred** (2026-09): `/v1/models`
   returns ids only, not useful enough to ship. Recorded direction:
   the provider catalog (curated per-model metadata) could ship as an
-  extension instead of core machinery. When reload lands,
-  discovery/catalog merge must be one callable step over
-  `(config, auth)`, not a re-run of the initialization flow.
+  extension instead of core machinery.
+- **Config reload — the `reload` command** (2026-10): an additive
+  first cut — re-read config/auth, new keys and providers appear, the
+  model catalog re-announces (`models_available`, FRONTEND.md §6).
+  Its mechanism shipped with `login`/`logout` (2026-10, protocol v21):
+  the current-world cell plus the per-session world refresh is exactly
+  the path `reload` reuses — what remains is re-reading the
+  providers.toml layers and the command itself. One dormant
+  assumption closes with it: `run.rs`'s `turn_cost` reads the rate
+  card LIVE from the world config — safe today because login/logout
+  swap auth only (the config Arc is shared), but a reload swaps the
+  config mid-run, so it must snapshot the config into the run's bound
+  pair (or re-derive the bound-at-open invoice invariant) when it
+  lands. The general
+  semantics — vanished providers, stale session registers, the
+  skills/gate reload scope — stay parked until the command lands.
+- **The models.dev catalog extension** (2026-10, recorded): an
+  extension shipping an auto-updating providers fragment (the
+  models.dev catalog), versioned separately from tabit itself — the
+  zero-config story's other half: on a bare install it gives
+  `login` its providers to scan, so first run is "install the
+  catalog extension, paste a key" with no hand-written
+  providers.toml.
 - Per-model `headers` stay unwired (needs a client-caching decision);
   `context_window` is wired (compaction); display names /
   `reasoning` wait on a model-picker UI (with the frontend).
-- Frontend-dependent model deferrals: the models-list command and the
+- Frontend-dependent model deferrals: the catalog half landed
+  (v21's `models_available` boot announcement); still parked: the
   real picker, the global implicit preference (a `~/.tabit/`
   last-selected file — a registry rung below `default_model`), and
   the "selection didn't land" picker signal.
+
+### Docs and comments sweep
+
+Scheduled, unscheduled date: one pass over stale comments and docs —
+they accrete (e.g. `assemble.rs`'s "handshake ack" phrasing surviving
+the v19 report model, caught in review 2026-10). Sweep when the next
+cross-cutting change touches many files anyway, not as its own event.
 
 ### ACP
 

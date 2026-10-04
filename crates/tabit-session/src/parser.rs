@@ -98,8 +98,10 @@ pub fn parse(raw: &str, path: &Path) -> Result<Parsed, SessionError> {
     let mut tree = SessionTree::empty();
     let mut register: Option<ModelSelection> = None;
     let mut stats = UsageLedger::new();
-    // The model usage attributes to (empty ids before any change —
-    // uncosted), mirroring the record stream's own sequence.
+    // The model usage attributes to (empty ids before any change),
+    // mirroring the record stream's own sequence. The dollars are the
+    // entries' recorded costs, summed as written — replay never
+    // recomputes (the invoice ruling).
     let mut attribution = (String::new(), String::new(), None);
 
     for (offset, line) in lines.enumerate() {

@@ -52,7 +52,7 @@
 //! let store = SessionStore::project_default();
 //! let selection = ModelSelection::new("lmstudio", "openai/gpt-oss-20b");
 //!
-//! let mut session = SessionBuilder::new(store, config, auth, selection)?
+//! let mut session = SessionBuilder::new(store, config, auth, Some(selection))?
 //!     .create("C:/work/project")?;
 //! let run = session.prompt("explain this repository").await;
 //! println!("{}", run.output);
@@ -111,10 +111,10 @@ pub use model::validate_selection;
 pub use notice::NoticeSink;
 pub use parser::Parsed;
 pub use prompt::{build_system_prompt, build_system_prompt_with_base};
-pub use registry::ModelRegistry;
+pub use registry::{CurrentWorld, ModelRegistry, WorldCell, current_world};
 pub use session::{
-    AbortHandle, DEFAULT_MAX_TURNS, MailboxHandle, RewindSummary, RunOutcome, RunSummary, Session,
-    SessionBuilder, TOOL_CONCURRENCY,
+    AbortHandle, DEFAULT_MAX_TURNS, MailboxHandle, ModelFactory, RewindSummary, RunOutcome,
+    RunSummary, Session, SessionBuilder, TOOL_CONCURRENCY,
 };
 pub use stats::{ModelStats, ModelUsage, SessionStats, UsageLedger};
 pub use store::{SessionStore, SessionSummary};

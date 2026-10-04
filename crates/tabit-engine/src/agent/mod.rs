@@ -68,6 +68,6 @@ pub use prompt_request::streaming::{
 };
 pub use prompt_request::{CompletionCall, PromptResponse};
 pub use run::{ModelTurn, PendingToolCall, ProviderErrorClass};
-pub use runner::{AgentRunner, PreRequestSource, SteeringSource, TurnIdSource};
+pub use runner::{AgentRunner, PreRequestSource, SteeringSource, TurnCostSlot, TurnIdSource};
 pub use tabit_providers::message::Text;
 pub use turn::{AttemptOutcome, consume_completion_stream};

@@ -28,7 +28,7 @@ filesystem-backed by design (the rig crates beneath keep wasm).
 let config = Arc::new(TabitConfig::from_toml_str(PROVIDERS_TOML, Path::new("providers.toml"))?);
 let auth = Arc::new(AuthConfig::default());
 let store = SessionStore::project_default();
-let mut session = SessionBuilder::new(store, config, auth, ModelSelection::new("p", "m"))?
+let mut session = SessionBuilder::new(store, config, auth, Some(ModelSelection::new("p", "m")))?
     .ephemeral("C:/work/project")?;              // NullBuffer: nothing touches disk
 let run = session.prompt("explain this repository").await;
 println!("{}", run.output);

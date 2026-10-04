@@ -70,7 +70,9 @@
 //! Loading uses [`TabitConfig::load`] with an explicit path, or
 //! [`TabitConfig::load_default`], which checks `$TABIT_CONFIG` (the
 //! debugging/local override), then `<home>/.tabit/providers.toml` (the
-//! single canonical location). Keys are resolved separately through
+//! single canonical location; a missing file there is the empty
+//! config, not an error — the zero-config boot). Keys are resolved
+//! separately through
 //! [`AuthConfig::load_default`] (`$TABIT_AUTH`, then
 //! `<home>/.tabit/auth.toml`; a missing auth file is not an error).
 //!
@@ -98,7 +100,7 @@ mod provider;
 mod settings;
 mod wire;
 
-pub use auth::{AuthConfig, AuthEntry};
+pub use auth::{AuthConfig, AuthEntry, default_path as auth_default_path};
 pub use error::ConfigError;
 pub use model::{Cost, InputModality, Model, SamplingParams, ThinkingLevel};
 pub use provider::Provider;
@@ -212,14 +214,28 @@ impl TabitConfig {
     /// one more candidate. The env vars are the debugging/local
     /// override — point at a scratch config instead of touching the
     /// real one. (A future CLI flag will outrank the env vars; more
-    /// specific scopes win.) Fails with [`ConfigError::NotFound`]
-    /// listing every candidate when none exists.
+    /// specific scopes win.) A missing file at the DEFAULT location
+    /// is **not** an error (the first-run ruling reversal, 2026-10:
+    /// zero config boots; the user fixes it in-app) — an empty
+    /// config is returned. What stays loud: an explicit pointer
+    /// (`$TABIT_CONFIG` / `$TABIT_CONFIG_EXTRA`) set but missing is
+    /// [`ConfigError::NotFound`] listing every candidate — never a
+    /// silent fallthrough — and a parse error in an existing file is
+    /// an error either way.
     pub fn load_default() -> Result<Self, ConfigError> {
         let candidates = default_config_paths();
         for path in &candidates {
             if path.is_file() {
                 return Self::load(path);
             }
+        }
+        // Nothing exists. A bare machine (no explicit pointer set)
+        // gets the empty config — a fresh install is normal; an
+        // explicit pointer that misses is the loud case.
+        if std::env::var_os("TABIT_CONFIG").is_none()
+            && std::env::var_os("TABIT_CONFIG_EXTRA").is_none()
+        {
+            return Ok(Self::default());
         }
         Err(ConfigError::NotFound { paths: candidates })
     }

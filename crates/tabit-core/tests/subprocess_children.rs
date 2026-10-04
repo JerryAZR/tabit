@@ -161,20 +161,25 @@ id = "m"
             MockStreamEvent::final_response_with_default_usage(),
         ],
     ];
-    SessionBuilder::new(store.clone(), config, auth, ModelSelection::new("p", "m"))
-        .expect("builder")
-        .preamble("test parent".to_string())
-        .model_factory(Arc::new(move |_, _, _| {
-            Ok(ModelHandle::new(MockCompletionModel::from_stream_turns(
-                turns.clone(),
-            )))
-        }))
-        .subagents(parts)
-        .dynamic_tool(subagent::subagent_tool())
-        // A REAL directory: it becomes the child process's cwd (the
-        // OS-enforced scope is the substrate's point).
-        .create(&cwd.display().to_string())
-        .expect("parent session")
+    SessionBuilder::new(
+        store.clone(),
+        config,
+        auth,
+        Some(ModelSelection::new("p", "m")),
+    )
+    .expect("builder")
+    .preamble("test parent".to_string())
+    .model_factory(Arc::new(move |_, _, _| {
+        Ok(ModelHandle::new(MockCompletionModel::from_stream_turns(
+            turns.clone(),
+        )))
+    }))
+    .subagents(parts)
+    .dynamic_tool(subagent::subagent_tool())
+    // A REAL directory: it becomes the child process's cwd (the
+    // OS-enforced scope is the substrate's point).
+    .create(&cwd.display().to_string())
+    .expect("parent session")
 }
 
 /// A host over a plain store, sharing the node with the parts.
@@ -189,6 +194,17 @@ fn host(store: &SessionStore, node: Arc<Node>, session: Session) -> SessionHost 
         create: Arc::new(|| Err("not driven".to_string())),
         open: Arc::new(|_| Err("not driven".to_string())),
         extensions: Default::default(),
+        world: tabit_session::current_world(tabit_session::ModelRegistry::new(
+            Arc::new(
+                tabit_config::TabitConfig::from_toml_str(
+                    "",
+                    std::path::Path::new("providers.toml"),
+                )
+                .expect("empty config"),
+            ),
+            Arc::new(tabit_config::AuthConfig::default()),
+        )),
+        auth_path: None,
     };
     SessionHost::spawn(session, Vec::new(), wiring, data)
 }
@@ -807,18 +823,23 @@ id = "m"
             MockStreamEvent::final_response_with_default_usage(),
         ],
     ];
-    let parent = SessionBuilder::new(store.clone(), config, auth, ModelSelection::new("p", "m"))
-        .expect("builder")
-        .preamble("test parent".to_string())
-        .model_factory(Arc::new(move |_, _, _| {
-            Ok(ModelHandle::new(MockCompletionModel::from_stream_turns(
-                turns.clone(),
-            )))
-        }))
-        .subagents(parts)
-        .dynamic_tool(subagent::subagent_tool())
-        .create(&parent_cwd.display().to_string())
-        .expect("parent session");
+    let parent = SessionBuilder::new(
+        store.clone(),
+        config,
+        auth,
+        Some(ModelSelection::new("p", "m")),
+    )
+    .expect("builder")
+    .preamble("test parent".to_string())
+    .model_factory(Arc::new(move |_, _, _| {
+        Ok(ModelHandle::new(MockCompletionModel::from_stream_turns(
+            turns.clone(),
+        )))
+    }))
+    .subagents(parts)
+    .dynamic_tool(subagent::subagent_tool())
+    .create(&parent_cwd.display().to_string())
+    .expect("parent session");
     let mut handle = host(&store, node.clone(), parent);
     let parent_id = handle.info().session_id.clone();
     handle.message(&parent_id, "go");
@@ -976,17 +997,22 @@ id = "m"
     });
     let model = tabit_engine::test_utils::MockCompletionModel::from_stream_turns(first_turns);
     let scripted = model.clone();
-    let session = SessionBuilder::new(store.clone(), config, auth, ModelSelection::new("p", "m"))
-        .expect("builder")
-        .preamble("test parent".to_string())
-        .model_factory(Arc::new(move |_, _, _| {
-            Ok(ModelHandle::new(scripted.clone()))
-        }))
-        .subagents(parts)
-        .dynamic_tool(subagent::subagent_tool())
-        .dynamic_tool(subagent::followup_tool())
-        .create(&cwd.display().to_string())
-        .expect("parent session");
+    let session = SessionBuilder::new(
+        store.clone(),
+        config,
+        auth,
+        Some(ModelSelection::new("p", "m")),
+    )
+    .expect("builder")
+    .preamble("test parent".to_string())
+    .model_factory(Arc::new(move |_, _, _| {
+        Ok(ModelHandle::new(scripted.clone()))
+    }))
+    .subagents(parts)
+    .dynamic_tool(subagent::subagent_tool())
+    .dynamic_tool(subagent::followup_tool())
+    .create(&cwd.display().to_string())
+    .expect("parent session");
     (session, model)
 }
 

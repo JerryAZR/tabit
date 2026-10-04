@@ -54,7 +54,7 @@ api_key = "dummy"
             Some(ModelSelection::new("local", "m2")),
         )
         .expect("explicit wins");
-    assert_eq!(got, explicit);
+    assert_eq!(got, Some(explicit));
     assert!(notes.is_empty(), "an explicit choice never degrades");
 
     // An explicit choice that does not resolve is loud immediately.
@@ -76,7 +76,7 @@ api_key = "dummy"
     let (got, notes) = registry
         .default_selection(None, Some(ModelSelection::new("local", "m2")))
         .expect("resumed wins");
-    assert_eq!(got, ModelSelection::new("local", "m2"));
+    assert_eq!(got, Some(ModelSelection::new("local", "m2")));
     assert!(
         notes.is_empty(),
         "a resolvable resumed model never degrades"
@@ -94,6 +94,7 @@ fn default_selection_stale_resumed_degrades_with_a_note() {
     let (selection, notes) = registry
         .default_selection(None, Some(ModelSelection::new("gone", "m")))
         .expect("falls back instead of failing");
+    let selection = selection.expect("a usable model exists");
     assert_eq!(selection.model, "m", "the first configured model");
     assert_eq!(notes.len(), 1, "the degradation is reported");
     assert!(
@@ -116,19 +117,20 @@ api_key = "dummy"
     assert!(notes.is_empty());
     assert_eq!(
         got,
-        ModelSelection {
+        Some(ModelSelection {
             provider: "local".into(),
             model: "m".into(),
             thinking_level: Some("high".into()),
-        }
+        })
     );
 }
 
 #[test]
 fn a_keyless_declaration_is_the_usability_flag() {
     // No key, no `keyless = true`: the provider is not usable — the
-    // explicit build fails loudly naming both fixes, and there is no
-    // usable provider to fall back to.
+    // explicit build fails loudly naming both fixes, and default
+    // resolution finds no usable provider to fall back to (it
+    // degrades selection-less, per the first-run ruling reversal).
     let flagged = registry_with(TWO_MODELS, "");
     let error = flagged
         .build("local", "m", "session")
@@ -141,10 +143,14 @@ fn a_keyless_declaration_is_the_usability_flag() {
         other => panic!("expected config error, got {other:?}"),
     }
     match flagged.default_selection(None, None) {
-        Err(SessionError::Config { message }) => {
-            assert!(message.contains("usable model provider"), "{message}");
+        // The first-run ruling reversal: no usable provider degrades
+        // to a selection-less session with the teaching note, never
+        // a startup error.
+        Ok((None, notes)) => {
+            assert_eq!(notes.len(), 1, "the teaching note rides: {notes:?}");
+            assert!(notes[0].contains("no usable model"), "{}", notes[0]);
         }
-        other => panic!("expected the teaching error, got {other:?}"),
+        other => panic!("expected the selection-less degradation, got {other:?}"),
     }
 
     // Declared keyless: usable, with the stubbed empty credential
@@ -154,7 +160,7 @@ fn a_keyless_declaration_is_the_usability_flag() {
         .build("local", "m", "session")
         .expect("keyless builds");
     let (selection, notes) = keyless.default_selection(None, None).expect("usable");
-    assert_eq!(selection, ModelSelection::new("local", "m"));
+    assert_eq!(selection, Some(ModelSelection::new("local", "m")));
     assert!(notes.is_empty());
 }
 
@@ -194,28 +200,29 @@ api_key = "k"
     let (selection, notes) = registry
         .default_selection(None, None)
         .expect("usable exists");
-    assert_eq!(selection, ModelSelection::new("remote", "remote-m"));
+    assert_eq!(selection, Some(ModelSelection::new("remote", "remote-m")));
     assert_eq!(notes.len(), 1, "the degradation is noted: {notes:?}");
     assert!(notes[0].contains("not usable"), "{notes:?}");
 }
 
 #[test]
-fn default_selection_falls_back_to_first_model_then_error() {
+fn default_selection_falls_back_to_first_model_then_degrades() {
     let registry = default_registry();
     let (got, notes) = registry.default_selection(None, None).expect("first-seen");
-    assert_eq!(got, ModelSelection::new("local", "m"));
+    assert_eq!(got, Some(ModelSelection::new("local", "m")));
     assert!(notes.is_empty());
 
+    // Nothing usable (the first-run ruling reversal): the terminal
+    // arm degrades to a selection-less session with a teaching note —
+    // a fresh install is normal, never a startup death.
     let empty = registry_with("", "");
-    let err = empty
+    let (selection, notes) = empty
         .default_selection(None, None)
-        .expect_err("nothing configured");
-    match err {
-        SessionError::Config { message } => {
-            assert!(message.contains("usable model provider"), "{message}")
-        }
-        other => panic!("expected config error, got {other:?}"),
-    }
+        .expect("nothing usable degrades, never errors");
+    assert_eq!(selection, None, "the selection-less boot");
+    assert_eq!(notes.len(), 1, "the teaching note rides");
+    assert!(notes[0].contains("no usable model"), "{}", notes[0]);
+    assert!(notes[0].contains("providers.toml"), "{}", notes[0]);
 }
 
 #[test]
@@ -323,6 +330,7 @@ api_key = \"dummy\"
         let (selection, notes) = registry
             .default_selection(None, None)
             .expect("falls back instead of failing");
+        let selection = selection.expect("a usable model exists");
         assert_eq!(selection.model, "m", "the first configured model");
         assert!(
             !notes.is_empty(),
@@ -448,4 +456,197 @@ api_key = "dummy"
 
 fn api_key() -> String {
     "dummy".to_string()
+}
+
+/// The boot catalog fold (protocol v21): usable providers only, in
+/// the config map's alphabetical order; models in config-file order,
+/// optional facts absent when config is silent, the dial's names in
+/// config order.
+#[test]
+fn the_available_catalog_carries_usable_providers_with_their_stated_facts() {
+    // `alpha` is keyless (usable, sparse config — the optional facts
+    // stay absent); `beta` has its key in auth.toml and a fully
+    // stated model; `gamma` has neither key nor `keyless = true` and
+    // must not appear (its models go with it).
+    let registry = registry_with(
+        r#"
+[providers.beta]
+name = "The Beta provider"
+base_url = "https://beta.example/v1"
+api = "openai-completions"
+
+[[providers.beta.models]]
+id = "b1"
+name = "Beta One"
+reasoning = true
+input = ["text", "image"]
+context_window = 200000
+max_tokens = 16000
+cost = { input = 1.0, output = 4.0, cache_read = 0.1, cache_write = 0.4 }
+
+[[providers.beta.models.thinking_levels]]
+name = "low"
+extra_body = { thinking = { effort = "low" } }
+
+[[providers.beta.models.thinking_levels]]
+name = "high"
+extra_body = { thinking = { effort = "high" } }
+
+[[providers.beta.models]]
+id = "b2"
+
+[providers.gamma]
+base_url = "https://gamma.example/v1"
+api = "openai-completions"
+
+[[providers.gamma.models]]
+id = "g1"
+
+[providers.alpha]
+base_url = "http://127.0.0.1:1234/v1"
+api = "openai-completions"
+keyless = true
+
+[[providers.alpha.models]]
+id = "a1"
+"#,
+        r#"
+[providers.beta]
+api_key = "dummy"
+"#,
+    );
+    let catalog = registry.available_catalog();
+    let ids: Vec<&str> = catalog.iter().map(|p| p.id.as_str()).collect();
+    assert_eq!(
+        ids,
+        vec!["alpha", "beta"],
+        "usable providers only, alphabetical: {ids:?}"
+    );
+
+    // The sparse provider: facts absent, never zeroed.
+    let alpha = &catalog[0];
+    assert_eq!(alpha.name, None);
+    let a1 = &alpha.models[0];
+    assert_eq!(a1.id, "a1");
+    assert_eq!(a1.name, None);
+    assert_eq!(a1.context_window, None);
+    assert_eq!(a1.max_tokens, None);
+    assert_eq!(a1.cost, None);
+    assert!(!a1.reasoning);
+    assert_eq!(a1.input, vec!["text"], "text-only is the default");
+    assert!(a1.thinking_levels.is_empty(), "no dial configured");
+
+    // The fully stated model: every fact crosses, in config order.
+    let beta = &catalog[1];
+    assert_eq!(beta.name.as_deref(), Some("The Beta provider"));
+    assert_eq!(
+        beta.models
+            .iter()
+            .map(|m| m.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["b1", "b2"],
+        "models in config-file order"
+    );
+    let b1 = &beta.models[0];
+    assert_eq!(b1.name.as_deref(), Some("Beta One"));
+    assert_eq!(b1.context_window, Some(200_000));
+    assert_eq!(b1.max_tokens, Some(16_000));
+    assert_eq!(
+        b1.cost,
+        Some(tabit_protocol::Cost {
+            input: 1.0,
+            output: 4.0,
+            cache_read: 0.1,
+            cache_write: 0.4,
+        })
+    );
+    assert!(b1.reasoning);
+    assert_eq!(b1.input, vec!["text", "image"]);
+    assert_eq!(
+        b1.thinking_levels,
+        vec!["low", "high"],
+        "the dial's ordered names — the merge maps never cross"
+    );
+}
+
+#[test]
+fn the_available_catalog_is_empty_when_nothing_is_usable() {
+    // No key, no `keyless = true` (e.g. an explicit `--model` boots
+    // such a config — the explicit rung validates existence only):
+    // the catalog is the legal empty state, and still emits.
+    let registry = registry_with(TWO_MODELS, "");
+    assert!(
+        registry.available_catalog().is_empty(),
+        "an unusable provider's models go with it"
+    );
+    // Nothing configured at all: also empty, never an error.
+    assert!(registry_with("", "").available_catalog().is_empty());
+}
+
+/// The login widget's half of the fold (v21, amended): exactly the
+/// providers failing `usable()`, identity only, alphabetical — the
+/// complement of the catalog over the same predicate.
+#[test]
+fn missing_keys_names_exactly_the_unusable_providers() {
+    let raw = r#"
+[providers.beta]
+base_url = "https://beta.example/v1"
+api = "openai-completions"
+
+[[providers.beta.models]]
+id = "b1"
+
+[providers.gamma]
+name = "The Gamma provider"
+base_url = "https://gamma.example/v1"
+api = "openai-completions"
+
+[[providers.gamma.models]]
+id = "g1"
+
+[providers.alpha]
+base_url = "http://127.0.0.1:1234/v1"
+api = "openai-completions"
+keyless = true
+
+[[providers.alpha.models]]
+id = "a1"
+"#;
+    let registry = registry_with(
+        raw,
+        r#"
+[providers.beta]
+api_key = "dummy"
+"#,
+    );
+    let missing = registry.missing_keys();
+    assert_eq!(
+        missing,
+        vec![MissingKeyProvider {
+            id: "gamma".to_string(),
+            name: Some("The Gamma provider".to_string()),
+        }],
+        "gamma has no key and no keyless declaration; alpha is keyless, beta is keyed"
+    );
+    // The complement law: usable + missing = configured.
+    assert_eq!(
+        registry
+            .available_catalog()
+            .iter()
+            .map(|p| p.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["alpha", "beta"]
+    );
+    // Keyed, gamma drops off — the re-fold login triggers.
+    let keyed = registry_with(
+        raw,
+        r#"
+[providers.beta]
+api_key = "dummy"
+
+[providers.gamma]
+api_key = "dummy"
+"#,
+    );
+    assert!(keyed.missing_keys().is_empty());
 }

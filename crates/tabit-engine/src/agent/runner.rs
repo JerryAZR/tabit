@@ -212,10 +212,26 @@ pub struct AgentRunner {
     /// its short random ids; consumers that key durable records on turn
     /// identity inject their own mint (ENGINE.md behavior delta 10).
     pub(crate) turn_id_source: TurnIdSource,
+    /// The run owner's turn-cost channel (see [`TurnCostSlot`]); `None`
+    /// commits every turn uncosted (standalone runs, tests — no billing
+    /// story). The engine never computes cost; it carries the owner's
+    /// one computed value onto the durable entry.
+    pub(crate) turn_cost: Option<TurnCostSlot>,
 }
 
 /// The source of announced turn ids — one call per model-call attempt.
 pub type TurnIdSource = Arc<dyn Fn() -> String + Send + Sync>;
+
+/// The channel carrying one turn's computed dollars from the run's
+/// owner (who bills the spend) to the engine's commit (which records
+/// it). The owner writes when the spend is reported — the turn's
+/// `CompletionCall` item, which the drive stream's pull ordering
+/// guarantees the consumer processed before the turn's commit resumes
+/// — and the commit *takes* the value, so a discarded attempt's write
+/// is overwritten by the settled attempt's before any commit reads it,
+/// and no value can ride two commits. Written as `Some`/`None` (an
+/// unbilled call is a fact too); the engine never computes cost.
+pub type TurnCostSlot = Arc<Mutex<Option<f64>>>;
 
 impl AgentRunner {
     /// Build a runner from an agent, seeding it with the agent's default hook
@@ -263,6 +279,7 @@ impl AgentRunner {
             steering: None,
             pre_request: None,
             turn_id_source: Arc::new(tabit_providers::id::generate),
+            turn_cost: None,
         }
     }
 
@@ -288,6 +305,15 @@ impl AgentRunner {
     /// itself, on every request. Opaque to the engine.
     pub fn pre_request(mut self, door: Arc<dyn PreRequestSource>) -> Self {
         self.pre_request = Some(door);
+        self
+    }
+
+    /// Attach the run's turn-cost channel (see [`TurnCostSlot`]) — the
+    /// owner's computed dollars for each provider call, carried onto the
+    /// committing turn's durable entry. Without one, turns commit
+    /// uncosted.
+    pub fn turn_cost_slot(mut self, slot: TurnCostSlot) -> Self {
+        self.turn_cost = Some(slot);
         self
     }
 

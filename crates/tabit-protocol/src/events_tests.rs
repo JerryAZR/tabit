@@ -192,6 +192,26 @@ fn all_events() -> Vec<SessionEvent> {
                 incumbent: Some("clash-a".to_string()),
             }],
         },
+        SessionEvent::ModelsAvailable {
+            providers: vec![AvailableProvider {
+                id: "local".to_string(),
+                name: None,
+                models: vec![crate::AvailableModel {
+                    id: "openai/gpt-oss-20b".to_string(),
+                    name: Some("GPT OSS 20B".to_string()),
+                    context_window: Some(128_000),
+                    max_tokens: Some(16_000),
+                    cost: None,
+                    reasoning: true,
+                    input: vec!["text".to_string(), "image".to_string()],
+                    thinking_levels: vec!["low".to_string(), "high".to_string()],
+                }],
+            }],
+            missing_keys: vec![crate::MissingKeyProvider {
+                id: "locked".to_string(),
+                name: Some("The Locked provider".to_string()),
+            }],
+        },
         SessionEvent::NativeItem {
             turn_id: TURN.to_string(),
             item: serde_json::json!({"web_search_call": {}}),
@@ -200,7 +220,7 @@ fn all_events() -> Vec<SessionEvent> {
             id: "0199".to_string(),
             path: "C:/w/s.jsonl".to_string(),
             cwd: "C:/work/proj".to_string(),
-            model: crate::ModelSelection::new("p", "m"),
+            model: Some(crate::ModelSelection::new("p", "m")),
             resumed: true,
             parent: None,
             parent_call: None,
@@ -332,6 +352,39 @@ fn every_tag_agrees_with_the_wire_the_enum_and_the_list() {
         .expect("serialize"),
         r#"{"type":"extensions_available","extensions":[{"name":"shadow","version":"0.1.0","description":null,"dir":"C:/u/.tabit/extensions/shadow","status":"dead","reason":"no handshake within 30s","tools":[],"hooks":[]}],"conflicts":[{"kind":"replaces_core","extension":"shadow","tool":"read","incumbent":null}]}"#
     );
+    // The model catalog: the same unstamped backend-level family,
+    // UNCONDITIONAL (v21) — optionals absent when config is silent,
+    // the dial's names only, `reasoning` always stated, and the
+    // login widget's `missing_keys` riding alongside (v21, amended).
+    assert_eq!(
+        serde_json::to_string(&SessionEvent::ModelsAvailable {
+            providers: vec![AvailableProvider {
+                id: "local".to_string(),
+                name: None,
+                models: vec![crate::AvailableModel {
+                    id: "m".to_string(),
+                    name: None,
+                    context_window: Some(200_000),
+                    max_tokens: None,
+                    cost: Some(crate::Cost {
+                        input: 1.0,
+                        output: 4.0,
+                        cache_read: 0.1,
+                        cache_write: 0.4,
+                    }),
+                    reasoning: false,
+                    input: vec!["text".to_string(), "image".to_string()],
+                    thinking_levels: Vec::new(),
+                }],
+            }],
+            missing_keys: vec![crate::MissingKeyProvider {
+                id: "locked".to_string(),
+                name: None,
+            }],
+        })
+        .expect("serialize"),
+        r#"{"type":"models_available","providers":[{"id":"local","models":[{"id":"m","context_window":200000,"cost":{"input":1.0,"output":4.0,"cache_read":0.1,"cache_write":0.4},"reasoning":false,"input":["text","image"],"thinking_levels":[]}]}],"missing_keys":[{"id":"locked"}]}"#
+    );
     // The announce's wire spelling: a subagent child carries its
     // parentage and the spawning call's correlation id; a user
     // session carries neither (absent fields never hit the wire).
@@ -340,7 +393,7 @@ fn every_tag_agrees_with_the_wire_the_enum_and_the_list() {
             id: "0199".to_string(),
             path: String::new(),
             cwd: "C:/work/proj".to_string(),
-            model: ModelSelection::new("p", "m"),
+            model: Some(ModelSelection::new("p", "m")),
             resumed: false,
             parent: Some("0192uuidv7parent".to_string()),
             parent_call: Some("i1".to_string()),
@@ -353,13 +406,28 @@ fn every_tag_agrees_with_the_wire_the_enum_and_the_list() {
             id: "0199".to_string(),
             path: "C:/w/s.jsonl".to_string(),
             cwd: "C:/work/proj".to_string(),
-            model: ModelSelection::new("p", "m"),
+            model: Some(ModelSelection::new("p", "m")),
             resumed: true,
             parent: None,
             parent_call: None,
         })
         .expect("serialize"),
         r#"{"type":"session_opened","id":"0199","path":"C:/w/s.jsonl","cwd":"C:/work/proj","model":{"provider":"p","model":"m","thinking_level":null},"resumed":true}"#
+    );
+    // A selection-less session (the zero-config boot, v21 amended):
+    // `model` serializes present-null, never skipped.
+    assert_eq!(
+        serde_json::to_string(&SessionEvent::SessionOpened {
+            id: "0199".to_string(),
+            path: "C:/w/s.jsonl".to_string(),
+            cwd: "C:/work/proj".to_string(),
+            model: None,
+            resumed: false,
+            parent: None,
+            parent_call: None,
+        })
+        .expect("serialize"),
+        r#"{"type":"session_opened","id":"0199","path":"C:/w/s.jsonl","cwd":"C:/work/proj","model":null,"resumed":false}"#
     );
     // The wire spelling of the brackets and the truncation warning.
     assert_eq!(

@@ -5,7 +5,7 @@
 //! ships in this workspace, so an added variant is a coordinated change,
 //! not a compatibility hazard.
 
-use crate::model::ModelSelection;
+use crate::model::{AvailableProvider, ModelSelection};
 use crate::usage::Usage;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -297,6 +297,30 @@ pub enum SessionEvent {
         /// (EXTENSIONS.md's naming ruling).
         conflicts: Vec<ExtensionConflict>,
     },
+    /// The usable model catalog, announced once at startup right
+    /// after `extensions_available` (v21): every usable provider
+    /// (key resolvable via auth.toml/`api_key_env`, or declared
+    /// `keyless = true`) with its models. **Unstamped,
+    /// backend-level** — one backend process has one model
+    /// registry. Unlike the skills/extension catalogs it is
+    /// **unconditional**: emitted even when empty, so the frame's
+    /// absence means "protocol older than v21", never "no models";
+    /// `providers: []` is the legal "no usable models at this
+    /// backend" state. Re-announced when the world changes — a
+    /// `login`/`logout` landed (the re-announcement is the
+    /// command's ack), config reload when it lands; a
+    /// re-announcement replaces the catalog wholesale — last-wins
+    /// fold.
+    ModelsAvailable {
+        /// Every usable provider, in alphabetical id order; models
+        /// in config-file order.
+        providers: Vec<AvailableProvider>,
+        /// The configured providers failing the usable predicate
+        /// (v21, amended — the login widget's targets): identity
+        /// only, in alphabetical id order. `providers` stays
+        /// usable-only; this is who `login` can fix.
+        missing_keys: Vec<crate::model::MissingKeyProvider>,
+    },
     /// A session became visible in this backend: the boot session
     /// (emitted at spawn, ahead of the catalog and any replay), a
     /// `new_session` (a fresh session, `resumed: false`), or an
@@ -317,8 +341,13 @@ pub enum SessionEvent {
         /// session's is the backend's cwd; a subagent child's is its
         /// own spawn cwd.
         cwd: String,
-        /// The session's active selection.
-        model: ModelSelection,
+        /// The session's active selection. **Nullable (v21,
+        /// amended)**: `null` — serialized present, never skipped —
+        /// means the session has no selection (nothing usable at
+        /// this backend — the zero-config boot); the first `model`
+        /// command lands one, and until then no `model_changed` is
+        /// announced and runs fail at open.
+        model: Option<ModelSelection>,
         /// Whether the session continues an existing chain.
         resumed: bool,
         /// The parent session's id when this session is a subagent
@@ -338,8 +367,12 @@ pub enum SessionEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         parent_call: Option<String>,
     },
-    /// The active model changed (a `ModelChange` log entry replayed, or
-    /// — from slice 3 — a `model` command applied).
+    /// The active model changed: a `model` command applied (a state
+    /// write at receive), or the register announcement leading a
+    /// replay pass — the session's current selection, announced live,
+    /// never reconstructed from history. Never emitted for a session
+    /// with no selection (the zero-config boot announces
+    /// `session_opened.model: null` instead, v21 amended).
     ModelChanged {
         /// Provider id from tabit config.
         provider: String,
@@ -642,6 +675,17 @@ impl SessionEvent {
         }
     }
 
+    /// An `auth`-kind error: a `login`/`logout` failed — the provider
+    /// is unknown to config, or the auth file could not be written.
+    /// Unstamped, backend-level (the failure belongs to no session).
+    pub fn error_auth(message: impl Into<String>) -> Self {
+        Self::Error {
+            kind: ErrorKind::AUTH.to_string(),
+            message: message.into(),
+            pending: None,
+        }
+    }
+
     /// The register announcement: a `model_changed` carrying a
     /// selection and its resolved facts — at every receive-time write
     /// (the `model` command's own outcome) and before every replay
@@ -675,6 +719,9 @@ impl ErrorKind {
     pub const SESSION: &'static str = "session";
     /// A `checkout` command targeted a missing entry or not a cut point.
     pub const CHECKOUT: &'static str = "checkout";
+    /// A `login`/`logout` command failed (an unknown provider, an
+    /// unwritable auth file).
+    pub const AUTH: &'static str = "auth";
     /// Persistence degraded: this many records are pending on disk.
     pub const PERSIST_DEGRADED: &'static str = "persist_degraded";
     /// Persistence recovered: pending records reached the disk.
@@ -742,6 +789,7 @@ impl SessionEvent {
             SessionEvent::SessionsAvailable { .. } => tags::SESSIONS_AVAILABLE,
             SessionEvent::SkillsAvailable { .. } => tags::SKILLS_AVAILABLE,
             SessionEvent::ExtensionsAvailable { .. } => tags::EXTENSIONS_AVAILABLE,
+            SessionEvent::ModelsAvailable { .. } => tags::MODELS_AVAILABLE,
             SessionEvent::SessionOpened { .. } => tags::SESSION_OPENED,
             SessionEvent::ModelChanged { .. } => tags::MODEL_CHANGED,
             SessionEvent::NativeItem { .. } => tags::NATIVE_ITEM,
@@ -788,6 +836,7 @@ pub mod tags {
     pub const SESSIONS_AVAILABLE: &str = "sessions_available";
     pub const SKILLS_AVAILABLE: &str = "skills_available";
     pub const EXTENSIONS_AVAILABLE: &str = "extensions_available";
+    pub const MODELS_AVAILABLE: &str = "models_available";
     pub const SESSION_OPENED: &str = "session_opened";
     pub const MODEL_CHANGED: &str = "model_changed";
     pub const NATIVE_ITEM: &str = "native_item";
@@ -824,6 +873,7 @@ pub mod tags {
         SESSIONS_AVAILABLE,
         SKILLS_AVAILABLE,
         EXTENSIONS_AVAILABLE,
+        MODELS_AVAILABLE,
         SESSION_OPENED,
         MODEL_CHANGED,
         NATIVE_ITEM,

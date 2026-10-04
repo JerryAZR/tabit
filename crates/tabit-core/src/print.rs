@@ -49,6 +49,7 @@ fn print_event(event: &SessionEvent) {
         SessionEvent::SkillsAvailable { .. } => {}
         // Backend-level catalogs never ride a run's print stream.
         SessionEvent::ExtensionsAvailable { .. } => {}
+        SessionEvent::ModelsAvailable { .. } => {}
         SessionEvent::MessagesDiscarded { messages } => {
             let _ = writeln!(out, "[{} queued message(s) discarded]", messages.len());
         }

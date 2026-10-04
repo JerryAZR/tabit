@@ -183,11 +183,14 @@ pub enum EntryKind {
         /// delta telescopes over it.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         delta_tokens: Option<u64>,
-        /// The dollars the turn cost, stamped at commit from the rates
-        /// in effect (the invoice ruling, owner 2026-09: spend already
-        /// happened — a later rate cut does not refund it, so cost is
-        /// recorded, never recomputed at read). Absent when the
-        /// provider reported no usage or the model carries no rates.
+        /// The dollars the turn cost — computed once at the spend
+        /// point from the rates then in effect for the model that
+        /// served the call, and recorded here verbatim (the invoice
+        /// ruling, owner 2026-09: spend already happened — a later
+        /// rate cut does not refund it, so cost is recorded, never
+        /// recomputed at read; this crate never computes it). Absent
+        /// when the provider reported no usage or the model carries
+        /// no rates.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cost: Option<f64>,
     },
@@ -228,9 +231,10 @@ pub enum EntryKind {
         tokens_after: u64,
         /// The summarization call's provider-reported usage.
         usage: Usage,
-        /// The dollars the summarization call cost, stamped at commit
-        /// (same ruling as `assistant_message.cost` — real spend is a
-        /// fact, not a re-derivation).
+        /// The dollars the summarization call cost — computed at the
+        /// spend point, recorded verbatim (same ruling as
+        /// `assistant_message.cost` — real spend is a fact, not a
+        /// re-derivation).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cost: Option<f64>,
     },
@@ -283,8 +287,9 @@ pub enum SideKind {
     Discarded {
         /// The provider-reported usage of the discarded attempt.
         usage: Usage,
-        /// The dollars the discarded attempt cost, stamped when
-        /// recorded (same invoice semantics as the entry family).
+        /// The dollars the discarded attempt cost, computed when the
+        /// spend was recorded (same invoice semantics as the entry
+        /// family).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cost: Option<f64>,
     },

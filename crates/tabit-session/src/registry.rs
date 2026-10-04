@@ -6,24 +6,78 @@
 //! connection pool, and resolves the default model selection with the
 //! precedence: an explicit caller choice, then the resumed session's
 //! last model, then the configured `default_model` preference, then the
-//! first configured model.
+//! first configured model — and, when nothing anywhere is usable, no
+//! selection at all (the first-run ruling reversal, 2026-10: the
+//! zero-config boot opens selection-less with a teaching note; it is
+//! never a startup error).
 //!
-//! Reload (re-reading config for future resolutions) and dynamic model
-//! listing from endpoints are deferred until a consumer exists.
+//! The login/logout world refresh (protocol v21) mints a fresh
+//! registry over the same config with the new auth and swaps the
+//! host's current-world cell ([`CurrentWorld`]); config reload
+//! (re-reading the providers.toml layers) reuses that path when it
+//! lands. Dynamic model listing from endpoints stays deferred until
+//! a consumer exists.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use crate::lock::lock;
 use crate::model::validate_selection;
-use tabit_config::{AuthConfig, Provider, TabitConfig, WireApi};
+use tabit_config::{AuthConfig, InputModality, Provider, TabitConfig, WireApi};
 use tabit_engine::agent::ModelHandle;
 use tabit_providers::client::CompletionClient;
 use tabit_providers::providers::{anthropic, openai};
 
 use crate::SessionError;
 use crate::session::ModelFactory;
-use tabit_protocol::ModelSelection;
+use tabit_protocol::{AvailableModel, AvailableProvider, MissingKeyProvider, ModelSelection};
+
+/// The host's current-world cell: the ONE registry every session
+/// builder reads AT CALL TIME (the create/open closures capture the
+/// cell, never a registry) and the login/logout handler swaps whole
+/// — mint a fresh registry over the same config with the new auth,
+/// swap, re-fold, re-announce. Lock via [`crate::lock::lock`]; no
+/// guard crosses an await.
+pub type CurrentWorld = Arc<Mutex<WorldCell>>;
+
+/// The cell's contents: the registry plus the refresh GENERATION — a
+/// counter every world swap bumps, so a session build racing a
+/// refresh can tell the world moved under it (the endpoint's
+/// `new_session`/`open_session` window: the refresh walks the
+/// resident workers, and a session built but not yet registered is
+/// the one it misses).
+pub struct WorldCell {
+    registry: ModelRegistry,
+    generation: u64,
+}
+
+impl WorldCell {
+    /// The current registry (a cheap clone — the clients cache is
+    /// shared behind it).
+    pub fn registry(&self) -> ModelRegistry {
+        self.registry.clone()
+    }
+
+    /// The refresh generation: bumped by every [`Self::refresh`].
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    /// Swap the registry, bumping the generation (the endpoint's
+    /// login/logout refresh; config reload reuses it when it lands).
+    pub fn refresh(&mut self, registry: ModelRegistry) {
+        self.registry = registry;
+        self.generation += 1;
+    }
+}
+
+/// Mint the current-world cell over the boot registry.
+pub fn current_world(registry: ModelRegistry) -> CurrentWorld {
+    Arc::new(Mutex::new(WorldCell {
+        registry,
+        generation: 0,
+    }))
+}
 
 /// One constructed provider client. Clients clone cheaply and share
 /// their HTTP connection pool; models built from them are thin wrappers,
@@ -105,19 +159,23 @@ impl ModelRegistry {
     /// reference that no longer resolves — gone from config, or its
     /// provider lacking the key material it needs — degrades with a note
     /// (it is a preference, like `default_model`); only an explicit
-    /// selection fails loudly. The notes are data — the session worker
-    /// surfaces them to the frontend as `error { kind: model }` frames
-    /// (stderr printing at construction is ruled out: events are the only
-    /// thing a frontend can see).
+    /// selection fails loudly. The terminal arm **degrades instead of
+    /// erroring** (the first-run ruling reversal, 2026-10): nothing
+    /// usable means `Ok((None, notes))` with a teaching note — a fresh
+    /// install is normal, the session boots selection-less, and the
+    /// run-open failure is the carrier. The notes are data — the
+    /// session worker surfaces them to the frontend as
+    /// `error { kind: model }` frames (stderr printing at construction
+    /// is ruled out: events are the only thing a frontend can see).
     pub fn default_selection(
         &self,
         explicit: Option<ModelSelection>,
         resumed: Option<ModelSelection>,
-    ) -> Result<(ModelSelection, Vec<String>), SessionError> {
+    ) -> Result<(Option<ModelSelection>, Vec<String>), SessionError> {
         let mut notes = Vec::new();
         if let Some(explicit) = explicit {
             validate_selection(&explicit, &self.inner.config)?;
-            return Ok((explicit, notes));
+            return Ok((Some(explicit), notes));
         }
         // A resumed selection is a preference too (owner ruling, pi
         // precedent): the session's last model may be gone from
@@ -126,10 +184,10 @@ impl ModelRegistry {
         // exactly that model.
         if let Some(resumed) = resumed {
             match self.preference_error(&resumed) {
-                None => return Ok((resumed, notes)),
+                None => return Ok((Some(resumed), notes)),
                 Some(error) => notes.push(format!(
                     "the resumed session's model `{}/{}` is not usable ({}); \
-                     falling back to default_model or the first usable model",
+                     the default selection resolves without it",
                     resumed.provider, resumed.model, error
                 )),
             }
@@ -140,27 +198,49 @@ impl ModelRegistry {
         // startup).
         if let Some(default) = &self.inner.config.default_model {
             match preferred_selection(default, &self.inner.config) {
-                Ok(selection) if self.usable(&selection.provider) => return Ok((selection, notes)),
+                Ok(selection) if self.usable(&selection.provider) => {
+                    return Ok((Some(selection), notes));
+                }
                 Ok(_) => notes.push(format!(
                     "default_model `{}` is not usable (its provider has no key and \
-                     is not declared keyless); falling back to the first usable model",
+                     is not declared keyless); the default selection falls through it",
                     default.model
                 )),
                 Err(message) => notes.push(format!(
-                    "default_model `{}` is not usable ({message}); falling back \
-                     to the first usable model",
+                    "default_model `{}` is not usable ({message}); the default selection \
+                     falls through it",
                     default.model
                 )),
             }
         }
-        self.first_usable_model()
-            .map(|(provider, model)| (ModelSelection::new(provider, model), notes))
-            .ok_or_else(|| SessionError::Config {
-                message: "a usable model provider — every configured provider lacks a \
-                          key (declare local servers `keyless = true`, or add a key via \
-                          auth.toml / `api_key_env`)"
-                    .to_string(),
-            })
+        match self.first_usable_model() {
+            Some((provider, model)) => Ok((Some(ModelSelection::new(provider, model)), notes)),
+            // The terminal arm degrades (the ruling reversal): teach,
+            // never scare — and the teaching branches on the same
+            // predicate the catalog's two halves hand the frontend
+            // (FRONTEND.md §3.1): no providers at all means `login`
+            // has nothing to validate against, so the fix is
+            // providers.toml and a restart; configured-but-unusable
+            // providers are exactly `login`'s targets, in-app.
+            None => {
+                notes.push(if self.inner.config.providers.is_empty() {
+                    "no usable model at this backend — there is no providers.toml at all, \
+                     which is the normal fresh-install state. Create ~/.tabit/providers.toml \
+                     with a provider (a key via ~/.tabit/auth.toml or the provider's \
+                     `api_key_env`; declare local servers `keyless = true`) and restart the \
+                     backend; the session runs selection-less until then"
+                        .to_string()
+                } else {
+                    "no usable model at this backend — every configured provider lacks a key. \
+                     Add one with the `login` command (it writes ~/.tabit/auth.toml and \
+                     refreshes the world — no restart), set the provider's `api_key_env`, or \
+                     declare local servers `keyless = true`; the session runs selection-less \
+                     until then, and a `model` command can name any configured ref at any time"
+                        .to_string()
+                });
+                Ok((None, notes))
+            }
+        }
     }
 
     /// Is this provider runnable — does it have the key material it
@@ -188,6 +268,77 @@ impl ModelRegistry {
                 selection.provider
             )),
         }
+    }
+
+    /// The boot catalog for the wire's `models_available`
+    /// announcement (protocol v21): every USABLE provider — the same
+    /// `usable` predicate `default_selection`'s rungs walk, never a
+    /// sibling — with its models, folded into the protocol's wire
+    /// types. The fold lives here because the registry owns config +
+    /// auth; the endpoint just emits. Providers walk in the config
+    /// map's alphabetical order (the same walk `first_usable_model`
+    /// uses), models in config-file order; display sorting is the
+    /// frontend's business.
+    pub fn available_catalog(&self) -> Vec<AvailableProvider> {
+        self.inner
+            .config
+            .providers
+            .iter()
+            .filter(|(id, _)| self.usable(id))
+            .map(|(id, provider)| AvailableProvider {
+                id: id.clone(),
+                name: provider.name.clone(),
+                models: provider
+                    .models
+                    .iter()
+                    .map(|model| AvailableModel {
+                        id: model.id.clone(),
+                        name: model.name.clone(),
+                        context_window: model.context_window,
+                        max_tokens: model.max_tokens,
+                        cost: model.cost.map(crate::model::wire_cost),
+                        reasoning: model.reasoning,
+                        input: model
+                            .input
+                            .iter()
+                            .map(|modality| {
+                                match modality {
+                                    InputModality::Text => "text",
+                                    InputModality::Image => "image",
+                                }
+                                .to_string()
+                            })
+                            .collect(),
+                        // Names only — the dial's request-merge maps
+                        // never cross the wire.
+                        thinking_levels: model
+                            .thinking_levels
+                            .iter()
+                            .map(|level| level.name.clone())
+                            .collect(),
+                    })
+                    .collect(),
+            })
+            .collect()
+    }
+
+    /// The login widget's targets (`models_available.missing_keys`,
+    /// v21 amended): the configured providers FAILING the `usable`
+    /// predicate — no resolvable key and no `keyless = true`
+    /// declaration — as identity-only entries. The complement of
+    /// [`Self::available_catalog`]'s fold over the same predicate;
+    /// alphabetical id order, like the catalog.
+    pub fn missing_keys(&self) -> Vec<MissingKeyProvider> {
+        self.inner
+            .config
+            .providers
+            .iter()
+            .filter(|(id, _)| !self.usable(id))
+            .map(|(id, provider)| MissingKeyProvider {
+                id: id.clone(),
+                name: provider.name.clone(),
+            })
+            .collect()
     }
 
     /// The last-resort pick: the first usable provider's first model

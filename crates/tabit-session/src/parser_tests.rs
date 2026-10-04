@@ -127,7 +127,6 @@ fn a_clean_session_parses_into_tree_context_register_and_stats() {
     let messages = crate::context_manager::ContextManager::from_tree(
         parsed.tree.clone(),
         std::sync::Arc::new(std::sync::Mutex::new(tabit_log::NullBuffer)),
-        tabit_log::uncosted(),
     )
     .messages();
     assert_eq!(messages.len(), 4);
@@ -147,7 +146,6 @@ fn consecutive_results_merge_into_one_user_message() {
     let messages = crate::context_manager::ContextManager::from_tree(
         parsed.tree.clone(),
         std::sync::Arc::new(std::sync::Mutex::new(tabit_log::NullBuffer)),
-        tabit_log::uncosted(),
     )
     .messages();
     assert_eq!(messages.len(), 3, "user + assistant + ONE merged batch");
@@ -276,7 +274,6 @@ fn branch_switching_via_checkout_rebuilds_head_and_context() {
     let texts: Vec<String> = crate::context_manager::ContextManager::from_tree(
         parsed.tree.clone(),
         std::sync::Arc::new(std::sync::Mutex::new(tabit_log::NullBuffer)),
-        tabit_log::uncosted(),
     )
     .messages()
     .iter()
@@ -313,7 +310,6 @@ fn a_v5_file_with_a_compaction_entry_loads_as_a_leaf() {
     let messages = crate::context_manager::ContextManager::from_tree(
         parsed.tree.clone(),
         std::sync::Arc::new(std::sync::Mutex::new(tabit_log::NullBuffer)),
-        tabit_log::uncosted(),
     )
     .messages();
     assert_eq!(messages.len(), 3, "summary + u2 + a2: {messages:?}");
