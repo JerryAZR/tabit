@@ -207,10 +207,20 @@ fn all_events() -> Vec<SessionEvent> {
                     thinking_levels: vec!["low".to_string(), "high".to_string()],
                 }],
             }],
-            missing_keys: vec![crate::MissingKeyProvider {
-                id: "locked".to_string(),
-                name: Some("The Locked provider".to_string()),
-            }],
+        },
+        SessionEvent::ProvidersAvailable {
+            providers: vec![
+                crate::ProviderStatus {
+                    id: "local".to_string(),
+                    name: None,
+                    auth: crate::ProviderAuth::Keyless,
+                },
+                crate::ProviderStatus {
+                    id: "locked".to_string(),
+                    name: Some("The Locked provider".to_string()),
+                    auth: crate::ProviderAuth::None,
+                },
+            ],
         },
         SessionEvent::NativeItem {
             turn_id: TURN.to_string(),
@@ -354,8 +364,9 @@ fn every_tag_agrees_with_the_wire_the_enum_and_the_list() {
     );
     // The model catalog: the same unstamped backend-level family,
     // UNCONDITIONAL (v21) — optionals absent when config is silent,
-    // the dial's names only, `reasoning` always stated, and the
-    // login widget's `missing_keys` riding alongside (v21, amended).
+    // the dial's names only, `reasoning` always stated. Pure picker
+    // data again (v22 — the `missing_keys` half moved out to
+    // `providers_available`).
     assert_eq!(
         serde_json::to_string(&SessionEvent::ModelsAvailable {
             providers: vec![AvailableProvider {
@@ -377,13 +388,39 @@ fn every_tag_agrees_with_the_wire_the_enum_and_the_list() {
                     thinking_levels: Vec::new(),
                 }],
             }],
-            missing_keys: vec![crate::MissingKeyProvider {
-                id: "locked".to_string(),
-                name: None,
-            }],
         })
         .expect("serialize"),
-        r#"{"type":"models_available","providers":[{"id":"local","models":[{"id":"m","context_window":200000,"cost":{"input":1.0,"output":4.0,"cache_read":0.1,"cache_write":0.4},"reasoning":false,"input":["text","image"],"thinking_levels":[]}]}],"missing_keys":[{"id":"locked"}]}"#
+        r#"{"type":"models_available","providers":[{"id":"local","models":[{"id":"m","context_window":200000,"cost":{"input":1.0,"output":4.0,"cache_read":0.1,"cache_write":0.4},"reasoning":false,"input":["text","image"],"thinking_levels":[]}]}]}"#
+    );
+    // The provider catalog (v22): every configured provider with its
+    // winning key source, the four states spelled as wire strings.
+    assert_eq!(
+        serde_json::to_string(&SessionEvent::ProvidersAvailable {
+            providers: vec![
+                crate::ProviderStatus {
+                    id: "env-backed".to_string(),
+                    name: None,
+                    auth: crate::ProviderAuth::Env,
+                },
+                crate::ProviderStatus {
+                    id: "keyless".to_string(),
+                    name: None,
+                    auth: crate::ProviderAuth::Keyless,
+                },
+                crate::ProviderStatus {
+                    id: "locked".to_string(),
+                    name: Some("The Locked provider".to_string()),
+                    auth: crate::ProviderAuth::None,
+                },
+                crate::ProviderStatus {
+                    id: "stored".to_string(),
+                    name: None,
+                    auth: crate::ProviderAuth::Stored,
+                },
+            ],
+        })
+        .expect("serialize"),
+        r#"{"type":"providers_available","providers":[{"id":"env-backed","auth":"env"},{"id":"keyless","auth":"keyless"},{"id":"locked","name":"The Locked provider","auth":"none"},{"id":"stored","auth":"stored"}]}"#
     );
     // The announce's wire spelling: a subagent child carries its
     // parentage and the spawning call's correlation id; a user

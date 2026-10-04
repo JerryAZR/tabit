@@ -28,12 +28,11 @@ impl Session {
         let Some(selection) = self.selection() else {
             // The teaching failure — carried as `run_failed { kind:
             // model }` by the caller. It branches on the same
-            // predicate as the boot's note (the catalog's two halves,
-            // FRONTEND.md §3.1): no providers at all means `login`
+            // predicate as the boot's note (`providers_available`,
+            // FRONTEND.md §3.2): no providers at all means `login`
             // has nothing to validate against — write providers.toml
-            // and restart; config exists but nothing is usable —
-            // `login` fixes it in-app, then `model` lands the
-            // selection.
+            // and restart; `auth: "none"` entries — `login` fixes it
+            // in-app, then `model` lands the selection.
             let message = if crate::lock::lock(&self.world).config.providers.is_empty() {
                 "no model selected — this backend has no providers.toml at all (the normal \
                  fresh-install state); create ~/.tabit/providers.toml and restart the backend"

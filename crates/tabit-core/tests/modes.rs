@@ -382,7 +382,7 @@ fn a_broken_config_is_a_json_setup_failure_with_the_guide() {
     let report: serde_json::Value =
         serde_json::from_str(lines.next().expect("the report line")).expect("report parses");
     assert_eq!(report["type"], "report", "the child speaks first: {report}");
-    assert_eq!(report["protocol_version"], 21, "{report}");
+    assert_eq!(report["protocol_version"], 22, "{report}");
     let failure: serde_json::Value =
         serde_json::from_str(lines.next().expect("the failure event line"))
             .expect("failure parses");

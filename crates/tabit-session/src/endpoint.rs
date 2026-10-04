@@ -804,7 +804,10 @@ impl SessionHostMount {
         // it emits even when empty — absence of the frame means
         // "protocol older than v21", never "no models", and an empty
         // `providers` is the legal no-usable-models state a frontend
-        // should surface as a setup warning (FRONTEND.md §6). Folded
+        // should surface as a setup warning (FRONTEND.md §6). The
+        // provider catalog follows in the same act (v22 — every
+        // configured provider with its winning key source, the
+        // login/logout view's data). Folded
         // from the current-world cell at attach — the same fold
         // login/logout re-run for their re-announcement.
         announce_catalog(&sink, &lock(&data.world).registry());
@@ -1414,16 +1417,24 @@ fn announce_session(
     }
 }
 
-/// The model catalog announcement — the one assembly for both
-/// emission sites (the boot's attach, the login/logout refresh's
-/// ack): backend-level (unstamped), unconditional, folded from the
-/// registry that owns the usable predicate.
+/// The catalog announcements — the one assembly for both emission
+/// sites (the boot's attach, the login/logout refresh's ack):
+/// backend-level (unstamped), unconditional, folded from the
+/// registry that owns the usable/key-source predicates. ONE act,
+/// both frames (v22): the picker's usable-only catalog, then the
+/// login/logout view's every-provider catalog — a world change
+/// re-announces the pair, last-wins fold.
 fn announce_catalog(sink: &HostSink, registry: &crate::registry::ModelRegistry) {
     sink.emit(
         None,
         SessionEvent::ModelsAvailable {
             providers: registry.available_catalog(),
-            missing_keys: registry.missing_keys(),
+        },
+    );
+    sink.emit(
+        None,
+        SessionEvent::ProvidersAvailable {
+            providers: registry.providers_catalog(),
         },
     );
 }

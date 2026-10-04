@@ -30,7 +30,9 @@ use tabit_providers::providers::{anthropic, openai};
 
 use crate::SessionError;
 use crate::session::ModelFactory;
-use tabit_protocol::{AvailableModel, AvailableProvider, MissingKeyProvider, ModelSelection};
+use tabit_protocol::{
+    AvailableModel, AvailableProvider, ModelSelection, ProviderAuth, ProviderStatus,
+};
 
 /// The host's current-world cell: the ONE registry every session
 /// builder reads AT CALL TIME (the create/open closures capture the
@@ -217,11 +219,11 @@ impl ModelRegistry {
             Some((provider, model)) => Ok((Some(ModelSelection::new(provider, model)), notes)),
             // The terminal arm degrades (the ruling reversal): teach,
             // never scare — and the teaching branches on the same
-            // predicate the catalog's two halves hand the frontend
-            // (FRONTEND.md §3.1): no providers at all means `login`
+            // predicate `providers_available` hands the frontend
+            // (FRONTEND.md §3.2): no providers at all means `login`
             // has nothing to validate against, so the fix is
-            // providers.toml and a restart; configured-but-unusable
-            // providers are exactly `login`'s targets, in-app.
+            // providers.toml and a restart; `auth: "none"` entries
+            // are exactly `login`'s targets, in-app.
             None => {
                 notes.push(if self.inner.config.providers.is_empty() {
                     "no usable model at this backend — there is no providers.toml at all, \
@@ -243,19 +245,39 @@ impl ModelRegistry {
         }
     }
 
-    /// Is this provider runnable — does it have the key material it
-    /// needs? A provider with neither a key nor the `keyless`
-    /// declaration is not a usable model provider.
-    fn usable(&self, provider_id: &str) -> bool {
+    /// The provider's winning key source (protocol v22's
+    /// `providers_available.auth`): the resolution order's outcome —
+    /// a stored auth.toml key beats the `api_key_env` variable,
+    /// which beats the declared `keyless = true` fallback. A keyless
+    /// provider WITH a stored key reports `Stored`: the key
+    /// genuinely rides requests (`keyless` is a fallback
+    /// declaration, not a prohibition). THE one predicate behind
+    /// both catalog folds and the `usable` derivation.
+    pub fn key_source(&self, provider_id: &str) -> ProviderAuth {
         let Some(provider) = self.inner.config.provider(provider_id) else {
-            return false;
+            return ProviderAuth::None;
         };
-        provider.keyless
-            || self
-                .inner
-                .config
-                .resolve_api_key(provider_id, &self.inner.auth)
-                .is_some()
+        if self.inner.auth.api_key(provider_id).is_some() {
+            return ProviderAuth::Stored;
+        }
+        if provider
+            .api_key_env
+            .as_deref()
+            .is_some_and(|name| std::env::var(name).is_ok())
+        {
+            return ProviderAuth::Env;
+        }
+        if provider.keyless {
+            return ProviderAuth::Keyless;
+        }
+        ProviderAuth::None
+    }
+
+    /// Is this provider runnable — does it have the key material it
+    /// needs? Derived from [`Self::key_source`]: anything but `None`
+    /// runs.
+    fn usable(&self, provider_id: &str) -> bool {
+        self.key_source(provider_id) != ProviderAuth::None
     }
 
     /// Why a preference (resumed selection) cannot run, if it cannot.
@@ -322,21 +344,22 @@ impl ModelRegistry {
             .collect()
     }
 
-    /// The login widget's targets (`models_available.missing_keys`,
-    /// v21 amended): the configured providers FAILING the `usable`
-    /// predicate — no resolvable key and no `keyless = true`
-    /// declaration — as identity-only entries. The complement of
-    /// [`Self::available_catalog`]'s fold over the same predicate;
-    /// alphabetical id order, like the catalog.
-    pub fn missing_keys(&self) -> Vec<MissingKeyProvider> {
+    /// The login/logout view's fold for the wire's
+    /// `providers_available` announcement (protocol v22): EVERY
+    /// configured provider, usable or not, with its winning key
+    /// source — the complement computation died with v21's
+    /// `missing_keys` (one fold per frame now: usable-only for the
+    /// picker, all of them for auth). Alphabetical id order, like
+    /// [`Self::available_catalog`].
+    pub fn providers_catalog(&self) -> Vec<ProviderStatus> {
         self.inner
             .config
             .providers
             .iter()
-            .filter(|(id, _)| !self.usable(id))
-            .map(|(id, provider)| MissingKeyProvider {
+            .map(|(id, provider)| ProviderStatus {
                 id: id.clone(),
                 name: provider.name.clone(),
+                auth: self.key_source(id),
             })
             .collect()
     }
@@ -383,7 +406,10 @@ impl ModelRegistry {
         // provider (owner ruling 2026-09): the selection fails here,
         // loudly, naming both fixes, instead of surfacing a bare 401
         // at request time. Declared keyless, the stubbed empty
-        // credential rides the same builders as everyone else.
+        // credential rides the same builders as everyone else. This
+        // match needs the key VALUE, so it consumes
+        // `resolve_api_key` directly; `key_source` is the same
+        // rule's reporting half (the wire's `auth` states).
         let api_key = match self
             .inner
             .config

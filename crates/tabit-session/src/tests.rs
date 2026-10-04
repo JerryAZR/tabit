@@ -2974,6 +2974,84 @@ async fn a_world_refresh_swaps_the_world_factory_and_rebuilds_at_open() {
 }
 
 #[tokio::test]
+async fn logout_then_login_restores_the_same_selection_without_a_model_command() {
+    // The user-facing roundtrip promise (FRONTEND.md §5): a session
+    // on provider P loses its run-open ability at logout
+    // (`run_failed { kind: "model" }` — the register stands; the key
+    // is gone) and regains it at login with the SAME selection, no
+    // `model` command needed. "Works" is pinned offline by the dead
+    // port: the build resolves the key and the request is attempted
+    // (`kind: "provider"`), where the key-less open never gets that
+    // far.
+    let store = temp_store("world-roundtrip");
+    let config = locked_provider_config();
+    let keyed = crate::ModelRegistry::new(
+        config.clone(),
+        Arc::new(
+            tabit_config::AuthConfig::from_toml_str(
+                "[providers.p]\napi_key = \"sk-test\"\n",
+                Path::new("auth.toml"),
+            )
+            .expect("auth"),
+        ),
+    );
+    let mut session = SessionBuilder::new(
+        store.clone(),
+        config.clone(),
+        keyed.auth().clone(),
+        Some(ModelSelection::new("p", "m")),
+    )
+    .expect("builder")
+    .world_factory(keyed.factory())
+    .create("C:/w")
+    .expect("session");
+
+    let failed_kinds = |summary: &crate::session::RunSummary| -> Vec<String> {
+        summary
+            .events
+            .iter()
+            .filter_map(|event| match event {
+                SessionEvent::RunFailed { kind, .. } => Some(kind.clone()),
+                _ => None,
+            })
+            .collect()
+    };
+    let selection = ModelSelection::new("p", "m");
+
+    let run = session.prompt("hi").await;
+    assert_eq!(
+        failed_kinds(&run),
+        vec![tabit_protocol::RunFailedKind::PROVIDER.to_string()],
+        "logged in: the build resolves the key; the dead port fails the request"
+    );
+
+    // Logout's world swap: keyless auth.
+    let unkeyed = crate::ModelRegistry::new(config.clone(), test_auth_empty());
+    session.refresh_world(config.clone(), unkeyed.factory());
+    let run = session.prompt("again").await;
+    assert_eq!(
+        failed_kinds(&run),
+        vec![tabit_protocol::RunFailedKind::MODEL.to_string()],
+        "logged out: the run never opens"
+    );
+
+    // Login again: the same selection serves, no `model` command.
+    session.refresh_world(config.clone(), keyed.factory());
+    let run = session.prompt("third").await;
+    assert_eq!(
+        failed_kinds(&run),
+        vec![tabit_protocol::RunFailedKind::PROVIDER.to_string()],
+        "re-logged in: the run opens again"
+    );
+    assert_eq!(
+        session.selection(),
+        Some(selection),
+        "the register never moved — no model command crossed"
+    );
+    std::fs::remove_dir_all(store.dir()).ok();
+}
+
+#[tokio::test]
 async fn a_custom_factory_survives_the_world_refresh() {
     // Provenance: `model_factory()` is the caller's own — a refresh
     // swaps the session's config but never this factory. The agent

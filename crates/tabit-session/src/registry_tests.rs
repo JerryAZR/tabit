@@ -583,12 +583,19 @@ fn the_available_catalog_is_empty_when_nothing_is_usable() {
     assert!(registry_with("", "").available_catalog().is_empty());
 }
 
-/// The login widget's half of the fold (v21, amended): exactly the
-/// providers failing `usable()`, identity only, alphabetical — the
-/// complement of the catalog over the same predicate.
+/// The login/logout view's fold (v22): EVERY configured provider
+/// with its winning key source — the four states in resolution
+/// order (stored > env > keyless > none), keyless-with-a-stored-key
+/// reporting `Stored` (the explicit act wins).
 #[test]
-fn missing_keys_names_exactly_the_unusable_providers() {
-    let raw = r#"
+fn the_providers_catalog_reports_every_providers_winning_key_source() {
+    let var = "TABIT_SESSION_TEST_PROVIDERS_CATALOG_KEY";
+    // SAFETY: unique variable name; set and removed around the test.
+    unsafe {
+        std::env::set_var(var, "env-secret");
+    }
+    let raw = &format!(
+        r#"
 [providers.beta]
 base_url = "https://beta.example/v1"
 api = "openai-completions"
@@ -611,7 +618,17 @@ keyless = true
 
 [[providers.alpha.models]]
 id = "a1"
-"#;
+
+[providers.delta]
+base_url = "https://delta.example/v1"
+api = "openai-completions"
+api_key_env = "{var}"
+keyless = true
+
+[[providers.delta.models]]
+id = "d1"
+"#
+    );
     let registry = registry_with(
         raw,
         r#"
@@ -619,34 +636,77 @@ id = "a1"
 api_key = "dummy"
 "#,
     );
-    let missing = registry.missing_keys();
+    let statuses = registry.providers_catalog();
     assert_eq!(
-        missing,
-        vec![MissingKeyProvider {
-            id: "gamma".to_string(),
-            name: Some("The Gamma provider".to_string()),
-        }],
-        "gamma has no key and no keyless declaration; alpha is keyless, beta is keyed"
+        statuses,
+        vec![
+            ProviderStatus {
+                id: "alpha".to_string(),
+                name: None,
+                auth: ProviderAuth::Keyless,
+            },
+            ProviderStatus {
+                id: "beta".to_string(),
+                name: None,
+                auth: ProviderAuth::Stored,
+            },
+            // env wins over the keyless declaration — the key
+            // genuinely rides requests.
+            ProviderStatus {
+                id: "delta".to_string(),
+                name: None,
+                auth: ProviderAuth::Env,
+            },
+            ProviderStatus {
+                id: "gamma".to_string(),
+                name: Some("The Gamma provider".to_string()),
+                auth: ProviderAuth::None,
+            },
+        ],
+        "alphabetical, all four states, the resolution order's winners"
     );
-    // The complement law: usable + missing = configured.
+    // The usable fold is the same rule's other half: `none` drops
+    // out, the rest stand.
     assert_eq!(
         registry
             .available_catalog()
             .iter()
             .map(|p| p.id.as_str())
             .collect::<Vec<_>>(),
-        vec!["alpha", "beta"]
+        vec!["alpha", "beta", "delta"]
     );
-    // Keyed, gamma drops off — the re-fold login triggers.
+    // A keyless provider WITH a stored key reports `stored` (the
+    // explicit user act wins over the fallback declaration), and the
+    // env winner flips to stored when auth.toml lands a key.
     let keyed = registry_with(
         raw,
         r#"
-[providers.beta]
+[providers.alpha]
 api_key = "dummy"
 
-[providers.gamma]
+[providers.delta]
 api_key = "dummy"
 "#,
     );
-    assert!(keyed.missing_keys().is_empty());
+    let auth_of = |id: &str| keyed.key_source(id);
+    assert_eq!(auth_of("alpha"), ProviderAuth::Stored);
+    assert_eq!(auth_of("delta"), ProviderAuth::Stored);
+    assert_eq!(auth_of("gamma"), ProviderAuth::None);
+    // SAFETY: see above.
+    unsafe {
+        std::env::remove_var(var);
+    }
+}
+
+/// An unknown provider id reports `None` — the catalog folds only
+/// configured providers, so the state doubles as the
+/// unknown-provider answer for `usable()`.
+#[test]
+fn key_source_is_none_for_an_unknown_provider() {
+    let registry = registry_with(TWO_MODELS, "");
+    assert_eq!(registry.key_source("ghost"), ProviderAuth::None);
+    assert!(
+        registry.providers_catalog().iter().all(|p| p.id != "ghost"),
+        "unknown ids never cross the wire"
+    );
 }

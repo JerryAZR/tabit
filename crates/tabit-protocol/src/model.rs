@@ -64,19 +64,46 @@ pub struct AvailableProvider {
     pub models: Vec<AvailableModel>,
 }
 
-/// One configured provider that fails the usable predicate (no
-/// resolvable key, no `keyless = true` declaration) — a
-/// `models_available.missing_keys` entry: identity only, the login
-/// widget's targets. The models list stays usable-only (the picker
-/// contract); this list is what `login` can fix.
+/// One configured provider in the `providers_available` catalog
+/// (v22): identity plus the winning key source. Unlike
+/// [`AvailableProvider`] this covers EVERY configured provider,
+/// usable or not — the login/logout view's data (the models catalog
+/// stays the picker's). Providers arrive in alphabetical id order.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MissingKeyProvider {
-    /// The provider's config key (the id `login` addresses).
+pub struct ProviderStatus {
+    /// The provider's config key (the id `login`/`logout` address).
     pub id: String,
     /// The provider's display name, when configured (frontends fall
     /// back to the id).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// The winning key source — the resolution order's outcome.
+    pub auth: ProviderAuth,
+}
+
+/// Where a provider's key material comes from (v22) — the winning
+/// source in resolution order: a stored auth.toml key beats the
+/// `api_key_env` variable, which beats the declared `keyless = true`
+/// fallback, which is all that remains before `None`. The order is
+/// the law: a keyless provider WITH a stored key reports `Stored` —
+/// the key genuinely rides requests (`keyless` is a fallback
+/// declaration, not a prohibition; the explicit user act wins).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderAuth {
+    /// auth.toml holds a key for the provider (the `login` command's
+    /// write — the explicit user act).
+    Stored,
+    /// The provider's `api_key_env` environment variable is set.
+    /// Display-only for a frontend: the app cannot unset a
+    /// persistent environment variable, so no logout is offered.
+    Env,
+    /// No key from any source, but the provider declares
+    /// `keyless = true` (a local server).
+    Keyless,
+    /// No key from any source and not keyless — the provider is not
+    /// runnable; this is `login`'s target.
+    None,
 }
 
 /// One model in [`AvailableProvider`]: the id a `model` command
