@@ -572,7 +572,7 @@ describe("InteractiveMode", () => {
 		assert.strictEqual(view.footer?.inputTokens, 0);
 	});
 
-	test("the model catalog (v21): last-wins fold, missing keys listed, empty catalog warns with the branched fix", () => {
+	test("the model/provider catalogs (v21+v22): last-wins folds, the setup predicate warns with the branched fix", () => {
 		const { view, mode, feed, control } = harness();
 		boot(control, feed);
 		feed({
@@ -581,25 +581,36 @@ describe("InteractiveMode", () => {
 				{ id: "anthropic", models: [{ id: "claude", reasoning: true, input: ["text"], thinking_levels: ["low"] }] },
 				{ id: "local", name: "Local", models: [{ id: "m1", reasoning: false, input: ["text"], thinking_levels: [] }] },
 			],
-			missing_keys: [{ id: "openai" }],
+		});
+		feed({
+			type: "providers_available",
+			providers: [
+				{ id: "anthropic", auth: "stored" },
+				{ id: "local", auth: "keyless" },
+				{ id: "openai", auth: "none" },
+			],
 		});
 		assert.strictEqual(mode.modelsCatalog.length, 2);
 		assert.strictEqual(mode.modelsCatalog[0]!.id, "anthropic");
-		assert.strictEqual(mode.missingKeyProviders[0]!.id, "openai");
+		assert.deepStrictEqual(mode.providerStatuses.map(p => `${p.id}:${p.auth}`), ["anthropic:stored", "local:keyless", "openai:none"]);
 		assert.ok(view.notes.some(n => n.text.includes("no key for: openai")));
 
 		// Re-announcement replaces wholesale (login landed elsewhere).
-		feed({ type: "models_available", providers: [{ id: "openai", models: [{ id: "gpt", reasoning: false, input: ["text"], thinking_levels: [] }] }], missing_keys: [] });
+		feed({ type: "models_available", providers: [{ id: "openai", models: [{ id: "gpt", reasoning: false, input: ["text"], thinking_levels: [] }] }] });
+		feed({ type: "providers_available", providers: [{ id: "openai", auth: "stored" }] });
 		assert.deepStrictEqual(mode.modelsCatalog.map(p => p.id), ["openai"]);
-		assert.strictEqual(mode.missingKeyProviders.length, 0);
+		assert.strictEqual(mode.providerStatuses.length, 1);
 
-		// Empty + missing keys: config exists, nothing usable — login fixes.
-		feed({ type: "models_available", providers: [], missing_keys: [{ id: "openai" }] });
+		// Empty catalog + key-less providers: config exists, nothing
+		// usable — login fixes in-app.
+		feed({ type: "models_available", providers: [] });
+		feed({ type: "providers_available", providers: [{ id: "openai", auth: "none" }] });
 		assert.strictEqual(view.notes.at(-1)?.kind, "warn");
 		assert.ok((view.notes.at(-1)?.text ?? "").includes("missing keys for: openai"));
 
-		// Empty + no missing keys: no config at all — restart path.
-		feed({ type: "models_available", providers: [], missing_keys: [] });
+		// No providers at all: no config — the restart path.
+		feed({ type: "models_available", providers: [] });
+		feed({ type: "providers_available", providers: [] });
 		assert.ok((view.notes.at(-1)?.text ?? "").includes("providers.toml"));
 	});
 

@@ -63,11 +63,14 @@ columns).
 
 ## 2. `/login` (+ `/logout`)
 
-The v21 in-app auth path. Reuses #1's selector seam: `/login` lists the
-catalog's `missing_keys` providers (the login widget's targets), a key
-prompt collects the secret, `login { provider, api_key }` rides the wire,
-the re-announced `models_available` is the ack, `error { kind: "auth" }`
-the failure. `/logout <provider>` is one command, idempotent.
+The v21/v22 in-app auth path. Reuses #1's selector seam: `/login` lists
+`providers_available`'s `auth: "none"` providers (the login widget's
+targets; `env` rows are display-only — the app cannot unset a persistent
+variable), a key prompt collects the secret, `login { provider, api_key }`
+rides the wire, the re-announced `models_available` +
+`providers_available` pair is the ack, `error { kind: "auth" }` the
+failure. `/logout <provider>` is offered on `auth: "stored"` rows — one
+command, idempotent.
 
 **Decisions**: masked vs. unmasked key input (pi's `Input` is unmasked —
 no password mode exists in pi-tui); the key must not land in the editor

@@ -29,7 +29,7 @@
 import { log } from "./log.ts";
 import { SessionTree } from "./session-tree.ts";
 import { PROTOCOL_VERSION } from "./protocol.ts";
-import type { AvailableProvider, MissingKeyProvider, ModelCost, ParsedServerFrame, ServerControlFrame, SessionEvent, Usage } from "./protocol.ts";
+import type { AvailableProvider, ModelCost, ParsedServerFrame, ProviderStatus, ServerControlFrame, SessionEvent, Usage } from "./protocol.ts";
 
 export interface PendingMessage {
 	id: string;
@@ -184,9 +184,10 @@ export class InteractiveMode {
 	 *  on every `models_available` (the boot announcement and each world
 	 *  refresh). The picker's source when it lands. */
 	#catalog: AvailableProvider[] = [];
-	/** Configured providers with no resolvable key (v21) — the login
-	 *  widget's targets. */
-	#missingKeys: MissingKeyProvider[] = [];
+	/** Every configured provider with its winning key source (v22) —
+	 *  unconditional, folded last-wins with each world refresh. Login
+	 *  targets re-derive from it (`auth: "none"`); `env` is display-only. */
+	#providerStatuses: ProviderStatus[] = [];
 	#pending: PendingMessage[] = [];
 	#skills: SkillInfo[] = [];
 	#keybindings: KeybindingFact[] = [];
@@ -232,9 +233,9 @@ export class InteractiveMode {
 		return this.#catalog;
 	}
 
-	/** Providers configured but missing keys, latest announcement (v21). */
-	get missingKeyProviders(): readonly MissingKeyProvider[] {
-		return this.#missingKeys;
+	/** Every configured provider with its winning key source (v22). */
+	get providerStatuses(): readonly ProviderStatus[] {
+		return this.#providerStatuses;
 	}
 
 	/** The session's register (provider + model ids), for the picker's
@@ -651,26 +652,31 @@ export class InteractiveMode {
 			this.#emitFooter();
 		},
 		models_available: event => {
-			// v21: backend-level, always emitted (even empty), re-announced
-			// on world change — a last-wins wholesale fold. The empty
-			// catalog is the setup state (no run can open): the signal is
-			// mandatory, and the fix branches on the predicate (§3.1).
+			// v21: the usable-model picker catalog — backend-level, always
+			// emitted (even empty), re-announced on world change, last-wins.
+			// The setup-state warning rides providers_available (v22), which
+			// follows in the same act with the full key-source picture.
 			this.#catalog = event.providers;
-			this.#missingKeys = event.missing_keys;
+			if (event.providers.length === 0) return;
+			const models = event.providers.reduce((n, p) => n + p.models.length, 0);
+			this.#view.addNote(`${models} model(s) across ${event.providers.length} provider(s)`, "info");
+		},
+		providers_available: event => {
+			// v22: unconditional, one act with models_available. The setup
+			// predicate (§3.2) branches the first-run teaching here.
+			this.#providerStatuses = event.providers;
 			if (event.providers.length === 0) {
-				this.#view.addNote(
-					event.missing_keys.length === 0
-						? "no providers configured at this backend — write ~/.tabit/providers.toml and restart"
-						: `no usable models — missing keys for: ${event.missing_keys.map(p => p.id).join(", ")}`,
-					"warn",
-				);
+				this.#view.addNote("no providers configured at this backend — write ~/.tabit/providers.toml and restart", "warn");
 				return;
 			}
-			const models = event.providers.reduce((n, p) => n + p.models.length, 0);
-			this.#view.addNote(
-				`${models} model(s) across ${event.providers.length} provider(s)${event.missing_keys.length > 0 ? ` — no key for: ${event.missing_keys.map(p => p.id).join(", ")}` : ""}`,
-				"info",
-			);
+			const missing = event.providers.filter(p => p.auth === "none");
+			if (this.#catalog.length === 0) {
+				this.#view.addNote(`no usable models — missing keys for: ${missing.map(p => p.id).join(", ")}`, "warn");
+				return;
+			}
+			if (missing.length > 0) {
+				this.#view.addNote(`no key for: ${missing.map(p => p.id).join(", ")} — login fixes in-app`, "info");
+			}
 		},
 		// --- interactions ------------------------------------------------------------------
 		interaction_request: event => {

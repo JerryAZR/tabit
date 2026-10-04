@@ -41,10 +41,14 @@
  * backend-level `login`/`logout` commands (the re-announced catalog is
  * the ack, `error { kind: "auth" }` the failure); zero config boots —
  * `session_opened.model` is nullable (null = no selection, serialized
- * present).
+ * present). v22: `providers_available` — every configured provider with
+ * its winning key source (`stored`/`env`/`keyless`/`none`), announced
+ * unconditionally after `models_available` and re-announced with it on
+ * every world change; **breaking**: `models_available.missing_keys` is
+ * removed (login targets re-derive: `auth: "none"`).
  */
 
-export const PROTOCOL_VERSION = 21;
+export const PROTOCOL_VERSION = 22;
 
 // ---------------------------------------------------------------------------
 // Commands (frontend → backend). Fire-and-forget; outcomes arrive as
@@ -117,11 +121,18 @@ export interface AvailableProvider {
 	models: AvailableModel[];
 }
 
-/** A configured provider failing the usable predicate (v21) — identity
- *  only; the login widget's targets. */
-export interface MissingKeyProvider {
+/** Where a provider's key material comes from (v22) — the winning source
+ *  in resolution order: a stored auth.toml key beats `api_key_env`, which
+ *  beats the `keyless = true` declaration. `env` is display-only (the app
+ *  cannot unset a persistent variable); `none` is `login`'s target. */
+export type ProviderAuth = "stored" | "env" | "keyless" | "none";
+
+/** One configured provider in the unconditional `providers_available`
+ *  announcement (v22): identity plus the winning key source. */
+export interface ProviderStatus {
 	id: string;
 	name?: string;
+	auth: ProviderAuth;
 }
 
 /** Per-million-token pricing, USD — the mirror of tabit-config's cost record. */
@@ -298,7 +309,8 @@ export type SessionEvent =
 			/** The spawning tool call's internal id — pairs the child with the exact open tool_call. */
 			parent_call?: string;
 	  }
-	| { type: "models_available"; providers: AvailableProvider[]; missing_keys: MissingKeyProvider[] }
+	| { type: "models_available"; providers: AvailableProvider[] }
+	| { type: "providers_available"; providers: ProviderStatus[] }
 	| {
 			type: "model_changed";
 			provider: string;
@@ -361,6 +373,7 @@ const EVENT_TYPES = new Set([
 	"session_opened",
 	"model_changed",
 	"models_available",
+	"providers_available",
 	"native_item",
 	"interaction_request",
 	"interaction_settled",

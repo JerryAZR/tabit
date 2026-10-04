@@ -19,10 +19,10 @@ describe("protocol: parseServerFrame", () => {
 	});
 
 	test("control frames parse with their fields", () => {
-		const parsed = parseServerFrame('{"type":"report","protocol_version":21}');
+		const parsed = parseServerFrame('{"type":"report","protocol_version":22}');
 		assert.deepStrictEqual(parsed, {
 			kind: "control",
-			frame: { type: "report", protocol_version: 21 },
+			frame: { type: "report", protocol_version: 22 },
 		});
 	});
 
@@ -58,9 +58,9 @@ describe("protocol: parseServerFrame", () => {
 		});
 	});
 
-	test("the v21 catalog parses: usable providers with per-model facts, missing_keys identities", () => {
+	test("the v21 catalog parses: usable providers with per-model facts", () => {
 		const parsed = parseServerFrame(
-			'{"type":"models_available","providers":[{"id":"anthropic","models":[{"id":"claude","reasoning":true,"input":["text","image"],"thinking_levels":["low","high"]}]}],"missing_keys":[{"id":"openai"}]}',
+			'{"type":"models_available","providers":[{"id":"anthropic","models":[{"id":"claude","reasoning":true,"input":["text","image"],"thinking_levels":["low","high"]}]}]}',
 		);
 		assert.deepStrictEqual(parsed, {
 			kind: "event",
@@ -71,7 +71,25 @@ describe("protocol: parseServerFrame", () => {
 				providers: [
 					{ id: "anthropic", models: [{ id: "claude", reasoning: true, input: ["text", "image"], thinking_levels: ["low", "high"] }] },
 				],
-				missing_keys: [{ id: "openai" }],
+			},
+		});
+	});
+
+	test("the v22 provider status frame parses: every provider with its winning key source", () => {
+		const parsed = parseServerFrame(
+			'{"type":"providers_available","providers":[{"id":"anthropic","auth":"env"},{"id":"local","name":"Local","auth":"keyless"},{"id":"openai","auth":"none"}]}',
+		);
+		assert.deepStrictEqual(parsed, {
+			kind: "event",
+			stream: undefined,
+			origin: undefined,
+			event: {
+				type: "providers_available",
+				providers: [
+					{ id: "anthropic", auth: "env" },
+					{ id: "local", name: "Local", auth: "keyless" },
+					{ id: "openai", auth: "none" },
+				],
 			},
 		});
 	});
@@ -130,6 +148,6 @@ describe("protocol: toWireLine", () => {
 		// The report-model version check kills mismatches; a silent bump here
 		// would strand every copy of this frontend against a backend it can't
 		// talk to.
-		assert.strictEqual(PROTOCOL_VERSION, 21);
+		assert.strictEqual(PROTOCOL_VERSION, 22);
 	});
 });

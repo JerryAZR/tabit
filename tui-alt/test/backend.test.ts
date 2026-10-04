@@ -87,24 +87,36 @@ describe("backend: the child seam over the mock", () => {
 		await exitPromise;
 	});
 
-	test("login folds the world and re-announces the catalog (the ack); a bad login is error { kind: auth }", { timeout: 15000 }, async () => {
+	test("login folds the world and re-announces both frames (the ack); a bad login is error { kind: auth }", { timeout: 15000 }, async () => {
 		const { frames, backend, exitPromise } = rigUp("basic");
-		await until(() => frames.some(f => typeOf(f) === "models_available"), 8000, "boot catalog");
+		await until(() => frames.some(f => typeOf(f) === "providers_available"), 8000, "boot catalog");
 		const catalogs = () => frames.filter(f => f.kind === "event" && f.event.type === "models_available");
+		const statuses = () => frames.filter(f => f.kind === "event" && f.event.type === "providers_available");
 
-		// The boot catalog: one usable provider, one missing key.
+		// The boot act: one usable provider in the catalog; the status
+		// frame names every configured provider's key source (v22).
 		const bootCatalog = catalogs()[0]!;
 		if (bootCatalog.kind !== "event" || bootCatalog.event.type !== "models_available") throw new Error("catalog");
 		assert.deepStrictEqual(bootCatalog.event.providers.map(p => p.id), ["mock"]);
-		assert.deepStrictEqual(bootCatalog.event.missing_keys.map(p => p.id), ["locked"]);
+		const bootStatus = statuses()[0]!;
+		if (bootStatus.kind !== "event" || bootStatus.event.type !== "providers_available") throw new Error("status");
+		assert.deepStrictEqual(
+			bootStatus.event.providers.map(p => `${p.id}:${p.auth}`),
+			["locked:none", "mock:keyless"],
+		);
 
-		// login lands the key; the re-announced catalog is the ack.
+		// login lands the key; the re-announced pair is the ack.
 		backend.login("locked", "test-key");
-		await until(() => catalogs().length === 2, 8000, "re-announced catalog");
+		await until(() => catalogs().length === 2 && statuses().length === 2, 8000, "re-announced world");
 		const after = catalogs()[1]!;
 		if (after.kind !== "event" || after.event.type !== "models_available") throw new Error("catalog");
 		assert.deepStrictEqual(after.event.providers.map(p => p.id).sort(), ["locked", "mock"]);
-		assert.deepStrictEqual(after.event.missing_keys, []);
+		const afterStatus = statuses()[1]!;
+		if (afterStatus.kind !== "event" || afterStatus.event.type !== "providers_available") throw new Error("status");
+		assert.deepStrictEqual(
+			afterStatus.event.providers.map(p => `${p.id}:${p.auth}`),
+			["locked:stored", "mock:keyless"],
+		);
 
 		// An empty key is rejected in-band: error { kind: auth }, no re-fold.
 		backend.login("locked", "  ");
@@ -116,7 +128,16 @@ describe("backend: the child seam over the mock", () => {
 
 		// logout is total: unknown provider is a no-op, still acked.
 		backend.logout("no-such-provider");
-		await until(() => catalogs().length === 3, 8000, "logout ack");
+		await until(() => catalogs().length === 3 && statuses().length === 3, 8000, "logout ack");
+		// logout of the stored provider returns it to login's target.
+		backend.logout("locked");
+		await until(() => statuses().length === 4, 8000, "logout fold");
+		const finalStatus = statuses()[3]!;
+		if (finalStatus.kind !== "event" || finalStatus.event.type !== "providers_available") throw new Error("status");
+		assert.deepStrictEqual(
+			finalStatus.event.providers.map(p => `${p.id}:${p.auth}`),
+			["locked:none", "mock:keyless"],
+		);
 		backend.shutdown();
 		await exitPromise;
 	});

@@ -18,7 +18,7 @@
 
 import * as readline from "node:readline";
 
-import { PROTOCOL_VERSION, type AvailableModel, type AvailableProvider, type MissingKeyProvider } from "./protocol.ts";
+import { PROTOCOL_VERSION, type AvailableModel, type ProviderAuth } from "./protocol.ts";
 
 const scenario = process.argv.includes("--scenario") ? process.argv[process.argv.indexOf("--scenario") + 1] : "basic";
 
@@ -352,38 +352,50 @@ function takeQueued(): { id: string; text: string } | undefined {
 	return queued.shift();
 }
 
-// The mock's config world (v21): one usable provider, one configured
-// but missing its key (the login widget's target). login/logout fold it.
-const world: { usable: AvailableProvider[]; missing: MissingKeyProvider[] } = {
-	usable: [
-		{
-			id: "mock",
-			name: "Mock Provider",
-			models: [
-				{
-					id: "mock-model",
-					name: "Mock Model",
-					context_window: 200000,
-					max_tokens: 8192,
-					cost: { input: 1, output: 4, cache_read: 0.1, cache_write: 0.4 },
-					reasoning: true,
-					input: ["text"],
-					thinking_levels: ["low", "high"],
-				},
-			],
-		},
-	],
-	missing: [{ id: "locked", name: "Locked Provider" }],
-};
-const LOCKED_MODELS: AvailableModel[] = [{ id: "locked-model", reasoning: false, input: ["text"], thinking_levels: [] }];
+// The mock's config world (v22): every configured provider with its
+// winning key source — "mock" is keyless (a local server), "locked" is
+// configured but has no key (login's target). login/logout fold it.
+interface MockProvider {
+	id: string;
+	name?: string;
+	auth: ProviderAuth;
+	/** The `keyless = true` declaration — logout falls back to it. */
+	keyless?: boolean;
+	models: AvailableModel[];
+}
+const world: MockProvider[] = [
+	{ id: "locked", name: "Locked Provider", auth: "none", models: [{ id: "locked-model", reasoning: false, input: ["text"], thinking_levels: [] }] },
+	{
+		id: "mock",
+		name: "Mock Provider",
+		auth: "keyless",
+		keyless: true,
+		models: [
+			{
+				id: "mock-model",
+				name: "Mock Model",
+				context_window: 200000,
+				max_tokens: 8192,
+				cost: { input: 1, output: 4, cache_read: 0.1, cache_write: 0.4 },
+				reasoning: true,
+				input: ["text"],
+				thinking_levels: ["low", "high"],
+			},
+		],
+	},
+];
 
-/** The catalog announcement — once at boot, then as the login/logout
- *  ack (last-wins re-announcement). */
-const announceModels = () => {
+/** The world announcement (v22): one act, both frames — the usable-model
+ *  catalog, then every provider's key-source status. Emitted at boot and
+ *  as the login/logout ack (last-wins re-announcement). */
+const announceWorld = () => {
 	emitNow({
 		type: "models_available",
-		providers: world.usable.map(p => ({ ...p })),
-		missing_keys: world.missing.map(({ id, name }) => ({ id, name })),
+		providers: world.filter(p => p.auth !== "none").map(({ id, name, models }) => ({ id, name, models })),
+	});
+	emitNow({
+		type: "providers_available",
+		providers: world.map(({ id, name, auth }) => ({ id, name, auth })),
 	});
 };
 
@@ -441,7 +453,7 @@ emitNow({
 	],
 	conflicts: [{ kind: "replaces_core", extension: "release", tool: "edit" }],
 });
-announceModels();
+announceWorld();
 emitEvent(BOOT, {
 	type: "model_changed",
 	provider: "mock",
@@ -575,7 +587,7 @@ stdin.on("line", line => {
 			// catalog; a known ref announces model_changed at once.
 			const provider = String(frame.provider);
 			const modelId = String(frame.model);
-			const row = world.usable.find(p => p.id === provider)?.models.find(m => m.id === modelId);
+			const row = world.find(p => p.id === provider && p.auth !== "none")?.models.find(m => m.id === modelId);
 			if (row === undefined) {
 				emitEvent(String(frame.session), { type: "error", kind: "model", message: `unknown model: ${provider}/${modelId}` });
 				return;
@@ -592,11 +604,12 @@ stdin.on("line", line => {
 			return;
 		}
 		case "login": {
-			// v21: validate against config, then fold + re-announce (the ack).
+			// v21/v22: validate against config, then fold + re-announce (the
+			// ack — one act, both frames).
 			const provider = String(frame.provider);
 			const key = String(frame.api_key ?? "");
-			const known = world.usable.some(p => p.id === provider) || world.missing.some(p => p.id === provider);
-			if (!known) {
+			const entry = world.find(p => p.id === provider);
+			if (entry === undefined) {
 				emitNow({ type: "error", kind: "auth", message: `unknown provider: ${provider}` });
 				return;
 			}
@@ -604,26 +617,22 @@ stdin.on("line", line => {
 				emitNow({ type: "error", kind: "auth", message: "empty key — nothing stored" });
 				return;
 			}
-			const idx = world.missing.findIndex(p => p.id === provider);
-			if (idx !== -1) {
-				const [moved] = world.missing.splice(idx, 1);
-				world.usable.push({ ...moved!, models: LOCKED_MODELS });
-			}
-			// Already-usable providers succeed unchanged (auth.toml wins over
-			// the env case — the catalog stands); either way, re-announce.
-			announceModels();
+			// Already-usable providers succeed unchanged in the catalog
+			// (auth.toml wins over the env/keyless source — the explicit act).
+			entry.auth = "stored";
+			announceWorld();
 			return;
 		}
 		case "logout": {
-			// v21: total and idempotent — unknown provider or absent key is a
-			// no-op, still acked by the re-announced catalog.
+			// v21/v22: total and idempotent — unknown provider or no stored
+			// key is a no-op, still acked by the re-announcement. The
+			// provider falls back to its keyless declaration when it has one.
 			const provider = String(frame.provider);
-			const idx = world.usable.findIndex(p => p.id === provider);
-			if (idx !== -1) {
-				const [moved] = world.usable.splice(idx, 1);
-				world.missing.push({ id: moved!.id, name: moved!.name });
+			const entry = world.find(p => p.id === provider);
+			if (entry !== undefined && entry.auth === "stored") {
+				entry.auth = entry.keyless === true ? "keyless" : "none";
 			}
-			announceModels();
+			announceWorld();
 			return;
 		}
 		default:
