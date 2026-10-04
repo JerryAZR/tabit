@@ -132,8 +132,8 @@ impl Session {
 /// Build the agent a selection resolves to. Everything except the
 /// selection is fixed at assembly (factory, config, preamble, tools),
 /// so this is a pure function of its arguments — the derivation the
-/// cache check in [`Session::ensure_agent`] and the one-shot build in
-/// [`Session::assemble`] share.
+/// cache check in [`Session::ensure_agent`] and the one-shot
+/// `model_prompt` build in `services.rs` share.
 pub(crate) fn build_agent(
     model_factory: &ModelFactory,
     config: &TabitConfig,
