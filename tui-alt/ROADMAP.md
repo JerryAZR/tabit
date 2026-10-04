@@ -80,12 +80,16 @@ is ours — the key lives only in the card's own `Input`, which is not the
 history-keeping editor, and nothing echoes it post-submit). The
 zero-config boot's first-run flow (empty catalog) should guide here.
 
-## 3. Skill chips
+## 3. Skill chips — **deferred (owner ruling 2026-10: non-critical)**
 
-Manual skill invocation (the wire's `<skill name="…"/>` tag) with the
-chip UX: the editor shows `[skill: commit]`, backspace deletes the whole
-chip atomically, submit expands to the tag — the wire never sees the
-chip.
+**Interim (landed)**: the slash table's skill entries format the wire's
+`<skill name="…"/>` tag into the message — raw XML markers in messages
+are the accepted UX for now (the backend expands them at the message
+door since v20; the dropdown's type column still marks them `skill`).
+
+**Deferred design** (kept for when chips return): the editor shows
+`[skill: commit]`, backspace deletes the whole chip atomically, submit
+expands to the tag — the wire never sees the chip.
 
 **Mechanism (pi-tui, confirmed)**: text marker + ID registry + the
 editor's `segmentWithMarkers` wrapper fusing the marker into one
@@ -93,9 +97,12 @@ indivisible grapheme — cursor movement, wrap, hit-testing, and backspace
 all go through the segmenter, so atomicity is inherent; undo snapshots
 include the registry; submit-time expansion already exists for paste
 markers (`[paste #1 +123 lines]`). A skill chip is a second marker rule.
-**Open implementation question**: whether pi-tui 0.85.1 exposes marker
-registration publicly or the editor needs extending (the scrollback
-sibling already forks pi-tui — a known move).
+**The blocker (scouted at pi-tui 1.0.2)**: the machinery is private —
+`pastes`/`expandPasteMarkers` are internal; the public surface is
+plain-text `insertTextAtCursor` + `getExpandedText()`. Chips need a small
+public API (`registerChip(label, expansion)`) — upstreamable (pi's own
+skill autocomplete would benefit) or carried in a fork, which the
+scrollback sibling already maintains.
 
 Invocation UX: `/name` autocomplete against the session's skill catalog
 inserts the chip (skills stop being display-only slash entries; the tag
@@ -103,15 +110,17 @@ format happens at submit).
 
 ## 4. Attachment blocks
 
-Pasted/dragged images as chips in the editor (rides #3's mechanism).
-**v0 needs no wire change** (pi's own path): clipboard image → temp file
-→ a path chip in the prompt; the model reads it with the `read` tool
-(already image-capable). Clipboard acquisition is the new machinery
-(wl-paste / xclip / WSL powershell / pi-tui's native platform helpers —
-pi's `clipboard-image.ts` is the reference). True inline image content in
-`message` is a protocol decision with the backend — deferred. The
-catalog's per-model `input` modalities (v21) tell us whether the bound
-model accepts images at all — the UI can warn early.
+Pasted/dragged images in the editor. **Chips share item 3's blocker**
+(the editor's marker machinery is private) and its deferral — the chip is
+cosmetic only. The substance needs neither chips nor a wire change (pi's
+own path): clipboard image → temp file → plain path text in the prompt;
+the model reads it with the `read` tool (already image-capable). pi-tui
+1.0.2 bundles the acquisition machinery (`getNativeClipboard()` —
+macOS/Windows/X11 readers, `getFilePaths()` on macOS; pi's
+`clipboard-image.ts` is the reference for Wayland/WSL). True inline image
+content in `message` is a protocol decision with the backend — deferred.
+The catalog's per-model `input` modalities (v21) tell us whether the
+bound model accepts images at all — the UI can warn early.
 
 ## 5. M2: child streams / focus switching
 

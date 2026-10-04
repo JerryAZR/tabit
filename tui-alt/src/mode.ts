@@ -107,7 +107,8 @@ export interface ModeView {
 	beginReplay(): void;
 	endReplay(): void;
 	/** The skill catalog (from `skills_available`) — the editor's `/`
-	 *  completion lists them; invocation is display-only (no wire command). */
+	 *  completion lists them; selecting one formats the wire's invocation
+	 *  tag (the `<skill name="…"/>` marker) into the message. */
 	setSkills(skills: SkillInfo[]): void;
 	addUser(entryId: string, text: string): void;
 	addNote(text: string, kind: "info" | "warn" | "error"): void;
@@ -267,8 +268,9 @@ export class InteractiveMode {
 	/** Editor submit: slash space first (`/compact [guidance]` is a wire
 	 *  command — the guidance rides the frame as this invocation's
 	 *  directives; `/help` lists keys and commands; `exit`/`quit` end the
-	 *  TUI; skills are display-only — no wire invocation exists, so
-	 *  selecting one warns instead of sending), else a plain message. */
+	 *  TUI; a skill name formats the wire's invocation tag — the
+	 *  `<skill name="…"/>` marker, expanded by the backend at the message
+	 *  door, the interim UX until skill chips land), else a plain message. */
 	submit(text: string): void {
 		if (!this.#session || text === "") return;
 		if (text.startsWith("/")) {
@@ -277,8 +279,8 @@ export class InteractiveMode {
 			const name = space === -1 ? body : body.slice(0, space);
 			const args = space === -1 ? "" : body.slice(space + 1).trim();
 			const entry = this.#slashEntries().find(candidate => candidate.name === name);
-			if (entry?.run !== undefined) entry.run(args);
-			else this.#view.addNote(`/${name} is not invocable yet — listed for discovery only`, "warn");
+			if (entry !== undefined) entry.run(args);
+			else this.#view.addNote(`/${name} is not a command — /help lists them`, "warn");
 			return;
 		}
 		this.#backend.message(this.#session, text);
@@ -288,30 +290,44 @@ export class InteractiveMode {
 	 * The slash command set — the one home. The dropdown reads it and the
 	 * interpreter runs it, so a command cannot exist in one and not the
 	 * other (the /help-shipped-but-unlisted miss was exactly that split).
-	 * An entry without `run` is display-only: listed, warned on select.
+	 * Every entry carries its behavior; `kind` marks the skill entries for
+	 * the dropdown's type column.
 	 */
-	slashCommands(): Array<{ name: string; description: string; displayOnly: boolean }> {
-		return this.#slashEntries().map(({ name, description, run }) => ({ name, description, displayOnly: run === undefined }));
+	slashCommands(): Array<{ name: string; description: string; kind: "command" | "skill" }> {
+		return this.#slashEntries().map(({ name, description, kind }) => ({ name, description, kind }));
 	}
 
-	#slashEntries(): Array<{ name: string; description: string; run?: (args: string) => void }> {
+	#slashEntries(): Array<{ name: string; description: string; kind: "command" | "skill"; run: (args: string) => void }> {
 		return [
 			{
 				name: "compact",
 				description: "summarize the context now",
+				kind: "command",
 				run: args => {
 					const directives = args === "" ? undefined : args;
 					this.#backend.compact(this.#session!, directives);
 				},
 			},
-			{ name: "help", description: "list keys and commands", run: () => this.#showHelp() },
-			{ name: "login", description: "store a provider API key", run: () => this.onLogin?.() },
-			{ name: "logout", description: "remove a stored provider key", run: () => this.onLogout?.() },
-			{ name: "model", description: "switch the model", run: () => this.onModel?.() },
-			{ name: "tree", description: "browse the session tree, rewind to an entry", run: () => this.onTree?.() },
-			{ name: "exit", description: "quit the TUI (shuts the backend down)", run: () => this.onQuit?.() },
-			{ name: "quit", description: "quit the TUI (shuts the backend down)", run: () => this.onQuit?.() },
-			...this.#skills.map(skill => ({ name: skill.name, description: skill.description })),
+			{ name: "help", description: "list keys and commands", kind: "command", run: () => this.#showHelp() },
+			{ name: "login", description: "store a provider API key", kind: "command", run: () => this.onLogin?.() },
+			{ name: "logout", description: "remove a stored provider key", kind: "command", run: () => this.onLogout?.() },
+			{ name: "model", description: "switch the model", kind: "command", run: () => this.onModel?.() },
+			{ name: "tree", description: "browse the session tree, rewind to an entry", kind: "command", run: () => this.onTree?.() },
+			{ name: "exit", description: "quit the TUI (shuts the backend down)", kind: "command", run: () => this.onQuit?.() },
+			{ name: "quit", description: "quit the TUI (shuts the backend down)", kind: "command", run: () => this.onQuit?.() },
+			// A skill invocation formats the wire's tag (FRONTEND.md §5): the
+			// backend expands resolvable tags at the message door; the rest of
+			// the text rides along as the message. No arguments on the tag
+			// itself.
+			...this.#skills.map(skill => ({
+				name: skill.name,
+				description: skill.description,
+				kind: "skill" as const,
+				run: (args: string) => {
+					const tag = `<skill name="${skill.name}"/>`;
+					this.#backend.message(this.#session!, args === "" ? tag : `${tag} ${args}`);
+				},
+			})),
 		];
 	}
 

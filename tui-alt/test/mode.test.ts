@@ -324,7 +324,7 @@ describe("InteractiveMode", () => {
 		assert.strictEqual(view.tools.has("i1"), false);
 	});
 
-	test("the slash space: /compact rides the wire; /help lists; /exit quits; skills never send", () => {
+	test("the slash space: /compact rides the wire; /help lists; /exit quits; skills format the tag", () => {
 		const { backend, view, mode, feed, control } = harness();
 		boot(control, feed);
 		let quit = 0;
@@ -353,29 +353,35 @@ describe("InteractiveMode", () => {
 		assert.strictEqual((backend.sent).length, 1); // quitting is local, never a wire frame
 
 		mode.submit("/code-quality-checklist");
-		assert.strictEqual((backend.sent).length, 1); // no wire invocation for skills
-		assert.strictEqual(view.notes.at(-1)?.kind, "warn");
-		assert.ok((view.notes.at(-1)?.text ?? "").includes("not invocable"));
+		// Skill invocation formats the wire's tag (the interim UX until
+		// chips land) — a plain message carrying the marker.
+		assert.deepStrictEqual(backend.sent[1], { kind: "message", session: SESSION, text: '<skill name="code-quality-checklist"/>' });
+		// Trailing text rides along as the message (tags take no arguments).
+		mode.submit("/code-quality-checklist focus on the diff");
+		assert.deepStrictEqual(backend.sent[2], { kind: "message", session: SESSION, text: '<skill name="code-quality-checklist"/> focus on the diff' });
 
 		mode.submit("/no-such-command");
+		assert.strictEqual(view.notes.at(-1)?.kind, "warn");
+		assert.ok((view.notes.at(-1)?.text ?? "").includes("not a command"));
 		mode.submit("/compact focus on the auth module"); // v16: guidance rides as directives
-		assert.deepStrictEqual(backend.sent[1], { kind: "compact", session: SESSION, directives: "focus on the auth module" });
-		assert.strictEqual((view.notes.filter(n => n.kind === "warn")).length, 2);
+		assert.deepStrictEqual(backend.sent[3], { kind: "compact", session: SESSION, directives: "focus on the auth module" });
+		assert.strictEqual((view.notes.filter(n => n.kind === "warn")).length, 1);
 	});
 
 	test("the command table is the one home: the dropdown list and interpreter cannot diverge", () => {
 		const { mode, feed, control } = harness();
 		boot(control, feed);
-		// Static commands first, none display-only — each carries its behavior.
+		// Static commands first — each carries its behavior.
 		const before = mode.slashCommands();
 		assert.deepStrictEqual(before.map(c => c.name), ["compact", "help", "login", "logout", "model", "tree", "exit", "quit"]);
-		assert.strictEqual(before.some(c => c.displayOnly), false);
+		assert.strictEqual(before.every(c => c.kind === "command"), true);
 
-		// Skills join the same table as display-only entries.
+		// Skills join the same table as skill-typed entries (the dropdown's
+		// type column reads the kind).
 		feed({ type: "skills_available", skills: [{ name: "my-skill", description: "d", location: "l", level: "user" }] });
 		const after = mode.slashCommands();
 		assert.strictEqual((after).length, 9);
-		assert.partialDeepStrictEqual(after.find(c => c.name === "my-skill"), { displayOnly: true });
+		assert.partialDeepStrictEqual(after.find(c => c.name === "my-skill"), { kind: "skill" });
 	});
 
 	test("skills fold per stream (v20): a session switch clears the catalog, a child's never clobbers it", () => {
@@ -680,12 +686,12 @@ describe("InteractiveMode", () => {
 		feed({ type: "user_message", entry_id: "e3", text: "again" });
 		assert.deepStrictEqual(mode.tree.rows().map(row => row.id), ["e1", "e3", "t1", "e2"]);
 
-		// /tree dispatches to the root's callback (as invocable, not display-only).
+		// /tree dispatches to the root's callback.
 		let opened = 0;
 		mode.onTree = () => opened++;
 		mode.submit("/tree");
 		assert.strictEqual(opened, 1);
-		assert.partialDeepStrictEqual(mode.slashCommands().find(c => c.name === "tree"), { displayOnly: false });
+		assert.partialDeepStrictEqual(mode.slashCommands().find(c => c.name === "tree"), { kind: "command" });
 
 		// A fresh session_opened resets the tree with the session.
 		feed({ type: "session_opened", id: SESSION, path: "/w", model: { provider: "p", model: "m1" }, resumed: false });

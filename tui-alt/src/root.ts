@@ -184,9 +184,8 @@ export class AltRoot implements ModeView {
 	}
 
 	/** The skill catalog landed: rebuild the provider from the mode's
-	 *  command table — the dropdown is a *view* of that table (typed by
-	 *  display-only, the type tag leads the description), never its own
-	 *  list. */
+	 *  command table — the dropdown is a *view* of that table (the kind
+	 *  tag leads the description), never its own list. */
 	setSkills(_skills: SkillInfo[]): void {
 		this.#attachProvider();
 	}
@@ -194,7 +193,7 @@ export class AltRoot implements ModeView {
 	#attachProvider(): void {
 		const entries = (this.#mode?.slashCommands() ?? []).map(entry => ({
 			name: entry.name,
-			description: `${entry.displayOnly ? TYPE_COLUMN.skill : TYPE_COLUMN.command} · ${entry.description}`.trimEnd(),
+			description: `${entry.kind === "skill" ? TYPE_COLUMN.skill : TYPE_COLUMN.command} · ${entry.description}`.trimEnd(),
 		}));
 		const combined = new CombinedAutocompleteProvider(entries, this.#completionBase);
 		this.editor.setAutocompleteProvider(new AtPathCompletionProvider(combined, this.#completionBase));
