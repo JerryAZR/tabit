@@ -16,9 +16,9 @@ import { execFile } from "node:child_process";
 import { writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { randomUUID } from "node:crypto";
 
 import { getNativeClipboard } from "@earendil-works/pi-tui";
+import { humanId } from "human-id";
 
 export interface ClipboardReader {
 	/** Undefined = unavailable, null = no image; transfer failures reject. */
@@ -107,11 +107,13 @@ export function sniffImageExtension(bytes: Uint8Array): string | undefined {
 	return undefined;
 }
 
-/** The default temp writer: `<tmpdir>/tabit-paste-<uuid>.<ext>`. */
+/** The default temp writer: `<tmpdir>/tabit-paste/<phrase>.<ext>` —
+ *  a human-id phrase, not a UUID: legible in transcripts and cheaper
+ *  in the model's context (owner ruling). */
 export function defaultTempWrite(bytes: Uint8Array, ext: string): string {
 	const dir = join(tmpdir(), "tabit-paste");
 	mkdirSync(dir, { recursive: true });
-	const path = join(dir, `${randomUUID()}.${ext}`);
+	const path = join(dir, `${humanId({ separator: "-", capitalize: false })}.${ext}`);
 	writeFileSync(path, bytes);
 	return path;
 }

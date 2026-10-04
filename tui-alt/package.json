@@ -16,7 +16,8 @@
 		"test": "node --test test/*.test.ts"
 	},
 	"dependencies": {
-		"@earendil-works/pi-tui": "1.0.2"
+		"@earendil-works/pi-tui": "1.0.2",
+		"human-id": "^4.2.1"
 	},
 	"devDependencies": {
 		"@types/node": "^24.0.0",

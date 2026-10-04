@@ -6,9 +6,10 @@
  */
 
 import assert from "node:assert/strict";
+import { readFileSync, rmSync } from "node:fs";
 import { describe, test } from "node:test";
 
-import { pasteClipboardIntoEditor, sniffImageExtension, type ClipboardReader } from "../src/paste-image.ts";
+import { defaultTempWrite, pasteClipboardIntoEditor, sniffImageExtension, type ClipboardReader } from "../src/paste-image.ts";
 
 const PNG = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 const JPEG = new Uint8Array([0xff, 0xd8, 0xff, 0xe0]);
@@ -57,9 +58,20 @@ describe("pasteClipboardIntoEditor", () => {
 
 		const none = await pasteClipboardIntoEditor(() => {}, reader(null, null), () => "/unused");
 		assert.deepStrictEqual(none, { kind: "none" });
+	});
 
-		// An unavailable reader (undefined) behaves like an empty clipboard.
+	test("an unavailable reader (undefined) behaves like an empty clipboard", async () => {
 		const unavailable = await pasteClipboardIntoEditor(() => {}, reader(undefined, undefined), () => "/unused");
 		assert.deepStrictEqual(unavailable, { kind: "none" });
+	});
+
+	test("the temp writer names files with a human-id phrase, not a UUID", () => {
+		const path = defaultTempWrite(PNG, "png");
+		try {
+			assert.match(path, /tabit-paste[/\\][a-z]+-[a-z]+-[a-z]+\.png$/);
+			assert.deepStrictEqual(new Uint8Array(readFileSync(path)), PNG);
+		} finally {
+			rmSync(path);
+		}
 	});
 });
