@@ -26,12 +26,24 @@ impl Session {
     /// `run_failed { kind: model }` by the caller.
     pub(super) fn ensure_agent(&mut self) -> Result<(Arc<Agent>, ModelSelection), SessionError> {
         let Some(selection) = self.selection() else {
-            return Err(SessionError::Config {
-                message: "no model selected — this backend has no usable model configured; \
-                          create ~/.tabit/providers.toml (plus ~/.tabit/auth.toml for keys) and \
-                          restart, or switch with the `model` command"
-                    .to_string(),
-            });
+            // The teaching failure — carried as `run_failed { kind:
+            // model }` by the caller. It branches on the same
+            // predicate as the boot's note (the catalog's two halves,
+            // FRONTEND.md §3.1): no providers at all means `login`
+            // has nothing to validate against — write providers.toml
+            // and restart; config exists but nothing is usable —
+            // `login` fixes it in-app, then `model` lands the
+            // selection.
+            let message = if crate::lock::lock(&self.world).config.providers.is_empty() {
+                "no model selected — this backend has no providers.toml at all (the normal \
+                 fresh-install state); create ~/.tabit/providers.toml and restart the backend"
+                    .to_string()
+            } else {
+                "no model selected — every configured provider lacks a key; add one with the \
+                 `login` command (no restart), then switch with the `model` command"
+                    .to_string()
+            };
+            return Err(SessionError::Config { message });
         };
         // The pair is written together, so a matching stamp means the
         // agent stands. The guard is held across the (sync) build: a

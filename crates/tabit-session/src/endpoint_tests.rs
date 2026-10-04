@@ -4354,8 +4354,11 @@ async fn a_selection_less_boot_announces_null_and_fails_runs_at_open() {
         .expect("the first message's run fails");
     assert_eq!(kind, tabit_protocol::RunFailedKind::MODEL);
     assert!(message.contains("no model selected"), "{message}");
+    // The no-config half of the teaching split (FRONTEND.md §3.1):
+    // `login` has nothing to validate against — the fix is the config
+    // file and a restart.
     assert!(
-        message.contains("providers.toml") && message.contains("`model` command"),
+        message.contains("providers.toml") && message.contains("restart"),
         "the failure teaches: {message}"
     );
     std::fs::remove_dir_all(store.dir()).ok();

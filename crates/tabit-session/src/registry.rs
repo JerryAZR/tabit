@@ -182,18 +182,28 @@ impl ModelRegistry {
         match self.first_usable_model() {
             Some((provider, model)) => Ok((Some(ModelSelection::new(provider, model)), notes)),
             // The terminal arm degrades (the ruling reversal): teach,
-            // never scare — point at the fix, name the in-app path.
+            // never scare — and the teaching branches on the same
+            // predicate the catalog's two halves hand the frontend
+            // (FRONTEND.md §3.1): no providers at all means `login`
+            // has nothing to validate against, so the fix is
+            // providers.toml and a restart; configured-but-unusable
+            // providers are exactly `login`'s targets, in-app.
             None => {
-                notes.push(
-                    "no usable model at this backend — every configured provider lacks a key \
-                     (declare local servers `keyless = true`, or add one via the `login` command \
-                     or auth.toml / `api_key_env`), or there is no providers.toml at all, which \
-                     is the normal fresh-install state. Create ~/.tabit/providers.toml (a `login` \
-                     writes ~/.tabit/auth.toml and refreshes the world — no restart); the session \
-                     runs selection-less until then, and a `model` command can name any \
-                     configured ref at any time"
-                        .to_string(),
-                );
+                notes.push(if self.inner.config.providers.is_empty() {
+                    "no usable model at this backend — there is no providers.toml at all, \
+                     which is the normal fresh-install state. Create ~/.tabit/providers.toml \
+                     with a provider (a key via ~/.tabit/auth.toml or the provider's \
+                     `api_key_env`; declare local servers `keyless = true`) and restart the \
+                     backend; the session runs selection-less until then"
+                        .to_string()
+                } else {
+                    "no usable model at this backend — every configured provider lacks a key. \
+                     Add one with the `login` command (it writes ~/.tabit/auth.toml and \
+                     refreshes the world — no restart), set the provider's `api_key_env`, or \
+                     declare local servers `keyless = true`; the session runs selection-less \
+                     until then, and a `model` command can name any configured ref at any time"
+                        .to_string()
+                });
                 Ok((None, notes))
             }
         }
