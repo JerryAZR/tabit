@@ -204,6 +204,10 @@ export class InteractiveMode {
 	onQuit: (() => void) | undefined;
 	/** Set by the root: opens the model picker (`/model`). */
 	onModel: (() => void) | undefined;
+	/** Set by the root: opens the login card (`/login`). */
+	onLogin: (() => void) | undefined;
+	/** Set by the root: opens the logout card (`/logout`). */
+	onLogout: (() => void) | undefined;
 	/** Set by the root: opens the session-tree card (`/tree`; the ctrl+t
 	 *  action routes through the root too). */
 	onTree: (() => void) | undefined;
@@ -301,6 +305,8 @@ export class InteractiveMode {
 				},
 			},
 			{ name: "help", description: "list keys and commands", run: () => this.#showHelp() },
+			{ name: "login", description: "store a provider API key", run: () => this.onLogin?.() },
+			{ name: "logout", description: "remove a stored provider key", run: () => this.onLogout?.() },
 			{ name: "model", description: "switch the model", run: () => this.onModel?.() },
 			{ name: "tree", description: "browse the session tree, rewind to an entry", run: () => this.onTree?.() },
 			{ name: "exit", description: "quit the TUI (shuts the backend down)", run: () => this.onQuit?.() },
@@ -321,6 +327,17 @@ export class InteractiveMode {
 	 *  (a state write at receive; `model_changed` answers). */
 	switchModel(provider: string, model: string): void {
 		if (this.#session) this.#backend.setModel(this.#session, provider, model);
+	}
+
+	/** The login card's confirm: store the key. Backend-level and
+	 *  session-less (v21) — the re-announced catalogs are the ack. */
+	login(provider: string, apiKey: string): void {
+		this.#backend.login(provider, apiKey);
+	}
+
+	/** The logout card's pick: remove the stored key (total, idempotent). */
+	logout(provider: string): void {
+		this.#backend.logout(provider);
 	}
 
 	interrupt(): void {

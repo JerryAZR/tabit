@@ -7,7 +7,7 @@ the pi repo); **deviations need justification stated in advance**.
 
 Protocol state: **v21** (synced; see FRONTEND.md's changelog).
 
-## 1. `/model` picker — active
+## 1. `/model` picker — landed (f3d4699, v22 sync a7d2283)
 
 The catalog crossed the wire in v21 (`models_available`, folded last-wins
 in the mode). What remains is the UI.
@@ -72,11 +72,13 @@ rides the wire, the re-announced `models_available` +
 failure. `/logout <provider>` is offered on `auth: "stored"` rows — one
 command, idempotent.
 
-**Decisions**: masked vs. unmasked key input (pi's `Input` is unmasked —
-no password mode exists in pi-tui); the key must not land in the editor
-history or any note (the wire's redaction ruling is backend-side; the
-frontend's copy discipline is ours). The zero-config boot's first-run
-flow (empty catalog) should guide here.
+**Decisions**: key input is **unmasked** (owner ruling — pi-tui's
+`Input` has no password mode and shoulder-surfing is not the threat
+model); the key must not land in the editor history or any note (the
+wire's redaction ruling is backend-side; the frontend's copy discipline
+is ours — the key lives only in the card's own `Input`, which is not the
+history-keeping editor, and nothing echoes it post-submit). The
+zero-config boot's first-run flow (empty catalog) should guide here.
 
 ## 3. Skill chips
 

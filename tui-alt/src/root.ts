@@ -36,6 +36,7 @@ import { UserBlock } from "./components/user-block.ts";
 import { TranscriptRegistry } from "./components/transcript-registry.ts";
 import { TreeCardView } from "./components/tree-card.ts";
 import { ModelPickerView } from "./model-picker.ts";
+import { AuthCardView } from "./auth-card.ts";
 import { cardViewFor } from "./card-view.ts";
 import { InputController } from "./input-controller.ts";
 import { AtPathCompletionProvider } from "./path-completion.ts";
@@ -63,6 +64,8 @@ export class AltRoot implements ModeView {
 	#treeCard: TreeCardView | undefined;
 	/** The open model picker, when it owns the dock slot. */
 	#modelPicker: ModelPickerView | undefined;
+	/** The open login/logout card, when it owns the dock slot. */
+	#authCard: AuthCardView | undefined;
 
 	constructor() {
 		this.tui = new TuiAltScreen(new ProcessTerminal(), false, undefined, {
@@ -115,6 +118,8 @@ export class AltRoot implements ModeView {
 		this.editor.onSubmit = (text: string) => mode.submit(text);
 		mode.onTree = () => this.showTree();
 		mode.onModel = () => this.showModelPicker();
+		mode.onLogin = () => this.showAuthCard("login");
+		mode.onLogout = () => this.showAuthCard("logout");
 		// The command table exists now — the dropdown can list it before
 		// skills arrive (a skill-less machine still sees the commands).
 		this.#attachProvider();
@@ -123,7 +128,7 @@ export class AltRoot implements ModeView {
 			tui: this.tui,
 			editor: this.editor,
 			isRunning: () => mode.running,
-			isCardOpen: () => mode.hasOpenCard || this.#treeCard !== undefined || this.#modelPicker !== undefined,
+			isCardOpen: () => mode.hasOpenCard || this.#treeCard !== undefined || this.#modelPicker !== undefined || this.#authCard !== undefined,
 			interrupt: () => mode.interrupt(),
 			onTree: () => this.showTree(),
 			toggleAllCollapsibles: () => {
@@ -267,6 +272,7 @@ export class AltRoot implements ModeView {
 		// down after the card closes — the tree field outlived its slot.
 		this.#treeCard = undefined;
 		this.#modelPicker = undefined;
+		this.#authCard = undefined;
 		this.#cardSlot.clear();
 		this.#cardSlot.addChild(cardViewFor(card, (selected, text) => this.#mode?.answerCard(card.id, selected, text)));
 		this.tui.setFocus(this.#cardSlot.children[0]!);
@@ -292,6 +298,10 @@ export class AltRoot implements ModeView {
 			return;
 		}
 		if (this.#treeCard !== undefined) return;
+		// The tree takes the slot: clear any sibling owner, or its field
+		// outlives the slot it no longer renders in (the showCard lesson).
+		this.#modelPicker = undefined;
+		this.#authCard = undefined;
 		this.#treeCard = new TreeCardView(
 			mode.tree,
 			{
@@ -335,6 +345,7 @@ export class AltRoot implements ModeView {
 			return;
 		}
 		this.#treeCard = undefined;
+		this.#authCard = undefined;
 		this.#modelPicker = new ModelPickerView(
 			mode.modelsCatalog,
 			mode.currentSelection,
@@ -356,6 +367,65 @@ export class AltRoot implements ModeView {
 	closeModelPicker(): void {
 		if (this.#modelPicker === undefined) return;
 		this.#modelPicker = undefined;
+		this.#cardSlot.clear();
+		this.tui.setFocus(this.editor);
+		this.#touch();
+	}
+
+	// --- login / logout --------------------------------------------------------
+
+	/** Open the auth card over the provider status fold (v22): login lists
+	 *  the `auth: "none"` targets, logout the `auth: "stored"` rows. A
+	 *  pending interaction card keeps the slot. */
+	showAuthCard(kind: "login" | "logout"): void {
+		const mode = this.#mode;
+		if (mode === undefined) return;
+		if (mode.hasOpenCard) {
+			this.addNote("answer the open question first — auth can wait", "warn");
+			return;
+		}
+		if (this.#authCard !== undefined) return;
+		const statuses = mode.providerStatuses;
+		if (statuses.length === 0) {
+			this.addNote("no providers configured at this backend — write ~/.tabit/providers.toml and restart", "warn");
+			return;
+		}
+		if (kind === "login" && !statuses.some(s => s.auth === "none")) {
+			this.addNote("every configured provider has a key source — nothing to log in to", "info");
+			return;
+		}
+		if (kind === "logout" && !statuses.some(s => s.auth === "stored")) {
+			this.addNote("no stored keys — nothing to log out", "info");
+			return;
+		}
+		this.#treeCard = undefined;
+		this.#modelPicker = undefined;
+		this.#authCard = new AuthCardView(
+			kind,
+			statuses,
+			{
+				onLogin: (provider, apiKey) => {
+					this.closeAuthCard();
+					mode.login(provider, apiKey);
+					this.addNote(`key stored for ${provider} — the catalog ack confirms`, "info");
+				},
+				onLogout: provider => {
+					this.closeAuthCard();
+					mode.logout(provider);
+				},
+				onClose: () => this.closeAuthCard(),
+			},
+			() => this.#touch(),
+		);
+		this.#cardSlot.clear();
+		this.#cardSlot.addChild(this.#authCard);
+		this.tui.setFocus(this.#authCard);
+		this.#touch();
+	}
+
+	closeAuthCard(): void {
+		if (this.#authCard === undefined) return;
+		this.#authCard = undefined;
 		this.#cardSlot.clear();
 		this.tui.setFocus(this.editor);
 		this.#touch();

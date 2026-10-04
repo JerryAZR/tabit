@@ -368,13 +368,13 @@ describe("InteractiveMode", () => {
 		boot(control, feed);
 		// Static commands first, none display-only — each carries its behavior.
 		const before = mode.slashCommands();
-		assert.deepStrictEqual(before.map(c => c.name), ["compact", "help", "model", "tree", "exit", "quit"]);
+		assert.deepStrictEqual(before.map(c => c.name), ["compact", "help", "login", "logout", "model", "tree", "exit", "quit"]);
 		assert.strictEqual(before.some(c => c.displayOnly), false);
 
 		// Skills join the same table as display-only entries.
 		feed({ type: "skills_available", skills: [{ name: "my-skill", description: "d", location: "l", level: "user" }] });
 		const after = mode.slashCommands();
-		assert.strictEqual((after).length, 7);
+		assert.strictEqual((after).length, 9);
 		assert.partialDeepStrictEqual(after.find(c => c.name === "my-skill"), { displayOnly: true });
 	});
 
@@ -435,6 +435,29 @@ describe("InteractiveMode", () => {
 
 		mode.switchModel("anthropic", "claude-opus");
 		assert.deepStrictEqual(backend.sent, [{ kind: "model", session: SESSION, provider: "anthropic", model: "claude-opus" }]);
+	});
+
+	test("the auth dispatch: /login and /logout route to the root, confirms send session-less commands", () => {
+		const { backend, mode, feed, control } = harness();
+		boot(control, feed);
+		let loginOpened = 0;
+		let logoutOpened = 0;
+		mode.onLogin = () => loginOpened++;
+		mode.onLogout = () => logoutOpened++;
+		mode.submit("/login");
+		mode.submit("/logout");
+		assert.strictEqual(loginOpened, 1);
+		assert.strictEqual(logoutOpened, 1);
+		assert.strictEqual(backend.sent.length, 0); // opening is local
+
+		// Backend-level commands: no session field, and they work even
+		// before any selection exists (the zero-config fix path).
+		mode.login("openai", "sk-test");
+		mode.logout("openai");
+		assert.deepStrictEqual(backend.sent, [
+			{ kind: "login", provider: "openai", apiKey: "sk-test" },
+			{ kind: "logout", provider: "openai" },
+		]);
 	});
 
 	test("interaction_settled closes the card (v17); already-answered and unknown ids are no-ops", () => {
