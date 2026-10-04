@@ -30,6 +30,7 @@ declare module "@earendil-works/pi-tui" {
 		"tui.app.quit": true;
 		"tui.app.clearNote": true;
 		"tui.app.tree": true;
+		"tui.app.pasteImage": true;
 	}
 }
 
@@ -55,6 +56,10 @@ export const APP_KEYBINDINGS: KeybindingDefinitions = {
 		defaultKeys: ["ctrl+t"],
 		description: "Open the session tree (browse and rewind)",
 	},
+	"tui.app.pasteImage": {
+		defaultKeys: ["ctrl+v"],
+		description: "Paste an image from the clipboard as an attachment",
+	},
 };
 
 /** The engine's TUI defaults, deep-copied into the mutable definitions shape. */
@@ -71,7 +76,7 @@ function allDefinitions(): KeybindingDefinitions {
 	return { ...engine, ...APP_KEYBINDINGS };
 }
 
-type AppKeybindingId = "tui.app.interrupt" | "tui.app.toggleCollapsibles" | "tui.app.quit" | "tui.app.clearNote" | "tui.app.tree";
+type AppKeybindingId = "tui.app.interrupt" | "tui.app.toggleCollapsibles" | "tui.app.quit" | "tui.app.clearNote" | "tui.app.tree" | "tui.app.pasteImage";
 
 export const APP_KEYBINDING_IDS: AppKeybindingId[] = [
 	"tui.app.interrupt",
@@ -79,6 +84,7 @@ export const APP_KEYBINDING_IDS: AppKeybindingId[] = [
 	"tui.app.quit",
 	"tui.app.clearNote",
 	"tui.app.tree",
+	"tui.app.pasteImage",
 ];
 
 /** Install the merged registry globally; returns it for display facts.

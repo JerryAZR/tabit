@@ -10,8 +10,9 @@
  *   1. interrupt a running turn        (tui.app.interrupt)
  *   2. toggle all thinking blocks      (tui.app.toggleCollapsibles)
  *   3. open the session tree           (tui.app.tree)
- *   4. quit, only on an empty editor   (tui.app.quit — pi's rule)
- *   5. everything else falls through to the focused component
+ *   4. paste an image as an attachment (tui.app.pasteImage)
+ *   5. quit, only on an empty editor   (tui.app.quit — pi's rule)
+ *   6. everything else falls through to the focused component
  */
 
 import { getKeybindings, matchesKey, type Editor, type TuiAltScreen, type TuiInputListenerResult } from "@earendil-works/pi-tui";
@@ -29,6 +30,8 @@ export interface InputControllerDeps {
 	toggleAllCollapsibles: () => void;
 	/** Ctrl+T: open the session-tree card (same path as `/tree`). */
 	onTree: () => void;
+	/** Ctrl+V: clipboard image → temp file → attachment tag at the cursor. */
+	onPasteImage: () => void;
 	onQuit: () => void;
 }
 
@@ -50,7 +53,7 @@ export class InputController {
 	}
 
 	#handle(data: string): TuiInputListenerResult {
-		const { editor, isRunning, isCardOpen, interrupt, toggleAllCollapsibles, onTree, onQuit } = this.#deps;
+		const { editor, isRunning, isCardOpen, interrupt, toggleAllCollapsibles, onTree, onPasteImage, onQuit } = this.#deps;
 		if (isCardOpen()) {
 			// The card is focused and consumes everything it knows; only
 			// the abort affordance preempts (a literal: the interrupt
@@ -72,6 +75,10 @@ export class InputController {
 		}
 		if (kb.matches(data, "tui.app.toggleCollapsibles")) {
 			toggleAllCollapsibles();
+			return { consume: true };
+		}
+		if (kb.matches(data, "tui.app.pasteImage")) {
+			onPasteImage();
 			return { consume: true };
 		}
 		const idleQuit = kb.matches(data, "tui.app.quit") && !isRunning() && editor.getText() === "";

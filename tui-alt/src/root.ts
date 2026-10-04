@@ -40,6 +40,7 @@ import { AuthCardView } from "./auth-card.ts";
 import { cardViewFor } from "./card-view.ts";
 import { InputController } from "./input-controller.ts";
 import { AtPathCompletionProvider } from "./path-completion.ts";
+import { pasteClipboardIntoEditor, platformClipboardReader } from "./paste-image.ts";
 import { APP_KEYBINDING_IDS, applyKeybindings, loadTuiToml } from "./keybindings.ts";
 import type { FooterFacts, InteractionCard, ModeView, PendingMessage, SkillInfo } from "./mode.ts";
 import type { InteractiveMode } from "./mode.ts";
@@ -139,6 +140,7 @@ export class AltRoot implements ModeView {
 				for (const block of blocks) block.setExpanded(anyCollapsed);
 				this.#touch();
 			},
+			onPasteImage: () => this.pasteImage(),
 			onQuit,
 		});
 		this.#input.attach();
@@ -197,6 +199,21 @@ export class AltRoot implements ModeView {
 		}));
 		const combined = new CombinedAutocompleteProvider(entries, this.#completionBase);
 		this.editor.setAutocompleteProvider(new AtPathCompletionProvider(combined, this.#completionBase));
+	}
+
+	/** Ctrl+V (item 4's v0): clipboard image → temp file → an attachment
+	 *  tag at the cursor — plain text, expanded by the backend at the
+	 *  message door. Text on the clipboard inserts as-is; an empty
+	 *  clipboard says so. */
+	pasteImage(): void {
+		pasteClipboardIntoEditor(text => this.editor.insertTextAtCursor(text), platformClipboardReader())
+			.then(outcome => {
+				if (outcome.kind === "none") this.addNote("nothing to paste — the clipboard holds no image or text", "info");
+				this.#touch();
+			})
+			.catch((error: unknown) => {
+				this.addNote(`clipboard read failed: ${error instanceof Error ? error.message : String(error)}`, "warn");
+			});
 	}
 
 	/** The completion root: the active session's working directory from

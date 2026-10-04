@@ -108,19 +108,24 @@ Invocation UX: `/name` autocomplete against the session's skill catalog
 inserts the chip (skills stop being display-only slash entries; the tag
 format happens at submit).
 
-## 4. Attachment blocks
+## 4. Attachment blocks — v0 landed (TUI side), backend expansion is master's gap
 
-Pasted/dragged images in the editor. **Chips share item 3's blocker**
-(the editor's marker machinery is private) and its deferral — the chip is
-cosmetic only. The substance needs neither chips nor a wire change (pi's
-own path): clipboard image → temp file → plain path text in the prompt;
-the model reads it with the `read` tool (already image-capable). pi-tui
-1.0.2 bundles the acquisition machinery (`getNativeClipboard()` —
-macOS/Windows/X11 readers, `getFilePaths()` on macOS; pi's
-`clipboard-image.ts` is the reference for Wayland/WSL). True inline image
-content in `message` is a protocol decision with the backend — deferred.
-The catalog's per-model `input` modalities (v21) tell us whether the
-bound model accepts images at all — the UI can warn early.
+Ctrl+V in the editor: clipboard image → temp file (`<tmpdir>/tabit-paste/`)
+→ an `<attachment path="…"/>` tag at the cursor (plain text — chips stay
+deferred); text on the clipboard inserts as-is (pi's chain). Acquisition
+rides pi-tui 1.0.2's bundled native clipboard with wl-paste/xclip
+fallbacks (`src/paste-image.ts`). **Backend gap (master, not this
+branch)**: nothing expands the attachment tag at the mailbox door yet —
+only the skill tag exists (`skills.rs`); until the expansion lands, the
+tag rides to the model verbatim. Also still open there: `read` taking
+image content (the provider/engine plumbing already carries
+`ToolResultContent::Image`).
+
+Chips share item 3's blocker (the editor's marker machinery is private)
+and its deferral. True inline image content in `message` is a protocol
+decision with the backend — deferred. The catalog's per-model `input`
+modalities (v21) tell us whether the bound model accepts images at all —
+an early-warning UI can come later.
 
 ## 5. M2: child streams / focus switching
 
