@@ -243,7 +243,7 @@ fn assemble_session(
     )
     .map_err(|e| e.to_string())?
     .preamble(preamble)
-    .model_factory(registry.factory())
+    .world_factory(registry.factory())
     .hooks(hooks)
     .subagents(subagents)
     .skills(skills);
@@ -306,12 +306,12 @@ pub fn core_tools() -> Vec<tabit_engine::tool::DynamicTool> {
 /// tabit-session stays free of front-facing wiring. The process's
 /// `--model`/`--max-turns` apply to sessions created later;
 /// `open_session` resolves by stored id and resumes that file. The
-/// startup catalogs ride along: the extension world, and the usable
-/// model catalog the registry folds once (config is not re-read per
-/// request by design — a reload re-announces when that lands).
-/// One registry for the whole process (the ruling: providers are user
-/// config, not per-session) — every session the host builds shares
-/// the provider client caches.
+/// startup catalogs ride along: the extension world, and the model
+/// catalog — folded from the current-world cell the closures and the
+/// login/logout handler share: the builders read the registry AT
+/// CALL TIME through the cell, so a login/logout world refresh
+/// reaches the next built session (resident sessions refresh through
+/// the endpoint's walk).
 pub fn host_data(
     args: &AppOptions,
     registry: &ModelRegistry,
@@ -327,22 +327,26 @@ pub fn host_data(
         ephemeral: false,
         ..args.clone()
     };
-    let fresh_registry = registry.clone();
+    let world = tabit_session::current_world(registry.clone());
+    let fresh_world = world.clone();
     let fresh_store = store.clone();
     let fresh_extensions = extensions.clone();
     let open_args = args.clone();
-    let open_registry = registry.clone();
+    let open_world = world.clone();
     let open_store = store.clone();
     let open_extensions = extensions.clone();
     tabit_session::SessionHostData {
         extensions: extensions.catalog.clone(),
-        // The usable model catalog, folded once at boot (v21 —
-        // unconditional; the registry owns the usable predicate).
-        models: registry.available_catalog(),
+        world,
+        // The auth file login/logout write — the same resolution the
+        // boot's auth load read, so the written file is the one the
+        // next boot reads.
+        auth_path: tabit_config::auth_default_path(),
         create: Arc::new(move || {
+            let registry = tabit_session::lock::lock(&fresh_world).clone();
             assemble(
                 &fresh_args,
-                &fresh_registry,
+                &registry,
                 &fresh_store,
                 ContinueMiss::StartFresh,
                 Some(fresh_extensions.clone()),
@@ -360,9 +364,10 @@ pub fn host_data(
                 session: Some(path),
                 ..open_args.clone()
             };
+            let registry = tabit_session::lock::lock(&open_world).clone();
             assemble(
                 &args,
-                &open_registry,
+                &registry,
                 &open_store,
                 ContinueMiss::Fail,
                 Some(open_extensions.clone()),

@@ -18,7 +18,10 @@ use serde::{Deserialize, Serialize};
 /// 2026-09-25 — the report model: children report first, spawners
 /// decide). v21: models — the unconditional `models_available` boot
 /// announcement (the usable model catalog; absence of the frame now
-/// means "protocol older than v21"). v20: skills became
+/// means "protocol older than v21"); amended while unreleased: the
+/// zero-config boot (nullable `session_opened.model`), then the
+/// `login`/`logout` backend-level commands with their world refresh
+/// and the catalog's `missing_keys` half. v20: skills became
 /// session-level (stamped, per session becoming visible). v19: the
 /// report model — `initialize`/`initialize_ack`/
 /// `initialize_rejected` are deleted (commands flow from the
@@ -90,6 +93,29 @@ pub struct EventFrame {
     /// The event itself; its `type` tag flattens next to `stream`.
     #[serde(flatten)]
     pub event: SessionEvent,
+}
+
+/// An API key in flight — the `login` command's cargo. Debug is
+/// REDACTED (the redaction ruling: a key crosses the wire once and
+/// lands only in auth.toml — it never enters the session log, the
+/// model context, or a frame trace, so the derived `Debug` of the
+/// command carrying it must be safe to print). Serde-transparent:
+/// the wire shape is a plain string.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ApiKey(pub String);
+
+impl ApiKey {
+    /// The key material (the one consumer: the auth file write).
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for ApiKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "<redacted: {} chars>", self.0.chars().count())
+    }
 }
 
 /// A frontend command, fire-and-forget — also the whole of the
@@ -233,6 +259,34 @@ pub enum SessionCommand {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         directives: Option<String>,
     },
+    /// Log a provider in (v21, amended): store `api_key` for
+    /// `provider` in auth.toml (a surgical write — comments, order,
+    /// and other entries survive; a missing file is created), then
+    /// refresh the world. **Backend-level, session-less** (like
+    /// `new_session`). The ack is the re-announced `models_available`
+    /// (last-wins fold); an unknown provider or an unwritable auth
+    /// file is an unstamped `error { kind: "auth" }`. The key is NOT
+    /// verified at login — the next run open validates. Redaction:
+    /// `api_key` never enters the session log, the model context, or
+    /// frame traces.
+    Login {
+        /// Provider id from tabit config.
+        provider: String,
+        /// The key to store (redacted in `Debug` — see [`ApiKey`]).
+        api_key: ApiKey,
+    },
+    /// Log a provider out (v21, amended): remove its auth.toml key
+    /// and refresh the world. Total: an unknown provider or an absent
+    /// key is an idempotent no-op, still acked by the re-announced
+    /// `models_available` — which reflects reality: a provider whose
+    /// `api_key_env` still supplies a key stays usable. Sessions on
+    /// that provider keep their register; their next run open fails
+    /// with `run_failed { kind: "model" }`, while in-flight runs
+    /// finish on the agent they bound at open.
+    Logout {
+        /// Provider id from tabit config.
+        provider: String,
+    },
 }
 
 /// The command tag constants — [`SessionCommand::tag`]'s values,
@@ -260,6 +314,10 @@ pub mod command_tags {
     pub const MODEL: &str = "model";
     /// Run a compaction pass.
     pub const COMPACT: &str = "compact";
+    /// Log a provider in (store its key in auth.toml; world refresh).
+    pub const LOGIN: &str = "login";
+    /// Log a provider out (remove its auth.toml key; world refresh).
+    pub const LOGOUT: &str = "logout";
 }
 
 impl SessionCommand {
@@ -279,6 +337,8 @@ impl SessionCommand {
             SessionCommand::Checkout { .. } => command_tags::CHECKOUT,
             SessionCommand::Model { .. } => command_tags::MODEL,
             SessionCommand::Compact { .. } => command_tags::COMPACT,
+            SessionCommand::Login { .. } => command_tags::LOGIN,
+            SessionCommand::Logout { .. } => command_tags::LOGOUT,
         }
     }
 }

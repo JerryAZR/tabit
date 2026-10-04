@@ -100,7 +100,7 @@ mod provider;
 mod settings;
 mod wire;
 
-pub use auth::{AuthConfig, AuthEntry};
+pub use auth::{AuthConfig, AuthEntry, default_path as auth_default_path};
 pub use error::ConfigError;
 pub use model::{Cost, InputModality, Model, SamplingParams, ThinkingLevel};
 pub use provider::Provider;

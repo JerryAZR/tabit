@@ -7,7 +7,6 @@ use crate::error::SessionError;
 use crate::lock::lock;
 use crate::model::validate_selection;
 use std::sync::{Arc, Mutex};
-use tabit_config::TabitConfig;
 use tabit_protocol::{ModelFacts, ModelSelection};
 
 /// Validates a selection against a session's config without touching
@@ -23,7 +22,7 @@ impl Session {
     /// selection that validates against config but fails to construct
     /// surfaces as that run's `run_failed`.
     pub fn set_model(&mut self, selection: ModelSelection) -> Result<(), SessionError> {
-        validate_selection(&selection, &self.config)?;
+        validate_selection(&selection, &self.world_config())?;
         self.model_register().write(selection);
         Ok(())
     }
@@ -62,7 +61,7 @@ impl Session {
         ModelRegister {
             selection: self.selection.clone(),
             buffer: self.buffer.clone(),
-            config: self.config.clone(),
+            world: self.world.clone(),
         }
     }
 
@@ -75,13 +74,15 @@ impl Session {
 
     /// The receive-time model validator — the checkout probe's sibling
     /// for the `model` command: validates a selection against this
-    /// session's config without touching the session, so the worker
-    /// can reject an unusable ref at the command (a picker's
-    /// immediate feedback, even mid-run). The write itself is
+    /// session's CURRENT config (read at call time through the world
+    /// cell — a world refresh swaps it) without touching the session,
+    /// so the worker can reject an unusable ref at the command (a
+    /// picker's immediate feedback, even mid-run). The write itself is
     /// [`Session::set_model`], at the beat.
     pub(crate) fn model_probe(&self) -> ModelProbe {
-        let config = self.config.clone();
+        let world = self.world.clone();
         Arc::new(move |selection| {
+            let config = lock(&world).config.clone();
             validate_selection(selection, &config).map_err(|error| error.to_string())
         })
     }
@@ -106,7 +107,9 @@ impl Session {
 pub(crate) struct ModelRegister {
     selection: Arc<Mutex<Option<ModelSelection>>>,
     buffer: crate::writer::SharedBuffer,
-    config: Arc<TabitConfig>,
+    /// The world cell — the facts resolve against the CURRENT config
+    /// (a world refresh swaps it), never a spawn-time snapshot.
+    world: super::world::SharedWorld,
 }
 
 impl ModelRegister {
@@ -128,11 +131,13 @@ impl ModelRegister {
     }
 
     /// The announcement facts for a selection (protocol v11) — the
-    /// register resolves what it announces: the model record's context
-    /// window, display name, and cost, or all-None when the record is
-    /// gone from config (see [`crate::model::resolve_facts`]).
+    /// register resolves what it announces against the CURRENT config
+    /// (the world cell's): the model record's context window, display
+    /// name, and cost, or all-None when the record is gone from config
+    /// (see [`crate::model::resolve_facts`]).
     pub(crate) fn facts(&self, selection: &ModelSelection) -> ModelFacts {
-        crate::model::resolve_facts(selection, &self.config)
+        let config = lock(&self.world).config.clone();
+        crate::model::resolve_facts(selection, &config)
     }
 }
 

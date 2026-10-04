@@ -306,12 +306,20 @@ pub enum SessionEvent {
     /// **unconditional**: emitted even when empty, so the frame's
     /// absence means "protocol older than v21", never "no models";
     /// `providers: []` is the legal "no usable models at this
-    /// backend" state. A re-announcement (config reload, when it
-    /// lands) replaces the catalog wholesale — last-wins fold.
+    /// backend" state. Re-announced when the world changes — a
+    /// `login`/`logout` landed (the re-announcement is the
+    /// command's ack), config reload when it lands; a
+    /// re-announcement replaces the catalog wholesale — last-wins
+    /// fold.
     ModelsAvailable {
         /// Every usable provider, in alphabetical id order; models
         /// in config-file order.
         providers: Vec<AvailableProvider>,
+        /// The configured providers failing the usable predicate
+        /// (v21, amended — the login widget's targets): identity
+        /// only, in alphabetical id order. `providers` stays
+        /// usable-only; this is who `login` can fix.
+        missing_keys: Vec<crate::model::MissingKeyProvider>,
     },
     /// A session became visible in this backend: the boot session
     /// (emitted at spawn, ahead of the catalog and any replay), a
@@ -667,6 +675,17 @@ impl SessionEvent {
         }
     }
 
+    /// An `auth`-kind error: a `login`/`logout` failed — the provider
+    /// is unknown to config, or the auth file could not be written.
+    /// Unstamped, backend-level (the failure belongs to no session).
+    pub fn error_auth(message: impl Into<String>) -> Self {
+        Self::Error {
+            kind: ErrorKind::AUTH.to_string(),
+            message: message.into(),
+            pending: None,
+        }
+    }
+
     /// The register announcement: a `model_changed` carrying a
     /// selection and its resolved facts — at every receive-time write
     /// (the `model` command's own outcome) and before every replay
@@ -700,6 +719,9 @@ impl ErrorKind {
     pub const SESSION: &'static str = "session";
     /// A `checkout` command targeted a missing entry or not a cut point.
     pub const CHECKOUT: &'static str = "checkout";
+    /// A `login`/`logout` command failed (an unknown provider, an
+    /// unwritable auth file).
+    pub const AUTH: &'static str = "auth";
     /// Persistence degraded: this many records are pending on disk.
     pub const PERSIST_DEGRADED: &'static str = "persist_degraded";
     /// Persistence recovered: pending records reached the disk.

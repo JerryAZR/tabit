@@ -1286,7 +1286,8 @@ id = "m"
                 create,
                 open,
                 extensions: Default::default(),
-                models: Vec::new(),
+                world: crate::tests::plain_world(),
+                auth_path: None,
             },
         );
         let out = SharedOut::default();

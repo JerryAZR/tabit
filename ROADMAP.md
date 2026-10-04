@@ -38,7 +38,10 @@ The foundation is shipped and hardened. In build order, all closed:
   no model catalog, ever.
 - **Session layer** (`tabit-session`, `tabit-log`): the durable
   tree-format session log (format v5), write-behind persistence,
-  rewind/branch, model registry + keyless providers, session-level
+  rewind/branch, model registry + keyless providers, built-in
+  `login`/`logout` over the world refresh (protocol v21 — the
+  surgical auth.toml write, the current-world cell, every open
+  session's next run open on the new world), session-level
   skills (protocol v20), the system-prompt builder, compaction +
   overflow recovery (the record below).
 - **Coding tools** (`tabit-tools`): read/write/edit/bash per the
@@ -172,13 +175,19 @@ log decision, parked here.
 - **Config reload — the `reload` command** (2026-10): an additive
   first cut — re-read config/auth, new keys and providers appear, the
   model catalog re-announces (`models_available`, FRONTEND.md §6).
-  The general semantics — vanished providers, stale session
-  registers, the skills/gate reload scope — stay parked until a
-  caller exists; the first caller will be a login extension
-  (key-paste writing auth.toml plus a providers fragment — the
-  lmstudio-ext precedent). When it lands, discovery/catalog merge
-  must be one callable step over `(config, auth)`, not a re-run of
-  the initialization flow.
+  Its mechanism shipped with `login`/`logout` (2026-10, protocol v21):
+  the current-world cell plus the per-session world refresh is exactly
+  the path `reload` reuses — what remains is re-reading the
+  providers.toml layers and the command itself. The general
+  semantics — vanished providers, stale session registers, the
+  skills/gate reload scope — stay parked until the command lands.
+- **The models.dev catalog extension** (2026-10, recorded): an
+  extension shipping an auto-updating providers fragment (the
+  models.dev catalog), versioned separately from tabit itself — the
+  zero-config story's other half: on a bare install it gives
+  `login` its providers to scan, so first run is "install the
+  catalog extension, paste a key" with no hand-written
+  providers.toml.
 - Per-model `headers` stay unwired (needs a client-caching decision);
   `context_window` is wired (compaction); display names /
   `reasoning` wait on a model-picker UI (with the frontend).

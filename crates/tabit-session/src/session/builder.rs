@@ -24,6 +24,11 @@ pub struct SessionBuilder {
     pub(super) tools: Vec<DynamicTool>,
     pub(super) max_turns: usize,
     pub(super) model_factory: ModelFactory,
+    /// The factory's provenance (the world refresh's skip rule): a
+    /// factory mounted through [`Self::model_factory`] is the caller's
+    /// own and survives a refresh; the registry-derived one (the
+    /// default, or [`Self::world_factory`]) tracks the world.
+    pub(super) factory_custom: bool,
     pub(super) run_hooks: Option<tabit_engine::agent::HookStack>,
     pub(super) subagent_parts: Option<Arc<crate::subagent::SubagentParts>>,
     pub(super) skills: Option<Arc<crate::skills::Skills>>,
@@ -77,6 +82,7 @@ impl SessionBuilder {
             tools: Vec::new(),
             max_turns: DEFAULT_MAX_TURNS,
             model_factory: default_factory,
+            factory_custom: false,
             run_hooks: None,
             subagent_parts: None,
             skills: None,
@@ -132,8 +138,26 @@ impl SessionBuilder {
     /// [`ModelFactory`] handle (cheaply clonable, shareable across
     /// builders) so callers like `ModelRegistry::factory` pass through
     /// unwrapped.
+    ///
+    /// This marks the factory as the CALLER'S OWN (custom provenance):
+    /// a host-level world refresh (login/logout, config reload) swaps
+    /// the session's config but keeps this factory. Hosts sharing the
+    /// process's one registry want [`Self::world_factory`] instead —
+    /// the refresh-tracked provenance.
     pub fn model_factory(mut self, factory: ModelFactory) -> Self {
         self.model_factory = factory;
+        self.factory_custom = true;
+        self
+    }
+
+    /// Mount the host's shared world factory — the process's one
+    /// registry's ([`ModelRegistry::factory`]). World-tracked
+    /// provenance: a host-level world refresh (login/logout; config
+    /// reload when it lands) replaces it with the new world's factory,
+    /// so a session's next run open builds against the new keys.
+    pub fn world_factory(mut self, factory: ModelFactory) -> Self {
+        self.model_factory = factory;
+        self.factory_custom = false;
         self
     }
 

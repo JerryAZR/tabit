@@ -194,7 +194,17 @@ fn host(store: &SessionStore, node: Arc<Node>, session: Session) -> SessionHost 
         create: Arc::new(|| Err("not driven".to_string())),
         open: Arc::new(|_| Err("not driven".to_string())),
         extensions: Default::default(),
-        models: Vec::new(),
+        world: tabit_session::current_world(tabit_session::ModelRegistry::new(
+            Arc::new(
+                tabit_config::TabitConfig::from_toml_str(
+                    "",
+                    std::path::Path::new("providers.toml"),
+                )
+                .expect("empty config"),
+            ),
+            Arc::new(tabit_config::AuthConfig::default()),
+        )),
+        auth_path: None,
     };
     SessionHost::spawn(session, Vec::new(), wiring, data)
 }

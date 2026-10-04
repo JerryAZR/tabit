@@ -34,23 +34,25 @@ impl Session {
             });
         };
         // The pair is written together, so a matching stamp means the
-        // agent stands.
-        if let (Some(agent), Some(built_for)) = (&self.agent, &self.agent_built_for)
+        // agent stands. The guard is held across the (sync) build: a
+        // refresh racing in between clears the cache, and the next
+        // open rebuilds — no stale build survives a refresh.
+        let mut world = crate::lock::lock(&self.world);
+        if let Some((agent, built_for)) = &world.agent
             && *built_for == selection
         {
             return Ok((agent.clone(), selection));
         }
         let agent = Arc::new(build_agent(
-            &self.model_factory,
-            &self.config,
+            &world.factory,
+            &world.config,
             &selection,
             &self.id,
             self.preamble.as_deref(),
             &self.tools,
             None,
         )?);
-        self.agent = Some(agent.clone());
-        self.agent_built_for = Some(selection.clone());
+        world.agent = Some((agent.clone(), selection.clone()));
         Ok((agent, selection))
     }
 
@@ -86,15 +88,16 @@ impl Session {
         // environment must not kill the boot: its failure is the
         // run-open `run_failed { kind: model }`.
         let session = Self {
-            config: builder.config,
+            world: super::world::SessionWorld::new(
+                builder.config,
+                builder.model_factory,
+                builder.factory_custom,
+            ),
             selection: selection_cell,
             preamble: builder.preamble,
             tools: builder.tools,
             max_turns: builder.max_turns,
-            model_factory: builder.model_factory,
             run_hooks: builder.run_hooks,
-            agent: None,
-            agent_built_for: None,
             conversation: conversation_cell,
             buffer,
             shared_conversation,

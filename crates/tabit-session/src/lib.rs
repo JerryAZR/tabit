@@ -111,10 +111,10 @@ pub use model::validate_selection;
 pub use notice::NoticeSink;
 pub use parser::Parsed;
 pub use prompt::{build_system_prompt, build_system_prompt_with_base};
-pub use registry::ModelRegistry;
+pub use registry::{CurrentWorld, ModelRegistry, current_world};
 pub use session::{
-    AbortHandle, DEFAULT_MAX_TURNS, MailboxHandle, RewindSummary, RunOutcome, RunSummary, Session,
-    SessionBuilder, TOOL_CONCURRENCY,
+    AbortHandle, DEFAULT_MAX_TURNS, MailboxHandle, ModelFactory, RewindSummary, RunOutcome,
+    RunSummary, Session, SessionBuilder, TOOL_CONCURRENCY,
 };
 pub use stats::{ModelStats, ModelUsage, SessionStats, UsageLedger};
 pub use store::{SessionStore, SessionSummary};

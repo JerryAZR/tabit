@@ -31,8 +31,23 @@ pub(crate) fn plain_data() -> crate::SessionHostData {
         create: std::sync::Arc::new(|| Err("new_session is not driven".to_string())),
         open: std::sync::Arc::new(|_| Err("open_session is not driven".to_string())),
         extensions: Default::default(),
-        models: Vec::new(),
+        world: plain_world(),
+        auth_path: None,
     }
+}
+
+/// The test world cell: an EMPTY config behind the registry — the
+/// empty catalog the boot announcement folds (the previous frozen
+/// `models: Vec::new()`, now folded live from the cell). Tests that
+/// care about catalog content build their own registry.
+pub(crate) fn plain_world() -> crate::registry::CurrentWorld {
+    crate::registry::current_world(crate::ModelRegistry::new(
+        std::sync::Arc::new(
+            tabit_config::TabitConfig::from_toml_str("", Path::new("providers.toml"))
+                .expect("empty config"),
+        ),
+        std::sync::Arc::new(tabit_config::AuthConfig::default()),
+    ))
 }
 
 pub(crate) fn temp_store(tag: &str) -> SessionStore {
@@ -142,6 +157,11 @@ api_key = "dummy"
         )
         .expect("test auth"),
     )
+}
+
+/// The empty auth — nothing keyed (the pre-login world).
+pub(crate) fn test_auth_empty() -> Arc<tabit_config::AuthConfig> {
+    Arc::new(tabit_config::AuthConfig::default())
 }
 
 /// Stream-scripted turn: text chunks then the terminal record.
@@ -2853,4 +2873,162 @@ async fn a_never_selected_session_records_no_model_change_and_resumes_selection_
     assert_eq!(parsed.register, None, "resume wrote no register either");
     std::fs::remove_dir_all(store.dir()).ok();
     Ok(())
+}
+
+// --- the world refresh (login/logout's session half) ---
+
+/// One keyed provider on a dead local port (not keyless): buildable
+/// only once auth carries a key — and then the request fails fast at
+/// connect (`run_failed { kind: "provider" }`), which is how these
+/// tests see "the build resolved the new key" without any network
+/// service.
+fn locked_provider_config() -> Arc<TabitConfig> {
+    Arc::new(
+        tabit_config::TabitConfig::from_toml_str(
+            r#"
+[providers.p]
+base_url = "http://127.0.0.1:9/v1"
+api = "openai-completions"
+
+[[providers.p.models]]
+id = "m"
+"#,
+            Path::new("providers.toml"),
+        )
+        .expect("config"),
+    )
+}
+
+#[tokio::test]
+async fn a_world_refresh_swaps_the_world_factory_and_rebuilds_at_open() {
+    // The login/logout semantics at the session's own level (the
+    // endpoint tests use scripted factories, which refresh skips —
+    // this one rides a REAL registry factory, `world_factory`
+    // provenance): pre-login the run open fails `kind: "model"` (no
+    // key); the refresh swaps the factory to the keyed registry's and
+    // clears the agent cache, so the next open builds with the new
+    // key (the request is attempted — `kind: "provider"` at the dead
+    // port); a logout-shaped refresh (keyless auth again) returns the
+    // open failure to `kind: "model"`.
+    let store = temp_store("world-refresh");
+    let config = locked_provider_config();
+    let registry = crate::ModelRegistry::new(config.clone(), test_auth_empty());
+    let mut session = SessionBuilder::new(
+        store.clone(),
+        config.clone(),
+        test_auth_empty(),
+        Some(ModelSelection::new("p", "m")),
+    )
+    .expect("builder")
+    .world_factory(registry.factory())
+    .create("C:/w")
+    .expect("session");
+
+    let failed_kinds = |summary: &crate::session::RunSummary| -> Vec<String> {
+        summary
+            .events
+            .iter()
+            .filter_map(|event| match event {
+                SessionEvent::RunFailed { kind, .. } => Some(kind.clone()),
+                _ => None,
+            })
+            .collect()
+    };
+
+    let run = session.prompt("hi").await;
+    assert_eq!(
+        failed_kinds(&run),
+        vec![tabit_protocol::RunFailedKind::MODEL.to_string()],
+        "no key: the run never opens"
+    );
+
+    // Login's world swap: same config, the keyed auth's registry.
+    let keyed = crate::ModelRegistry::new(
+        config.clone(),
+        Arc::new(
+            tabit_config::AuthConfig::from_toml_str(
+                "[providers.p]\napi_key = \"sk-test\"\n",
+                Path::new("auth.toml"),
+            )
+            .expect("auth"),
+        ),
+    );
+    session.refresh_world(config.clone(), keyed.factory());
+    let run = session.prompt("again").await;
+    assert_eq!(
+        failed_kinds(&run),
+        vec![tabit_protocol::RunFailedKind::PROVIDER.to_string()],
+        "the build resolved the new key; the dead port fails the request instead"
+    );
+
+    // Logout's world swap: back to keyless auth.
+    let unkeyed = crate::ModelRegistry::new(config.clone(), test_auth_empty());
+    session.refresh_world(config.clone(), unkeyed.factory());
+    let run = session.prompt("third").await;
+    assert_eq!(
+        failed_kinds(&run),
+        vec![tabit_protocol::RunFailedKind::MODEL.to_string()],
+        "the key is gone; the run open fails again"
+    );
+    std::fs::remove_dir_all(store.dir()).ok();
+}
+
+#[tokio::test]
+async fn a_custom_factory_survives_the_world_refresh() {
+    // Provenance: `model_factory()` is the caller's own — a refresh
+    // swaps the session's config but never this factory. The agent
+    // cache still clears: the next open REBUILDS, through the
+    // surviving factory.
+    let store = temp_store("world-refresh-custom");
+    let factory = Factory::new(vec![text_turn("first"), text_turn("second")]);
+    let mut session = factory
+        .clone()
+        .into_builder(store.clone())
+        .create("C:/w")
+        .expect("session");
+    session.prompt("one").await;
+    assert_eq!(factory.built_for().len(), 1, "the first run's open built");
+
+    // A refresh carrying a DIFFERENT config and a real registry
+    // factory: the config swap is live at the receive-time probe
+    // (`p`/`q` gone, `z` in), the scripted factory still serves.
+    let other_config = Arc::new(
+        tabit_config::TabitConfig::from_toml_str(
+            r#"
+[providers.z]
+base_url = "http://127.0.0.1:1234/v1"
+api = "openai-completions"
+keyless = true
+
+[[providers.z.models]]
+id = "z1"
+"#,
+            Path::new("providers.toml"),
+        )
+        .expect("config"),
+    );
+    let registry = crate::ModelRegistry::new(other_config.clone(), test_auth_empty());
+    session.refresh_world(other_config, registry.factory());
+
+    let probe = session.model_probe();
+    assert!(
+        probe(&ModelSelection::new("z", "z1")).is_ok(),
+        "the probe reads the swapped-in config"
+    );
+    assert!(
+        probe(&ModelSelection::new("p", "m")).is_err(),
+        "the old config no longer validates"
+    );
+
+    let run = session.prompt("two").await;
+    // The rebuilt agent serves a FRESH instance of the factory's
+    // script (the factory's per-build mocks restart their turns), so
+    // the answer repeats — the rebuild, not the text, is the signal.
+    assert_eq!(run.output, "first", "the custom factory still serves");
+    assert_eq!(
+        factory.built_for().len(),
+        2,
+        "the refresh cleared the cache; the open rebuilt through the surviving factory"
+    );
+    std::fs::remove_dir_all(store.dir()).ok();
 }

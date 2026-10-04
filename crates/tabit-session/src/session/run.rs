@@ -322,10 +322,12 @@ impl Session {
         // (task 5): `model_prompt` — the envelope's one verb (the ask
         // verb is gone; asks ride the grammar), billed through this
         // session's ledger under the caller's name. Snapshotted at
-        // open like every per-run capability.
+        // open like every per-run capability (the pair under one lock
+        // — a world refresh must not tear it).
+        let (world_config, world_factory) = self.world_snapshot();
         tool_context.insert(std::sync::Arc::new(crate::services::ExtensionServices::new(
-            self.model_factory.clone(),
-            self.config.clone(),
+            world_factory,
+            world_config,
             selection.clone(),
             self.ledger.clone(),
         ))
@@ -518,7 +520,8 @@ impl Session {
                         // processing resumes the stream). The log never
                         // computes — it records what the spend point
                         // computed.
-                        let cost = crate::model::turn_cost(&self.config, selection, &call.usage);
+                        let cost =
+                            crate::model::turn_cost(&self.world_config(), selection, &call.usage);
                         *crate::lock::lock(turn_costs) = cost;
                         tabit_log::lock::lock(&self.ledger).add(
                             &selection.provider,

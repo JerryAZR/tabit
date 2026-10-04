@@ -1175,3 +1175,136 @@ api = \"openai-completions\"
         "{warning}"
     );
 }
+
+// --- the login/logout auth-file writes (the world refresh's storage half) ---
+
+/// One test's auth file path (unique per test, cleaned at build).
+fn auth_dir(tag: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir()
+        .join("tabit-config-auth-write-tests")
+        .join(format!("{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("create the test dir");
+    dir
+}
+
+#[test]
+fn login_write_creates_a_missing_file_owner_only() {
+    let dir = auth_dir("create");
+    let path = dir.join("auth.toml");
+    let auth = AuthConfig::set_api_key(&path, "anthropic", "sk-ant-new").expect("write");
+    assert_eq!(auth.api_key("anthropic"), Some("sk-ant-new"));
+    // The file round-trips through the plain load path.
+    let loaded = AuthConfig::load(&path).expect("load");
+    assert_eq!(loaded, auth);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&path)
+            .expect("metadata")
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600, "key material is owner-only: {mode:o}");
+    }
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn login_write_is_surgical() {
+    // Comments, order, and other providers' entries survive; the one
+    // touched line is the named provider's key (an existing key is
+    // replaced in place).
+    let dir = auth_dir("surgical");
+    let path = dir.join("auth.toml");
+    std::fs::write(
+        &path,
+        "# the head comment stays\n[providers.zeta]\napi_key = \"z-key\"\n\n# anthropic's comment\n[providers.anthropic]\napi_key = \"sk-ant-old\"\n",
+    )
+    .expect("seed");
+    let auth = AuthConfig::set_api_key(&path, "anthropic", "sk-ant-new").expect("write");
+    assert_eq!(auth.api_key("anthropic"), Some("sk-ant-new"));
+    assert_eq!(auth.api_key("zeta"), Some("z-key"), "other entries survive");
+    let text = std::fs::read_to_string(&path).expect("read back");
+    assert!(text.contains("# the head comment stays"), "{text}");
+    assert!(text.contains("# anthropic's comment"), "{text}");
+    assert!(
+        text.find("[providers.zeta]").expect("zeta")
+            < text.find("[providers.anthropic]").expect("anthropic"),
+        "order survives: {text}"
+    );
+    assert!(
+        !text.contains("sk-ant-old"),
+        "the old key is replaced: {text}"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn logout_removes_the_key_and_the_emptied_table() {
+    let dir = auth_dir("remove");
+    let path = dir.join("auth.toml");
+    std::fs::write(
+        &path,
+        "[providers.anthropic]\napi_key = \"sk-ant-x\"\n\n[providers.zeta]\napi_key = \"z-key\"\n",
+    )
+    .expect("seed");
+    let auth = AuthConfig::remove_api_key(&path, "anthropic").expect("remove");
+    assert_eq!(auth.api_key("anthropic"), None);
+    assert_eq!(auth.api_key("zeta"), Some("z-key"));
+    let text = std::fs::read_to_string(&path).expect("read back");
+    assert!(
+        !text.contains("anthropic"),
+        "the emptied provider table goes with its key: {text}"
+    );
+    assert!(text.contains("z-key"), "{text}");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn logout_is_idempotent_and_never_creates_the_file() {
+    let dir = auth_dir("idempotent");
+    let path = dir.join("auth.toml");
+    // No file at all: a no-op, and no file materializes.
+    let auth = AuthConfig::remove_api_key(&path, "anthropic").expect("no-op");
+    assert_eq!(auth, AuthConfig::default());
+    assert!(!path.exists(), "a removal never creates the file");
+    // An absent key in an existing file: unchanged, unrewritten.
+    std::fs::write(&path, "[providers.zeta]\napi_key = \"z-key\"\n").expect("seed");
+    let before = std::fs::read_to_string(&path).expect("read");
+    let auth = AuthConfig::remove_api_key(&path, "anthropic").expect("no-op");
+    assert_eq!(auth.api_key("zeta"), Some("z-key"));
+    assert_eq!(
+        std::fs::read_to_string(&path).expect("read"),
+        before,
+        "an unchanged file is not rewritten"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn login_logout_round_trip() {
+    let dir = auth_dir("roundtrip");
+    let path = dir.join("auth.toml");
+    let auth = AuthConfig::set_api_key(&path, "p", "k1").expect("set");
+    assert_eq!(auth.api_key("p"), Some("k1"));
+    let auth = AuthConfig::remove_api_key(&path, "p").expect("remove");
+    assert_eq!(auth.api_key("p"), None);
+    let auth = AuthConfig::set_api_key(&path, "p", "k2").expect("set again");
+    assert_eq!(auth.api_key("p"), Some("k2"));
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn the_write_refuses_a_malformed_file_without_clobbering_it() {
+    let dir = auth_dir("malformed");
+    let path = dir.join("auth.toml");
+    std::fs::write(&path, "providers = 5\n").expect("seed");
+    let error = AuthConfig::set_api_key(&path, "p", "k").expect_err("graceful failure");
+    assert!(error.to_string().contains("not a table"), "{error}");
+    assert_eq!(
+        std::fs::read_to_string(&path).expect("read"),
+        "providers = 5\n",
+        "the file is untouched"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}

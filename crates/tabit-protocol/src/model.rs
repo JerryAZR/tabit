@@ -64,6 +64,21 @@ pub struct AvailableProvider {
     pub models: Vec<AvailableModel>,
 }
 
+/// One configured provider that fails the usable predicate (no
+/// resolvable key, no `keyless = true` declaration) — a
+/// `models_available.missing_keys` entry: identity only, the login
+/// widget's targets. The models list stays usable-only (the picker
+/// contract); this list is what `login` can fix.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MissingKeyProvider {
+    /// The provider's config key (the id `login` addresses).
+    pub id: String,
+    /// The provider's display name, when configured (frontends fall
+    /// back to the id).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+}
+
 /// One model in [`AvailableProvider`]: the id a `model` command
 /// addresses plus the facts config states — display name, capacity,
 /// pricing, capability flags, and the thinking dial's ordered level

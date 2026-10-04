@@ -582,3 +582,71 @@ fn the_available_catalog_is_empty_when_nothing_is_usable() {
     // Nothing configured at all: also empty, never an error.
     assert!(registry_with("", "").available_catalog().is_empty());
 }
+
+/// The login widget's half of the fold (v21, amended): exactly the
+/// providers failing `usable()`, identity only, alphabetical — the
+/// complement of the catalog over the same predicate.
+#[test]
+fn missing_keys_names_exactly_the_unusable_providers() {
+    let raw = r#"
+[providers.beta]
+base_url = "https://beta.example/v1"
+api = "openai-completions"
+
+[[providers.beta.models]]
+id = "b1"
+
+[providers.gamma]
+name = "The Gamma provider"
+base_url = "https://gamma.example/v1"
+api = "openai-completions"
+
+[[providers.gamma.models]]
+id = "g1"
+
+[providers.alpha]
+base_url = "http://127.0.0.1:1234/v1"
+api = "openai-completions"
+keyless = true
+
+[[providers.alpha.models]]
+id = "a1"
+"#;
+    let registry = registry_with(
+        raw,
+        r#"
+[providers.beta]
+api_key = "dummy"
+"#,
+    );
+    let missing = registry.missing_keys();
+    assert_eq!(
+        missing,
+        vec![MissingKeyProvider {
+            id: "gamma".to_string(),
+            name: Some("The Gamma provider".to_string()),
+        }],
+        "gamma has no key and no keyless declaration; alpha is keyless, beta is keyed"
+    );
+    // The complement law: usable + missing = configured.
+    assert_eq!(
+        registry
+            .available_catalog()
+            .iter()
+            .map(|p| p.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["alpha", "beta"]
+    );
+    // Keyed, gamma drops off — the re-fold login triggers.
+    let keyed = registry_with(
+        raw,
+        r#"
+[providers.beta]
+api_key = "dummy"
+
+[providers.gamma]
+api_key = "dummy"
+"#,
+    );
+    assert!(keyed.missing_keys().is_empty());
+}

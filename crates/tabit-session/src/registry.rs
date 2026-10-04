@@ -11,8 +11,12 @@
 //! zero-config boot opens selection-less with a teaching note; it is
 //! never a startup error).
 //!
-//! Reload (re-reading config for future resolutions) and dynamic model
-//! listing from endpoints are deferred until a consumer exists.
+//! The login/logout world refresh (protocol v21) mints a fresh
+//! registry over the same config with the new auth and swaps the
+//! host's current-world cell ([`CurrentWorld`]); config reload
+//! (re-reading the providers.toml layers) reuses that path when it
+//! lands. Dynamic model listing from endpoints stays deferred until
+//! a consumer exists.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -26,7 +30,20 @@ use tabit_providers::providers::{anthropic, openai};
 
 use crate::SessionError;
 use crate::session::ModelFactory;
-use tabit_protocol::{AvailableModel, AvailableProvider, ModelSelection};
+use tabit_protocol::{AvailableModel, AvailableProvider, MissingKeyProvider, ModelSelection};
+
+/// The host's current-world cell: the ONE registry every session
+/// builder reads AT CALL TIME (the create/open closures capture the
+/// cell, never a registry) and the login/logout handler swaps whole
+/// — mint a fresh registry over the same config with the new auth,
+/// swap, re-fold, re-announce. Lock via [`crate::lock::lock`]; no
+/// guard crosses an await.
+pub type CurrentWorld = Arc<Mutex<ModelRegistry>>;
+
+/// Mint the current-world cell over the boot registry.
+pub fn current_world(registry: ModelRegistry) -> CurrentWorld {
+    Arc::new(Mutex::new(registry))
+}
 
 /// One constructed provider client. Clients clone cheaply and share
 /// their HTTP connection pool; models built from them are thin wrappers,
@@ -169,12 +186,12 @@ impl ModelRegistry {
             None => {
                 notes.push(
                     "no usable model at this backend — every configured provider lacks a key \
-                     (declare local servers `keyless = true`, or add one via auth.toml / \
-                     `api_key_env`), or there is no providers.toml at all, which is the normal \
-                     fresh-install state. Create ~/.tabit/providers.toml (plus \
-                     ~/.tabit/auth.toml for keys) and restart the backend; the session runs \
-                     selection-less until then, and a `model` command can name any configured \
-                     ref at any time"
+                     (declare local servers `keyless = true`, or add one via the `login` command \
+                     or auth.toml / `api_key_env`), or there is no providers.toml at all, which \
+                     is the normal fresh-install state. Create ~/.tabit/providers.toml (a `login` \
+                     writes ~/.tabit/auth.toml and refreshes the world — no restart); the session \
+                     runs selection-less until then, and a `model` command can name any \
+                     configured ref at any time"
                         .to_string(),
                 );
                 Ok((None, notes))
@@ -257,6 +274,25 @@ impl ModelRegistry {
                             .collect(),
                     })
                     .collect(),
+            })
+            .collect()
+    }
+
+    /// The login widget's targets (`models_available.missing_keys`,
+    /// v21 amended): the configured providers FAILING the `usable`
+    /// predicate — no resolvable key and no `keyless = true`
+    /// declaration — as identity-only entries. The complement of
+    /// [`Self::available_catalog`]'s fold over the same predicate;
+    /// alphabetical id order, like the catalog.
+    pub fn missing_keys(&self) -> Vec<MissingKeyProvider> {
+        self.inner
+            .config
+            .providers
+            .iter()
+            .filter(|(id, _)| !self.usable(id))
+            .map(|(id, provider)| MissingKeyProvider {
+                id: id.clone(),
+                name: provider.name.clone(),
             })
             .collect()
     }
