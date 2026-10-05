@@ -50,7 +50,12 @@ the end and nowhere else. When a rule changes, change it here first.
 ## Focus laws (owner rulings)
 
 - **Editor submit routes to the focused stream** — `message { session,
-  text }` carries it; steering a focused child costs nothing.
+  text }` carries it; steering a focused child costs nothing. **Switching
+  stream focus discards the editor draft** (owner ruling: travel only if
+  the editor had a clear-all shortcut; pi-tui 1.0.2's editor actions top
+  out at delete-to-line-start/end, so there is none — a stranded draft
+  could only be sent to the wrong stream). Region-focus moves (editor ↔
+  list ↔ transcript) never touch the draft.
 - **Esc**: focused stream running → `abort` that stream; focused stream
   idle and not root → return to its **parent** (generic walk-up, never
   hardcoded to root); root idle → nothing. Quit stays ctrl+d/ctrl+c on
@@ -85,6 +90,10 @@ subagent list** (the list exists only when it has entries).
   subagent and returns region focus to the editor (now bound to that
   stream). **Esc / alt+↑** returns region focus to the editor without
   switching.
+- **A focused region that disappears yields the editor** (owner ruling,
+  generic): if the focused region goes away for any reason — the list's
+  last entry hides, the transcript region is removed — region focus
+  returns to the editor. The list-emptying case is one instance.
 - The transcript region takes plain scroll keys (↑/↓, PgUp/PgDn);
   richer transcript interaction is a later milestone, the region exists
   now so the navigation model is complete.
@@ -96,9 +105,9 @@ subagent list** (the list exists only when it has entries).
   projection and emits `focus(stream)` intents. The core (views, focus
   laws, folding) never knows which widget is mounted — a picker in the
   card slot or a grid can replace the first widget without touching it.
-- **First widget**: a **vertical list below the editor**, one row per
-  child stream, visible whenever it has entries. Capped at ~5 visible
-  rows, scrolling beyond.
+- **First widget**: a **vertical list below the editor** (owner ruling),
+  one row per child stream, visible whenever it has entries; ↑/↓ move
+  the selection. Capped at ~5 visible rows, scrolling beyond.
 - **Row**: status dot · task text · state word.
   - **Title**: the parent tool call's `task` argument (first line,
     truncated), linked via `parent_call` — the user's language, owner
@@ -135,12 +144,7 @@ subagent list** (the list exists only when it has entries).
 
 ## Open questions
 
-1. **Editor draft on stream switch.** One shared editor component:
-   does the in-progress draft travel with you into the child's view
-   (simplest), or is it stashed per stream and restored on return?
-2. **Region focus when the list empties**: if the list's last entry
-   hides while the list region is focused, region focus auto-returns to
-   the editor. (Stated as a law — confirm.)
-3. **Vertical list vs. grid** for the first widget: vertical proposed
-   (task text needs the width); grid stays a later widget shape over
-   the same seam.
+(none — the three from the design discussion were ruled: drafts are
+discarded on stream switch (no editor clear-all exists), a vanished
+focused region yields the editor generically, the first widget is a
+vertical list.)
