@@ -53,7 +53,9 @@ oops
 describe("the registry", () => {
 	test("defaults install; overrides replace the action's key list", () => {
 		const defaults = applyKeybindings();
-		assert.deepStrictEqual(defaults.getKeys("tui.app.interrupt"), ["escape", "ctrl+c"]);
+		assert.deepStrictEqual(defaults.getKeys("tui.app.interrupt"), ["ctrl+c"]);
+		assert.deepStrictEqual(defaults.getKeys("tui.app.escape"), ["escape"]);
+		assert.deepStrictEqual(defaults.getKeys("tui.app.regionDown"), ["alt+down"]);
 		assert.deepStrictEqual(defaults.getKeys("tui.app.toggleCollapsibles"), ["ctrl+o"]);
 		assert.ok(defaults.getDefinition("tui.app.interrupt").description?.includes("Interrupt"));
 

@@ -33,8 +33,8 @@ export interface InteractionCardView extends Component {
 	handleInput(data: string): void;
 }
 
-export function cardViewFor(card: InteractionCard, onAnswer: Answer): InteractionCardView {
-	return card.options.length > 0 ? new ChoiceCardView(card, onAnswer) : new NoteCardView(card, onAnswer);
+export function cardViewFor(card: InteractionCard, onAnswer: Answer, streamLabel?: string): InteractionCardView {
+	return card.options.length > 0 ? new ChoiceCardView(card, onAnswer, streamLabel) : new NoteCardView(card, onAnswer, streamLabel);
 }
 
 class ChoiceCardView implements Component {
@@ -45,10 +45,12 @@ class ChoiceCardView implements Component {
 	#noteMode = false;
 	readonly #card: InteractionCard;
 	readonly #onAnswer: Answer;
+	readonly #streamLabel: string | undefined;
 
-	constructor(card: InteractionCard, onAnswer: Answer) {
+	constructor(card: InteractionCard, onAnswer: Answer, streamLabel?: string) {
 		this.#card = card;
 		this.#onAnswer = onAnswer;
+		this.#streamLabel = streamLabel;
 	}
 
 	handleInput(data: string): void {
@@ -123,6 +125,9 @@ class ChoiceCardView implements Component {
 	render(width: number): string[] {
 		const rule = dim("─".repeat(Math.max(1, width)));
 		const lines: string[] = [rule, ` ${this.#card.title}`];
+		// A card from a non-root stream says so (view-independent cards,
+		// owner ruling — the stream must be identifiable).
+		if (this.#streamLabel !== undefined) lines.push(dim(` from subagent: ${this.#streamLabel}`));
 		for (const bodyLine of this.#card.body.split("\n")) lines.push(` ${bodyLine}`);
 		// pi's SelectList row language: the cursor prefix is the selection
 		// indicator — no toggle boxes on single-select (space is inert
@@ -147,10 +152,12 @@ class NoteCardView implements Component {
 	#note = "";
 	readonly #card: InteractionCard;
 	readonly #onAnswer: Answer;
+	readonly #streamLabel: string | undefined;
 
-	constructor(card: InteractionCard, onAnswer: Answer) {
+	constructor(card: InteractionCard, onAnswer: Answer, streamLabel?: string) {
 		this.#card = card;
 		this.#onAnswer = onAnswer;
+		this.#streamLabel = streamLabel;
 	}
 
 	handleInput(data: string): void {
@@ -175,6 +182,7 @@ class NoteCardView implements Component {
 	render(width: number): string[] {
 		const rule = dim("─".repeat(Math.max(1, width)));
 		const lines: string[] = [rule, ` ${this.#card.title}`];
+		if (this.#streamLabel !== undefined) lines.push(dim(` from subagent: ${this.#streamLabel}`));
 		for (const bodyLine of this.#card.body.split("\n")) lines.push(` ${bodyLine}`);
 		lines.push(` ${this.#note}▏`);
 		lines.push(" enter sends · ctrl+u clears");

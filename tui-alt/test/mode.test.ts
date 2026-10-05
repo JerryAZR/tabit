@@ -10,7 +10,7 @@ import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 import { setTimeout as sleep } from "node:timers/promises";
 
-import { InteractiveMode, type BackendLink, type FooterFacts, type InteractionCard, type ModeView, type PendingMessage, type SkillInfo } from "../src/mode.ts";
+import { InteractiveMode, type BackendLink, type FooterFacts, type InteractionCard, type ModeView, type PendingMessage, type SkillInfo, type SubagentEntry } from "../src/mode.ts";
 import { parseServerFrame, PROTOCOL_VERSION, type ParsedServerFrame } from "../src/protocol.ts";
 
 const SESSION = "0199aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -62,49 +62,63 @@ class RecordingView implements ModeView {
 	replayBegun = 0;
 	replayEnded = 0;
 	users: Array<{ entryId: string; text: string }> = [];
+	/** Parallel streams for multi-stream assertions (M2) — userStreams[i]
+	 *  is the stream users[i] folded into. */
+	userStreams: Array<string | undefined> = [];
 	notes: Array<{ text: string; kind: string }> = [];
+	noteStreams: Array<string | undefined> = [];
 	assistantText = new Map<string, string>();
+	assistantStreams = new Map<string, string>();
 	reasoningText = new Map<string, string>();
 	removedTurns: string[] = [];
-	tools = new Map<string, { turnId: string; name: string; args: string | null; content?: string; ok?: boolean; details?: unknown }>();
+	tools = new Map<string, { stream: string; turnId: string; name: string; args: string | null; content?: string; ok?: boolean; details?: unknown }>();
 	pending: PendingMessage[] = [];
 	status = "";
 	footer: FooterFacts | undefined;
 	cards: InteractionCard[] = [];
+	cardLabels: Array<string | undefined> = [];
 	closed: Array<{ id: string; note: string | undefined }> = [];
+	shownStreams: string[] = [];
+	subagents: SubagentEntry[] = [];
 	/** Every block mutation in apply order: `text:t1`, `reasoning:t1:r1`, `tool:i1`, `user:e1`. */
 	order: string[] = [];
 
-	beginReplay(): void {
+	showStream(stream: string): void {
+		this.shownStreams.push(stream);
+	}
+	beginReplay(_stream: string): void {
 		this.replayBegun++;
 		this.assistantText.clear();
 		this.reasoningText.clear();
 		this.tools.clear();
 	}
-	endReplay(): void {
+	endReplay(_stream: string): void {
 		this.replayEnded++;
 	}
-	addUser(entryId: string, text: string): void {
+	addUser(stream: string, entryId: string, text: string): void {
 		this.users.push({ entryId, text });
+		this.userStreams.push(stream);
 		this.order.push(`user:${entryId}`);
 	}
-	addNote(text: string, kind: "info" | "warn" | "error"): void {
+	addNote(stream: string | undefined, text: string, kind: "info" | "warn" | "error"): void {
 		this.notes.push({ text, kind });
+		this.noteStreams.push(stream);
 	}
-	appendAssistantText(turnId: string, text: string): void {
+	appendAssistantText(stream: string, turnId: string, text: string): void {
 		this.assistantText.set(turnId, (this.assistantText.get(turnId) ?? "") + text);
+		this.assistantStreams.set(turnId, stream);
 		this.order.push(`text:${turnId}`);
 	}
-	appendReasoning(turnId: string, reasoningId: string, text: string): void {
+	appendReasoning(_stream: string, turnId: string, reasoningId: string, text: string): void {
 		const key = `${turnId}:${reasoningId}`;
 		this.reasoningText.set(key, (this.reasoningText.get(key) ?? "") + text);
 		this.order.push(`reasoning:${reasoningId}`);
 	}
-	addTool(turnId: string, internalCallId: string, name: string, args: string | null): void {
-		this.tools.set(internalCallId, { turnId, name, args });
+	addTool(stream: string, turnId: string, internalCallId: string, name: string, args: string | null): void {
+		this.tools.set(internalCallId, { stream, turnId, name, args });
 		this.order.push(`tool:${internalCallId}`);
 	}
-	setToolResult(internalCallId: string, content: string, ok: boolean, details?: unknown): void {
+	setToolResult(_stream: string, internalCallId: string, content: string, ok: boolean, details?: unknown): void {
 		const tool = this.tools.get(internalCallId);
 		if (tool !== undefined) {
 			tool.content = content;
@@ -112,7 +126,7 @@ class RecordingView implements ModeView {
 			tool.details = details;
 		}
 	}
-	removeTurn(turnId: string): void {
+	removeTurn(_stream: string, turnId: string): void {
 		this.removedTurns.push(turnId);
 		this.assistantText.delete(turnId);
 		for (const key of [...this.reasoningText.keys()]) {
@@ -135,11 +149,15 @@ class RecordingView implements ModeView {
 	setSkills(skills: SkillInfo[]): void {
 		this.skills = skills;
 	}
-	showCard(card: InteractionCard): void {
+	showCard(card: InteractionCard, streamLabel: string | undefined): void {
 		this.cards.push(card);
+		this.cardLabels.push(streamLabel);
 	}
 	closeCard(id: string, note: string | undefined): void {
 		this.closed.push({ id, note });
+	}
+	setSubagents(entries: SubagentEntry[]): void {
+		this.subagents = entries;
 	}
 }
 
@@ -384,15 +402,23 @@ describe("InteractiveMode", () => {
 		assert.partialDeepStrictEqual(after.find(c => c.name === "my-skill"), { kind: "skill" });
 	});
 
-	test("skills fold per stream (v20): a session switch clears the catalog, a child's never clobbers it", () => {
-		const { view, feed, control } = harness();
+	test("skills fold per stream (v20): a child's catalog never clobbers the focused stream's, and follows focus", () => {
+		const { view, mode, feed, control } = harness();
 		boot(control, feed);
 		feed({ type: "skills_available", skills: [{ name: "commit", description: "d", location: "l", level: "user" }] });
 		assert.deepStrictEqual(view.skills.map(s => s.name), ["commit"]);
 
-		// A subagent child announces its own catalog on its own stamp — it
-		// must not touch the active session's list.
+		// A subagent child announces itself, then its own catalog on its own
+		// stamp — it must not touch the focused (root) stream's list.
+		feed({ type: "session_opened", id: CHILD, path: "", cwd: "", model: { provider: "p", model: "m1" }, resumed: false, parent: SESSION }, CHILD);
 		feed({ type: "skills_available", skills: [{ name: "child-skill", description: "d", location: "l", level: "user" }] }, CHILD);
+		assert.deepStrictEqual(view.skills.map(s => s.name), ["commit"]);
+
+		// Focus follows: the child's catalog shows while it is focused, the
+		// root's returns on the walk back.
+		mode.focusStream(CHILD);
+		assert.deepStrictEqual(view.skills.map(s => s.name), ["child-skill"]);
+		mode.focusStream(SESSION);
 		assert.deepStrictEqual(view.skills.map(s => s.name), ["commit"]);
 
 		// v20 announces only when discovery found something — absence is
@@ -516,12 +542,125 @@ describe("InteractiveMode", () => {
 		assert.strictEqual(view.footer?.inputTokens, 9); // history's usage rides the same handler
 	});
 
-	test("child-stream frames log without view noise", () => {
+	test("M2 focus: submit and session commands route to the focused stream", () => {
+		const { backend, mode, feed, control } = harness();
+		boot(control, feed);
+		feed({ type: "session_opened", id: CHILD, path: "", cwd: "", model: { provider: "p", model: "m1" }, resumed: false, parent: SESSION }, CHILD);
+		mode.focusStream(CHILD);
+		assert.strictEqual(mode.focusedStream, CHILD);
+		mode.submit("steer the child");
+		mode.submit("/compact focus on the diff");
+		mode.switchModel("p", "m2");
+		assert.deepStrictEqual(
+			backend.sent.map(f => `${f.kind}:${f.session}`),
+			["message:0199bbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "compact:0199bbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "model:0199bbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"],
+		);
+	});
+
+	test("M2 Esc's law: abort the focused run; idle child walks to its parent; idle root is a no-op", () => {
+		const { backend, mode, feed, control } = harness();
+		boot(control, feed);
+		// Root idle: nothing happens, the key falls through.
+		assert.strictEqual(mode.escape(), false);
+		// Root running: abort the root.
+		feed({ type: "user_message", entry_id: "e1", text: "go" });
+		assert.strictEqual(mode.escape(), true);
+		assert.deepStrictEqual(backend.sent.map(f => `${f.kind}:${f.session}`), [`abort:${SESSION}`]);
+		feed({ type: "run_finished", output: "", durable: true, started_at_ms: 0, completed_at_ms: 1 });
+
+		// Idle child focused: Esc walks to the parent, no abort sent.
+		feed({ type: "session_opened", id: CHILD, path: "", cwd: "", model: { provider: "p", model: "m1" }, resumed: false, parent: SESSION }, CHILD);
+		mode.focusStream(CHILD);
+		assert.strictEqual(mode.escape(), true);
+		assert.strictEqual(mode.focusedStream, SESSION);
+		assert.strictEqual(backend.sent.length, 1); // still only the root's abort
+
+		// Running child focused: Esc aborts THE CHILD, not the root.
+		mode.focusStream(CHILD);
+		feed({ type: "user_message", entry_id: "cx", text: "child task" }, CHILD);
+		assert.strictEqual(mode.escape(), true);
+		assert.deepStrictEqual(backend.sent.map(f => `${f.kind}:${f.session}`), [`abort:${SESSION}`, `abort:${CHILD}`]);
+	});
+
+	test("M2 the list projection: title from the parent call's task, the activity atom's priority", () => {
+		const { view, feed, control } = harness();
+		boot(control, feed);
+		// The parent's subagent tool call carries the task text.
+		feed({ type: "user_message", entry_id: "e1", text: "delegate" });
+		feed({ type: "turn_started", id: "t1", started_at_ms: 0 });
+		feed({ type: "tool_call", turn_id: "t1", name: "subagent", call_id: "c1", internal_call_id: "i1", arguments: JSON.stringify({ task: "survey the diff landscape\nsecond line" }) });
+		feed({ type: "session_opened", id: CHILD, path: "", cwd: "", model: { provider: "p", model: "m1" }, resumed: false, parent: SESSION, parent_call: "i1" }, CHILD);
+		assert.deepStrictEqual(
+			view.subagents.map(e => ({ stream: e.stream, title: e.title, state: e.state })),
+			[{ stream: CHILD, title: "survey the diff landscape", state: "idle" }],
+		);
+		// running (the task message opens the run)…
+		feed({ type: "user_message", entry_id: "cx", text: "survey the diff landscape" }, CHILD);
+		assert.strictEqual(view.subagents[0]!.state, "running");
+		// …thinking (a reasoning delta is the latest)…
+		feed({ type: "turn_started", id: "ct1", started_at_ms: 1 }, CHILD);
+		feed({ type: "reasoning_delta", turn_id: "ct1", id: "r1", reasoning: "hmm" }, CHILD);
+		assert.strictEqual(view.subagents[0]!.state, "thinking");
+		// …a tool call outranks thinking…
+		feed({ type: "tool_call", turn_id: "ct1", name: "read", call_id: "c2", internal_call_id: "i2", arguments: "{}" }, CHILD);
+		assert.strictEqual(view.subagents[0]!.state, "read");
+		// …a card outranks everything…
+		feed({ type: "interaction_request", id: "ask-c", ui_type: "native:select_one", payload: { title: "Allow?", body: "", options: [{ label: "yes" }] } }, CHILD);
+		assert.strictEqual(view.subagents[0]!.state, "waiting");
+		// …and the terminal settles to completed with the idle clock armed.
+		feed({ type: "tool_result", turn_id: "ct1", entry_id: "e2", name: "read", internal_call_id: "i2", content: "x", status: { status: "success" } }, CHILD);
+		feed({ type: "interaction_settled", id: "ask-c" }, CHILD);
+		feed({ type: "run_finished", output: "", durable: true, started_at_ms: 1, completed_at_ms: 2 }, CHILD);
+		assert.strictEqual(view.subagents[0]!.state, "completed");
+		assert.strictEqual(typeof view.subagents[0]!.idleSince, "number");
+	});
+
+	test("M2 cards are view-independent: a child's card surfaces labeled and answers to its own stream", () => {
+		const { backend, view, mode, feed, control } = harness();
+		boot(control, feed);
+		feed({ type: "user_message", entry_id: "e1", text: "go" });
+		feed({ type: "turn_started", id: "t1", started_at_ms: 0 });
+		feed({ type: "tool_call", turn_id: "t1", name: "subagent", call_id: "c1", internal_call_id: "i1", arguments: JSON.stringify({ task: "fix the parser" }) });
+		feed({ type: "session_opened", id: CHILD, path: "", cwd: "", model: { provider: "p", model: "m1" }, resumed: false, parent: SESSION, parent_call: "i1" }, CHILD);
+		// The root stays focused — the child's card still surfaces, labeled.
+		feed({ type: "interaction_request", id: "ask-c", ui_type: "native:select_one", payload: { title: "Allow?", body: "", options: [{ label: "yes" }] } }, CHILD);
+		assert.strictEqual(view.cards.length, 1);
+		assert.strictEqual(view.cardLabels[0], "fix the parser");
+		// The answer routes to the CARD's stream, wherever focus sits.
+		mode.answerCard("ask-c", ["yes"], null);
+		assert.deepStrictEqual(backend.sent, [{ kind: "interaction_response", session: CHILD, id: "ask-c", payload: { selected: ["yes"], text: null } }]);
+	});
+
+	test("M2 focus switch re-emits the dock from the focused stream; the footer names a focused child", () => {
+		const { view, mode, feed, control } = harness();
+		boot(control, feed);
+		feed({ type: "session_opened", id: CHILD, path: "", cwd: "/child/dir", model: { provider: "p", model: "child-model" }, resumed: false, parent: SESSION }, CHILD);
+		mode.focusStream(CHILD);
+		assert.strictEqual(view.shownStreams.at(-1), CHILD);
+		assert.strictEqual(view.footer?.streamLabel, CHILD); // no parent_call → title fallback is the id
+		assert.strictEqual(view.footer?.cwd, "/child/dir");
+		assert.strictEqual(view.footer?.model, "child-model");
+		mode.focusStream(SESSION);
+		assert.strictEqual(view.footer?.streamLabel, undefined);
+	});
+
+	test("child frames fold into the child's own stream — never the shown one (M2)", () => {
 		const { view, feed, control } = harness();
 		boot(control, feed);
 		const before = view.users.length;
-		feed({ type: "user_message", entry_id: "cx", text: "child prompt" }, CHILD);
+		// Unannounced streams violate the contract: dropped, logged.
+		feed({ type: "user_message", entry_id: "cx", text: "orphan" }, CHILD);
 		assert.strictEqual(view.users.length, before);
+
+		// Announced, the child folds on its own stamp: the pane records the
+		// stream, the list projection gains the row, the footer's facts stay
+		// the root's.
+		feed({ type: "session_opened", id: CHILD, path: "", cwd: "", model: { provider: "p", model: "m1" }, resumed: false, parent: SESSION }, CHILD);
+		feed({ type: "user_message", entry_id: "cx", text: "child prompt" }, CHILD);
+		assert.strictEqual(view.users.length, before + 1);
+		assert.strictEqual(view.userStreams.at(-1), CHILD);
+		assert.deepStrictEqual(view.subagents.map(e => e.stream), [CHILD]);
+		assert.strictEqual(view.footer?.session, SESSION);
 	});
 
 	test("unknown frame types surface as notes; the connection is kept", () => {

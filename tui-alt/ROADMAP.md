@@ -132,15 +132,20 @@ and its deferral. The catalog's per-model `input` modalities (v21) tell
 us whether the bound model accepts images at all — an early-warning UI
 can come later.
 
-## 5. M2: child streams / focus switching
+## 5. M2: child streams / focus switching — landed
 
-**Designed: see `M2-DESIGN.md`** (the single source — every rule was
-settled in discussion; open questions live at its end). Summary:
-per-stream transcript views folding continuously regardless of focus; a
-spatial region stack (transcript — editor — subagent list) navigated by
-alt+↑/↓; a swappable list-widget seam with a vertical list below the
-editor as the first widget; Esc aborts the focused stream or walks to
-its parent; interaction cards are global and view-independent.
+**Designed in `M2-DESIGN.md`; implemented as designed.** Per-stream
+`StreamState` folds (transcript, facts, queue, skills, tree, activity
+atom) replacing the single-transcript fold; focus is a stream id with
+the ruled laws (submit/commands/Esc route to the focused stream; Esc
+aborts a running focus, walks an idle one to its parent; the draft is
+discarded on switch); the region stack (transcript — editor — list) on
+alt+↑/↓ plus empty-editor ↓; the subagent list as the first widget over
+the projection seam (running always listed, idle hidden after 60s);
+view-independent cards labeled with their stream; the footer's stream
+badge. Remaining from the design's stated limits: the parent's tool card
+could gain a live `↳ <current tool>` line (the frames already fold);
+full no-effect-↓ semantics await a pi-tui public accessor.
 
 ## 6. Merge-back hygiene (at the end)
 

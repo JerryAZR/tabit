@@ -35,9 +35,24 @@ function renderOne(factory: FooterBadgeFactory, over: Partial<FooterFacts> = {})
 	return factory({ requestRender: () => {} }).render(facts(over));
 }
 
+/** A badge by id — never by registry position (a new badge's insertion
+ *  must not re-key every test). */
+function badge(id: string): FooterBadgeFactory {
+	const factory = FOOTER_BADGES.find(f => f({ requestRender: () => {} }).id === id);
+	assert.ok(factory !== undefined, `badge ${id} registered`);
+	return factory;
+}
+
 describe("footer badges", () => {
+	test("stream: the focused non-root stream's label; silent on the root (M2)", () => {
+		const stream = badge("stream");
+		assert.strictEqual(renderOne(stream), undefined);
+		const rendered = renderOne(stream, { streamLabel: "fix the parser" })!;
+		assert.ok(rendered.includes("fix the parser"));
+	});
+
 	test("model: display name wins, id is the fallback, silence when neither", () => {
-		const model = FOOTER_BADGES[0]!;
+		const model = badge("model");
 		assert.strictEqual(model({ requestRender: () => {} }).id, "model");
 		assert.strictEqual(renderOne(model, { modelName: "Kimi K2.8 Preview" }), "Kimi K2.8 Preview");
 		assert.strictEqual(renderOne(model), "kimi-for-coding");
@@ -45,7 +60,7 @@ describe("footer badges", () => {
 	});
 
 	test("context: bar, percent, absolute; silent until both facts exist; thresholds colorize", () => {
-		const context = FOOTER_BADGES[1]!;
+		const context = badge("context");
 		assert.strictEqual(renderOne(context), undefined);
 		assert.strictEqual(renderOne(context, { contextUsed: 1000 }), undefined);
 		assert.strictEqual(renderOne(context, { contextWindow: 0, contextUsed: 1000 }), undefined);
@@ -58,14 +73,14 @@ describe("footer badges", () => {
 	});
 
 	test("cost: recorded dollars as recorded; silent until the first costed turn", () => {
-		const cost = FOOTER_BADGES[2]!;
+		const cost = badge("cost");
 		assert.strictEqual(renderOne(cost), undefined);
 		assert.strictEqual(renderOne(cost, { cost: 0.000152 }), "$0.000152"); // sub-cent stays honest
 		assert.strictEqual(renderOne(cost, { cost: 4.271 }), "$4.27");
 	});
 
 	test("usage: labeled token breakdown, cache writes ignored, hit rate with the cached leg", () => {
-		const usage = FOOTER_BADGES[3]!;
+		const usage = badge("usage");
 		assert.strictEqual(usage({ requestRender: () => {} }).id, "usage");
 		assert.strictEqual(renderOne(usage), undefined);
 		assert.strictEqual(renderOne(usage, { inputTokens: 421, outputTokens: 137 }), "in 421  out 137");
@@ -86,7 +101,7 @@ describe("footer badges", () => {
 	});
 
 	test("state: the one state word, never silent", () => {
-		const state = FOOTER_BADGES[4]!;
+		const state = badge("state");
 		assert.strictEqual(renderOne(state, { running: true }), "running");
 		assert.strictEqual(renderOne(state, { running: false }), "idle");
 	});
@@ -96,7 +111,7 @@ describe("footer registry and container", () => {
 	test("the registry is the display order; ids are unique", () => {
 		assert.deepStrictEqual(
 			FOOTER_BADGES.map(f => f({ requestRender: () => {} }).id),
-			["model", "context", "cost", "usage", "state"],
+			["stream", "model", "context", "cost", "usage", "state"],
 		);
 	});
 

@@ -26,19 +26,34 @@ import {
 declare module "@earendil-works/pi-tui" {
 	interface Keybindings {
 		"tui.app.interrupt": true;
+		"tui.app.escape": true;
 		"tui.app.toggleCollapsibles": true;
 		"tui.app.quit": true;
 		"tui.app.clearNote": true;
 		"tui.app.tree": true;
 		"tui.app.pasteImage": true;
+		"tui.app.regionUp": true;
+		"tui.app.regionDown": true;
 	}
 }
 
 /** The app's own actions (engine actions keep their TUI defaults). */
 export const APP_KEYBINDINGS: KeybindingDefinitions = {
 	"tui.app.interrupt": {
-		defaultKeys: ["escape", "ctrl+c"],
-		description: "Interrupt the running turn",
+		defaultKeys: ["ctrl+c"],
+		description: "Interrupt the focused stream's run",
+	},
+	"tui.app.escape": {
+		defaultKeys: ["escape"],
+		description: "Interrupt the focused run; when idle, return to the parent stream",
+	},
+	"tui.app.regionUp": {
+		defaultKeys: ["alt+up"],
+		description: "Focus the region above (editor → transcript)",
+	},
+	"tui.app.regionDown": {
+		defaultKeys: ["alt+down"],
+		description: "Focus the region below (transcript → editor → subagent list)",
 	},
 	"tui.app.toggleCollapsibles": {
 		defaultKeys: ["ctrl+o"],
@@ -76,15 +91,27 @@ function allDefinitions(): KeybindingDefinitions {
 	return { ...engine, ...APP_KEYBINDINGS };
 }
 
-type AppKeybindingId = "tui.app.interrupt" | "tui.app.toggleCollapsibles" | "tui.app.quit" | "tui.app.clearNote" | "tui.app.tree" | "tui.app.pasteImage";
+type AppKeybindingId =
+	| "tui.app.interrupt"
+	| "tui.app.escape"
+	| "tui.app.toggleCollapsibles"
+	| "tui.app.quit"
+	| "tui.app.clearNote"
+	| "tui.app.tree"
+	| "tui.app.pasteImage"
+	| "tui.app.regionUp"
+	| "tui.app.regionDown";
 
 export const APP_KEYBINDING_IDS: AppKeybindingId[] = [
 	"tui.app.interrupt",
+	"tui.app.escape",
 	"tui.app.toggleCollapsibles",
 	"tui.app.quit",
 	"tui.app.clearNote",
 	"tui.app.tree",
 	"tui.app.pasteImage",
+	"tui.app.regionUp",
+	"tui.app.regionDown",
 ];
 
 /** Install the merged registry globally; returns it for display facts.
