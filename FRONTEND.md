@@ -448,6 +448,35 @@ the future direction if that ever changes), and the bare leading
 `/name` shorthand is not recognized (deferred until the tag path is
 stable).
 
+**Attachments in message text (2026-10):** a message may also carry
+the attachment tag `<attachment path="…"/>` — the exact self-closing
+form, any number of them, anywhere in the text. The UX is yours
+(typical: the user pastes an image, you write it to a temp file and
+format the tag at the caret — the backend owns the contract, you own
+the paste); the backend expands at the same message door, after any
+skill expansion: the text passes verbatim with the tags in place as
+anchors, and each resolvable tag appends, in tag order, a label (the
+file's BASENAME — the tag already anchors the full path) and the
+image itself as a base64 content part. The model reads the message in
+full and correlates parts to tags by name.
+
+Raster images only — PNG/JPEG/GIF/WebP — sniffed from the bytes and
+verified by decode; the extension is never trusted. Unresolvable tags
+(a missing or unreadable file, a non-image, a corrupt image) are left
+as-is: the message is never rejected. Oversized images are downscaled
+at the door, before anything is stored or sent (long edge ≤ 1568px,
+≤ 5 MB post-encode), so the log and the request hold exactly what the
+model saw.
+
+**The wire stays text.** `message { session, text }` carries the tags
+as plain text; image bytes never cross the wire. The `user_message`
+event's text is the message's text parts joined — the original text
+with the tags, then each basename label — so the transcript shows the
+attachment by name; you may render the tag as an attachment chip.
+Draft salvage of a discarded queued message is therefore text (the
+parts were never on the wire) — re-attaching means re-sending with the
+tag.
+
 ## 6. Events
 
 The `report` (the backend's first line) and `protocol_error` are
@@ -460,9 +489,9 @@ those connection-level).
 
 | event | payload | when |
 |---|---|---|
-| `message_queued` | `id`, `text` | a `message` accepted while a run is live (a steer that waits). `id` is the message's entry id, minted here. Idle sends never produce this event. |
+| `message_queued` | `id`, `text` | a `message` accepted while a run is live (a steer that waits). `id` is the message's entry id, minted here. `text` is the **authored text** — the message's first part, tags intact; the door's expansion (skill bodies, attachment labels) never rides it. Idle sends never produce this event. |
 | `user_message` | `entry_id`, `text` | the message drains into a run (opening batch or steer boundary) and becomes history. Consecutive `user_message`s = an opening batch. |
-| `messages_discarded` | `messages: [{ id, text }]` | a clear site: abort (what was queued at abort time — the notice is immediate, at the abort site, ahead of `run_aborted`) or checkout (what was submitted before the checkout; §7, ahead of `run_aborted` and `checked_out`). Omitted when nothing was pending. Salvage as drafts; the backend keeps no copy. |
+| `messages_discarded` | `messages: [{ id, text }]` | a clear site: abort (what was queued at abort time — the notice is immediate, at the abort site, ahead of `run_aborted`) or checkout (what was submitted before the checkout; §7, ahead of `run_aborted` and `checked_out`). Omitted when nothing was pending. Salvage as drafts; the backend keeps no copy. Each `text` is the **authored text** — the message's first part, tags intact — so a salvaged draft re-sent re-expands fresh at the door (no duplication). |
 | `turn_started` | `id`, `started_at_ms` | a model turn begins; `id` is the turn's entry id, minted here and reused at commit. `started_at_ms` is the turn's start, Unix milliseconds (live runs stamp at emission; replay stamps from the turn entry's recorded time, so a replayed bracket's two stamps coincide). |
 | `text_delta` | `turn_id`, `text` | assistant text; appends within the turn. Full-text exactly once in replay. |
 | `reasoning_delta` | `turn_id`, `id`, `reasoning` | model reasoning; `id` correlates blocks within the turn (several may interleave; same-id deltas append). Full-text once per block id in replay. |
@@ -922,6 +951,21 @@ v19 rode the deleted GUI's CHANGELOG.md — git history holds it.)
   place as anchors). Unresolvable tags pass through untouched —
   messages are never rejected for them. No arguments; the bare
   leading `/name` shorthand is not recognized. See §5.
+- **2026-10 (no bump — message-text semantics, no wire shape)** —
+  attachments: a message may carry the attachment tag
+  `<attachment path="…"/>`; the backend expands at the message door
+  (after the skill expansion), appending per resolvable tag, in tag
+  order, the file's basename as a label and the image as a base64
+  content part — raster only (PNG/JPEG/GIF/WebP, sniffed, never the
+  extension), downscaled at the door (long edge ≤ 1568px, ≤ 5 MB).
+  Unresolvable tags pass through untouched. The wire carries none of
+  it: `user_message` events join the text parts (tags + labels), the
+  log and the model's request carry the parts. See §5. **The
+  first-part law:** door expansion (skills, attachments) only ever
+  appends parts — part[0] IS the authored text, structurally — and
+  `message_queued`/`messages_discarded` hand back that authored text
+  (tags intact, no expansion), so a salvaged draft re-sent re-expands
+  exactly once.
 - **2026-10 (no bump — contract clarifications)** — the zero-config
   fix paths split on the catalog predicate a first-run flow branches
   on (§3.1): both `providers` and `missing_keys` empty means no

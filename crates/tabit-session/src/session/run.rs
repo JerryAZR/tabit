@@ -3,7 +3,7 @@
 //! fan-out every emission goes through.
 
 use super::mailbox::SessionSteers;
-use super::wire::{result_details, result_text, user_text, wire_status, wire_usage};
+use super::wire::{result_details, result_text, user_message_event, wire_status, wire_usage};
 use super::{Session, TOOL_CONCURRENCY};
 use crate::entry::{FileRecord, SideKind, SideRecord};
 use crate::error::SessionError;
@@ -280,9 +280,9 @@ impl Session {
             // Commit first, then announce — the engine's CONVERGE idiom;
             // the helper is synchronous, so no suspension can interleave,
             // but one ordering lives in the codebase, not two.
-            let text = user_text(&queued);
-            crate::lock::write(&self.conversation).fold_with_id(queued, id.clone());
-            sink.emit(SessionEvent::UserMessage { text, entry_id: id });
+            let event = user_message_event(id.clone(), &queued);
+            crate::lock::write(&self.conversation).fold_with_id(queued, id);
+            sink.emit(event);
         }
         if let Some(hub) = &self.interaction {
             hub.clear_pending();
@@ -496,8 +496,11 @@ impl Session {
                     // The whole batch is already committed (the fold and
                     // the yield share one poll); announce every pair in
                     // one synchronous loop — an abort cannot split it.
-                    for (entry_id, text) in batch {
-                        sink.emit(SessionEvent::UserMessage { text, entry_id });
+                    // The event text is the session's wire fold (text
+                    // parts joined — a multi-part message, e.g. an
+                    // expanded attachment, announces its text parts).
+                    for (entry_id, message) in batch {
+                        sink.emit(user_message_event(entry_id, &message));
                     }
                 }
                 Ok(MultiTurnStreamItem::CompletionCall(call)) => {

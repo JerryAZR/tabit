@@ -26,7 +26,9 @@ pub enum SessionEvent {
     },
     /// A user message was accepted and recorded.
     UserMessage {
-        /// The message text.
+        /// The message text — the wire fold: every text part joined,
+        /// the door's expansion (skill bodies, attachment labels)
+        /// included.
         text: String,
         /// The message's durable entry id — the id `message_queued`
         /// announced at submit (born early: minted at accept, carried into
@@ -43,13 +45,17 @@ pub enum SessionEvent {
     MessageQueued {
         /// The message's entry id, minted at accept.
         id: String,
-        /// The message text.
+        /// The AUTHORED text — the message's first part, tags intact,
+        /// never the door's expansion (skill bodies, attachment
+        /// labels): the first-part law keeps part[0] what the user
+        /// typed, so a salvaged draft re-sent re-expands fresh.
         text: String,
     },
     /// Queued messages were discarded (a mailbox clear: abort, checkout,
     /// the prompt barrier). The pairs hand back what the user authored —
-    /// ids included, so pending displays resolve by id; the messages were
-    /// never part of the conversation and are not persisted.
+    /// the first part, tags intact, never the expansion — ids included,
+    /// so pending displays resolve by id; the messages were never part
+    /// of the conversation and are not persisted.
     MessagesDiscarded {
         /// The discarded messages.
         messages: Vec<DiscardedMessage>,

@@ -46,7 +46,14 @@ use tabit_providers::message::ToolResult;
 /// 2026-09-27: a resumed session adopts the caller's cwd, never a
 /// recorded one), so the field lost its only reader and is no longer
 /// written; files from 6.1 and earlier may still carry it, tolerated
-/// and ignored. v5: the `compaction` node appends as a **leaf at the
+/// and ignored. v6.2 note (2026-10, no bump): `user_message` entries
+/// may now carry MULTI-PART messages — the attachments expansion
+/// (ROADMAP.md's design record) appends a basename label text part and
+/// the image as an inline-base64 part. The `Message` serde already
+/// (de)serializes image parts (v6: content blocks are model
+/// modalities), so the schema is unchanged and every 6.x reader reads
+/// the files; logs written before simply never contain parts. v5: the
+/// `compaction` node appends as a **leaf at the
 /// head-at-insert** (the tree's parent links are never rewritten — the
 /// history view, not the writer, places the boundary). v3: the log
 /// splits into conversation nodes (id + parent, the tree) and

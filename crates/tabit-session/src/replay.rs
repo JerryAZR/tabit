@@ -23,7 +23,7 @@
 //! this module (the chain walk already excluded them).
 
 use crate::entry::{EntryKind, SessionEntry};
-use crate::session::{result_details, result_text, user_text, wire_status};
+use crate::session::{result_details, result_text, user_message_event, wire_status};
 use std::collections::HashMap;
 use tabit_protocol::SessionEvent;
 use tabit_providers::message::{AssistantContent, Message};
@@ -115,10 +115,7 @@ impl Projection {
     fn entry(&mut self, entry: &SessionEntry, events: &mut Vec<SessionEvent>) {
         match &entry.kind {
             EntryKind::UserMessage { message } => {
-                events.push(SessionEvent::UserMessage {
-                    text: user_text(message),
-                    entry_id: entry.id.clone(),
-                });
+                events.push(user_message_event(entry.id.clone(), message));
             }
             EntryKind::AssistantMessage {
                 message,

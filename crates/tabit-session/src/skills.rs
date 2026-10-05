@@ -30,6 +30,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tabit_derive::rig_tool;
 use tabit_engine::tool::{DynamicTool, ToolContext, ToolExecutionError, ToolOutput};
+use tabit_providers::completion::Message;
+use tabit_providers::message::UserContent;
 
 /// One discovered skill. `base_dir` is the canonical directory
 /// containing SKILL.md (symlinks resolved at discovery — the tool's
@@ -499,7 +501,11 @@ fn footer(entry: &SkillEntry) -> String {
 // The session expands at the message door: the tag stays in place as
 // the anchor, and each resolvable tag's skill body is APPENDED after
 // the message (never in-place — a hundred-line body mid-sentence is
-// unreadable), in the `skill` tool's result format. Unresolvable
+// unreadable), in the `skill` tool's result format. The first-part
+// law (ROADMAP.md's attachments design record, 2026-10): expansion
+// only appends parts, it never touches the first part — part[0] IS
+// the authored text, structurally, so a skill block lands as its own
+// text part (the wire fold owns the join separator). Unresolvable
 // tags (no such skill, unreadable file) are left as-is — external,
 // graceful: the message passes, never rejected. No arguments by
 // ruling (agentskills.io has none; pi's prompt-template is the
@@ -511,15 +517,22 @@ const TAG_OPEN: &str = r#"<skill name=""#;
 /// The invocation tag's closing text (`"/>`).
 const TAG_CLOSE: &str = r#""/>"#;
 
-/// Expand a message's invocation tags: the text verbatim, then one
-/// block per resolvable tag in order of appearance. A message without
-/// tags — or whose tags all pass through — returns unchanged.
-pub fn expand_invocations(text: &str, skills: &Skills) -> String {
+/// Expand a message's invocation tags: the message verbatim — the
+/// authored first part untouched, tags intact — then one text part
+/// per resolvable tag in order of appearance (the first-part law).
+/// A message without tags, or whose tags all pass through, returns
+/// unchanged.
+#[allow(clippy::unreachable)] // sanctioned crash: the re-match's else arm is dead by the check above
+pub(crate) fn expand_invocations(message: Message, skills: &Skills) -> Message {
+    let Message::User { .. } = &message else {
+        return message;
+    };
+    let text = crate::session::user_text(&message);
     if !text.contains(TAG_OPEN) {
-        return text.to_string();
+        return message;
     }
     let mut blocks: Vec<String> = Vec::new();
-    for name in scan_invocation_tags(text) {
+    for name in scan_invocation_tags(&text) {
         let Some(entry) = skills.lookup(name) else {
             tracing::warn!(skill = %name, "invocation tag names no discovered skill — left as-is");
             continue;
@@ -539,9 +552,16 @@ pub fn expand_invocations(text: &str, skills: &Skills) -> String {
         }
     }
     if blocks.is_empty() {
-        return text.to_string();
+        return message;
     }
-    format!("{text}\n\n{}", blocks.join("\n\n"))
+    let Message::User { mut content } = message else {
+        // Matched above: a user message.
+        unreachable!("checked a user message above");
+    };
+    for block in blocks {
+        content.push(UserContent::text(block));
+    }
+    Message::User { content }
 }
 
 /// The tag names in order of appearance — everything between
