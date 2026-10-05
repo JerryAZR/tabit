@@ -134,13 +134,13 @@ can come later.
 
 ## 5. M2: child streams / focus switching
 
-The dedicated big step. Subagent child sessions already stream on their
-own stamps; the TUI logs and drops them. Includes the latent dead path:
-the "subagent session started" note never renders (the foreign-stamp
-drop eats the child's `session_opened` before dispatch). Design first:
-rendering (nested? parallel panes?), focus model, per-stream folds
-(skills, usage), `parent_call` pairing with the open `subagent` tool
-call.
+**Designed: see `M2-DESIGN.md`** (the single source — every rule was
+settled in discussion; open questions live at its end). Summary:
+per-stream transcript views folding continuously regardless of focus; a
+spatial region stack (transcript — editor — subagent list) navigated by
+alt+↑/↓; a swappable list-widget seam with a vertical list below the
+editor as the first widget; Esc aborts the focused stream or walks to
+its parent; interaction cards are global and view-independent.
 
 ## 6. Merge-back hygiene (at the end)
 
