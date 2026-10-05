@@ -235,6 +235,9 @@ fn all_events() -> Vec<SessionEvent> {
             parent: None,
             parent_call: None,
         },
+        SessionEvent::SessionClosed {
+            id: "0199".to_string(),
+        },
         SessionEvent::CompactionBegin,
         SessionEvent::CompactionDelta {
             text: "summary text".to_string(),
@@ -465,6 +468,14 @@ fn every_tag_agrees_with_the_wire_the_enum_and_the_list() {
         })
         .expect("serialize"),
         r#"{"type":"session_opened","id":"0199","path":"C:/w/s.jsonl","cwd":"C:/work/proj","model":null,"resumed":false}"#
+    );
+    // The close's wire spelling: the one field, nothing else.
+    assert_eq!(
+        serde_json::to_string(&SessionEvent::SessionClosed {
+            id: "0199".to_string(),
+        })
+        .expect("serialize"),
+        r#"{"type":"session_closed","id":"0199"}"#
     );
     // The wire spelling of the brackets and the truncation warning.
     assert_eq!(

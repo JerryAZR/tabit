@@ -551,8 +551,17 @@ cwd. **`model` is nullable (v21)**: `null` means the session has no
 selection — nothing usable at this backend (the zero-config boot,
 §3.1) — and the first `model` command lands one; until then runs fail
 at open (`run_failed { kind: "model" }`). **One announcement shape for every path** (2026-09 ruling — the report carries protocol-level facts only; the boot is not a special case). Stamped with the session's own stream. Selection notes, if any, follow on the same stream. v5: `path` is **empty for an ephemeral session** (in memory only — nothing to open or replay; subagent children are ephemeral today), and `parent` names the spawning session for a subagent child — absent for every user-facing session. A frontend branches on `parent`: user sessions update their session facts, children render nested (or not at all) — a child announcement must never overwrite the active session's facts. The child's whole run (its `user_message`, deltas, `tool_call`s, terminal) streams on its own stamp; the spawner's transcript sees only the subagent `tool_call`/`tool_result` pair. `parent_call` (v7, additive) is the spawning tool call's `internal_call_id`: the announce pairs the child with the **exact** open `tool_call` event — exact under concurrent subagent calls, where arrival order cannot disambiguate. Absent whenever `parent` is. |
+| `session_closed` | `id` | **(v23)** a child session's stream ended permanently: **this session will never emit again — discarding its state is safe.** `id` is the session id the stream stamp carries. The LAST frame on the stream, exactly once — guaranteed by construction: the close is synthesized by the spawner-side wire when the dead child's pipe reaches EOF (every frame the pipe carried has crossed already), never emitted by the session itself. The asymmetry is the ruling: birth is self-announced (`session_opened` carries its lineage from the source), death is **vouched by the spawner** — a crash path cannot announce itself, and one synthesis point cannot duplicate. **The cascade is the backend's**: process death is subtree death, so a dying child closes every session whose frames crossed its pipe, descendants included — you receive one `session_closed` per dead session and discard exactly those; no tree inference required. **Children only**: a user-facing session never gets one (its death is the backend process's own — the pipe closing is the signal, §3), and **run completion is not death** — a completed subagent parked for follow-ups emits nothing until its process actually exits (the pool's kill, the abort's cascade, a crash). Never replayed: a resumed session is live again. |
 | `checked_out` | `entry_id`, `base_id` | checkout succeeded — `entry_id` is **where the chain ends** (the landing): a mid-roundtrip ask resolved forward to the batch's last tool result, so it may differ from what you sent. `base_id` is `null` today: drop everything and rebuild from the replay pass that follows. A non-null `base_id` is the reserved suffix mode (keep through `base_id`, apply the pass) — treat any non-null value as "rebuild from the pass" and you stay correct. |
 | `model_changed` | `provider`, `model`, `thinking_level`, `context_window?`, `name?`, `cost?` | the session's **active model** — a session preference: the file's last `model_change`, latest in time wins (a rewind never moves it). Announced live whenever the session becomes visible: ahead of every replay pass (boot, `open_session`, re-replay, after `checked_out`) — idempotent, the value repeats — and at every `model` command (a state write at receive; §5). **Never inside a pass** (state is announced, not reconstructed), and **never for a session with no selection** (a zero-config boot announces `session_opened.model: null` and no `model_changed` until the first `model` command lands one). The boot's `session_opened.model` is the boot session's register. v11: the announcement also carries the model record resolved against config — `context_window` (tokens; a context meter's denominator), `name` (a display name; fall back to the model id), and `cost` (`{ input, output, cache_read, cache_write }`, USD per million tokens). Each field is optional and **absent means the config does not state it** (never zero); a register stale against an edited config announces the ids with no facts, and the next validated switch repairs it. **The register can sit outside both catalogs** — a key-less register (post-`logout`, an explicit `--model` on a key-less provider) reports `auth: "none"` in `providers_available` and appears in no `models_available` row; a register stale against an edited config is nowhere. Render it as a **synthetic current entry** alongside the catalog (never drop the user's current state); a validated `model` command repairs it. |
+
+**Session discard.** Two classes, two rules. A **user-facing session**
+(no `parent`) is durable: discard its state any time — re-entry
+(`open_session`) replays it, and it never closes. A **child session**
+(`parent` set) is process state: keep it while frames arrive, discard
+it at `session_closed`. `session_closed` crosses for every session
+that died, descendants included — a frontend discards exactly the
+sessions it receives closes for; no tree inference required.
 
 **Errors: one generic carrier with a `kind`.** Anything that goes
 wrong outside a run terminal rides `error { kind, message, … }`. A
@@ -883,6 +892,16 @@ Every `PROTOCOL_VERSION` bump or frontend-observable change (wire
 or behavior) gets an entry here in the same commit. (History before
 v19 rode the deleted GUI's CHANGELOG.md — git history holds it.)
 
+- **v23 (2026-10)** — `session_closed { id }`: the child-death
+  announcement (§6). The last frame on a dead child session's
+  stream, exactly once, synthesized by the spawner-side wire at the
+  pipe's EOF — birth is self-announced (`session_opened`), death is
+  vouched. The cascade is backend-side: a dying child closes every
+  session whose frames crossed its pipe, descendants included, so a
+  frontend discards exactly the sessions it receives closes for —
+  no tree inference. User-facing sessions never close (their death
+  is the process's, §3); run completion is not death (a parked
+  subagent emits nothing until its process exits).
 - **v19 (2026-09)** — the report model: the backend's first line is
   its self-report (`report { protocol_version }`); the spawner is
   the version check and owns the kill; client lines are bare

@@ -619,3 +619,216 @@ fn cancelling_the_leash_settles_aborted_without_waiting_on_the_child() {
         "the parked child ended at the EOF the close produced: {crash}"
     );
 }
+
+/// A node with a `tag@stream` recorder over both doors and a runtime
+/// — the close-announcement tests' shared rig.
+struct CloseRig {
+    parent: Arc<Node>,
+    saw: Arc<Mutex<Vec<String>>>,
+    runtime: tokio::runtime::Runtime,
+}
+
+fn close_rig() -> CloseRig {
+    let parent: Arc<Node> = Arc::new(Node::new("parent"));
+    let saw: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let sink = saw.clone();
+    parent.subscribe_all(Locality::Both, move |frame: &EventFrame| {
+        sink.lock().expect("test lock").push(format!(
+            "{}@{}",
+            frame.event.tag(),
+            frame
+                .stream
+                .as_ref()
+                .map(|s| s.as_str())
+                .unwrap_or_default()
+        ));
+    });
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("the test runtime");
+    CloseRig {
+        parent,
+        saw,
+        runtime,
+    }
+}
+
+impl CloseRig {
+    /// The settle stub's spec, mounted on this rig's node — spawn it
+    /// inside the caller's `block_on` (the current-thread runtime
+    /// must stay driven for the pump to poll while the test waits).
+    fn spec(&self) -> ChildSpec {
+        ChildSpec::new(stub_exe("stub_settle"), std::env::temp_dir()).on_node(self.parent.clone())
+    }
+
+    /// The recorded frames touching one stream, in arrival order.
+    fn stream_frames(&self, stream: &str) -> Vec<String> {
+        self.saw
+            .lock()
+            .expect("test lock")
+            .iter()
+            .filter(|seen| seen.ends_with(&format!("@{stream}")))
+            .cloned()
+            .collect()
+    }
+
+    /// Wait (bounded) until `session_closed` crossed for the stream,
+    /// then assert the whole close law for it: exactly one close, and
+    /// it is the stream's LAST frame. Async — the poll must drive the
+    /// current-thread runtime, or the pump's EOF pass never runs.
+    async fn assert_closed_last_and_once(&self, stream: &str) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !self
+            .stream_frames(stream)
+            .iter()
+            .any(|seen| seen.starts_with("session_closed"))
+        {
+            assert!(
+                Instant::now() < deadline,
+                "the close crossed for {stream}: {:?}",
+                self.stream_frames(stream)
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let frames = self.stream_frames(stream);
+        assert_eq!(
+            frames
+                .iter()
+                .filter(|seen| seen.starts_with("session_closed"))
+                .count(),
+            1,
+            "exactly one close for {stream}: {frames:?}"
+        );
+        assert_eq!(
+            frames.last().map(String::as_str),
+            Some(format!("session_closed@{stream}").as_str()),
+            "the close is the stream's last frame: {frames:?}"
+        );
+    }
+}
+
+/// The graceful death: a completed run's settle closes the child,
+/// the pipe EOFs, and the close crosses — exactly once, last on the
+/// stream. (The reaper's exit observation races the pump's EOF on
+/// every death; once-ness under that race is the point.)
+#[test]
+fn a_dead_childs_stream_closes_last_and_exactly_once() {
+    let rig = close_rig();
+    rig.runtime.block_on(async {
+        let mut handle = rig.spec().spawn().await.expect("spawn");
+        let settlement = handle.run("the task".to_string(), None).await;
+        assert!(
+            matches!(settlement, Settlement::Completed { .. }),
+            "the run completed: {settlement:?}"
+        );
+        handle.wait_exit().await;
+        rig.assert_closed_last_and_once("stub-sess").await;
+    });
+}
+
+/// The parked-child distinction: run completion is NOT death — a
+/// settled-open child (the subagent pool's shape) closes nothing —
+/// and the later actual death closes the stream, once.
+#[test]
+fn a_parked_child_closes_nothing_until_it_dies() {
+    let rig = close_rig();
+    rig.runtime.block_on(async {
+        let mut handle = rig.spec().spawn().await.expect("spawn");
+        handle.prompt("one".to_string());
+        let settlement = handle.settle_open(None).await;
+        assert!(
+            matches!(settlement, Settlement::Completed { .. }),
+            "the run completed: {settlement:?}"
+        );
+        // The completion must NOT have closed the stream. A beat, so
+        // a racing close could land — the assertion is the absence.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(
+            !rig
+                .stream_frames("stub-sess")
+                .iter()
+                .any(|seen| seen.starts_with("session_closed")),
+            "completion is not death: {:?}",
+            rig.stream_frames("stub-sess")
+        );
+        // The actual death (the pool's kill rides this same close).
+        handle.close();
+        handle.wait_exit().await;
+        rig.assert_closed_last_and_once("stub-sess").await;
+    });
+}
+
+/// The crash path: a child dying mid-run (no terminal crosses) still
+/// closes its stream — exactly once, last. Deaths no run terminal
+/// explains are precisely the ones the announcement exists for.
+#[test]
+fn a_child_dying_mid_run_closes_its_stream_last_and_once() {
+    let rig = close_rig();
+    rig.runtime.block_on(async {
+        let mut handle = rig.spec().spawn().await.expect("spawn");
+        let settlement = handle.run("die".to_string(), None).await;
+        assert!(
+            matches!(settlement, Settlement::Crashed { .. }),
+            "the death settles as a crash: {settlement:?}"
+        );
+        handle.wait_exit().await;
+        rig.assert_closed_last_and_once("stub-sess").await;
+    });
+}
+
+/// The abort path: the cancelled leash closes the child; the close
+/// crosses last and once.
+#[test]
+fn an_aborted_childs_stream_closes_last_and_once() {
+    use tokio_util::sync::CancellationToken;
+
+    let rig = close_rig();
+    rig.runtime.block_on(async {
+        let mut handle = rig.spec().spawn().await.expect("spawn");
+        handle.prompt("hang".to_string());
+        let token = CancellationToken::new();
+        let leash = token.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            leash.cancel();
+        });
+        let settlement = handle.settle(Some(token)).await;
+        assert!(
+            matches!(settlement, Settlement::Aborted { .. }),
+            "the cancelled run settles aborted: {settlement:?}"
+        );
+        handle.wait_exit().await;
+        rig.assert_closed_last_and_once("stub-sess").await;
+    });
+}
+
+/// The cascade (v23, backend-synthesized): a frame relayed through
+/// the child's lane on a SECOND stream (a grandchild's speech)
+/// teaches the lane's route — and the lane's death closes BOTH
+/// stamps. The spawner vouches for the whole subtree; no tree
+/// inference is asked of anyone downstream.
+#[test]
+fn a_lanes_death_cascades_to_every_stream_it_carried() {
+    let rig = close_rig();
+    rig.runtime.block_on(async {
+        let mut handle = rig.spec().spawn().await.expect("spawn");
+        let settlement = handle.run("relay-grandchild".to_string(), None).await;
+        assert!(
+            matches!(settlement, Settlement::Completed { .. }),
+            "the run completed: {settlement:?}"
+        );
+        handle.wait_exit().await;
+        rig.assert_closed_last_and_once("stub-sess").await;
+        rig.assert_closed_last_and_once("stub-grand-sess").await;
+    });
+    // The grandchild's speech crossed first (the relay itself is the
+    // setup's proof).
+    assert!(
+        rig.stream_frames("stub-grand-sess")
+            .iter()
+            .any(|seen| seen.starts_with("error")),
+        "the relayed grandchild frame taught the lane's route: {:?}",
+        rig.stream_frames("stub-grand-sess")
+    );
+}

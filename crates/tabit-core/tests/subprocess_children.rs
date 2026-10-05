@@ -472,6 +472,43 @@ async fn aborting_the_parent_returns_promptly_and_the_child_flushes_its_terminal
         "the child's aborted terminal flushed before its stream ended"
     );
 
+    // The child-death announcement (v23): the abort killed the child
+    // — exactly one `session_closed` crosses for its stream, after
+    // the terminal, and nothing on its stream follows it.
+    let mut closes = 0;
+    loop {
+        let frame = tokio::time::timeout(std::time::Duration::from_secs(15), handle.next_event())
+            .await
+            .expect("the close follows the child's terminal")
+            .expect("the stream stays open");
+        if let SessionEvent::SessionClosed { id } = &frame.event {
+            assert_eq!(id, &child_id, "the close names the dead child");
+            assert!(
+                frame.stream.as_ref().is_some_and(|s| s.as_str() == child_id),
+                "the close is stamped with the child's stream"
+            );
+            closes += 1;
+            break;
+        }
+    }
+    let drain = tokio::time::timeout(std::time::Duration::from_millis(500), async {
+        while let Ok(Some(frame)) =
+            tokio::time::timeout(std::time::Duration::from_secs(15), handle.next_event()).await
+        {
+            assert!(
+                frame.stream.as_ref().map(|s| s.as_str()) != Some(child_id.as_str()),
+                "nothing follows the close on the child's stream: {:?}",
+                frame.event
+            );
+            if let SessionEvent::SessionClosed { .. } = &frame.event {
+                closes += 1;
+            }
+        }
+    })
+    .await;
+    assert!(drain.is_err(), "the drain is the timeout — silence held");
+    assert_eq!(closes, 1, "exactly one close for the dead child");
+
     handle.close_commands();
     #[allow(unsafe_code, clippy::missing_safety_doc)]
     unsafe {
@@ -1158,6 +1195,17 @@ async fn a_followup_continues_the_same_child_session_across_runs() {
         "one same-session follow-up request — the first task rode history"
     );
 
+    // The parked-child distinction (v23): two completions in, the
+    // parked child still lives — no `session_closed` crossed for it
+    // on either run.
+    assert!(
+        !run1.iter().chain(run2.iter()).any(|frame| matches!(
+            &frame.event,
+            SessionEvent::SessionClosed { id } if id == &child_id
+        )),
+        "completion is not death: the parked child closes nothing"
+    );
+
     handle.close_commands();
     #[allow(unsafe_code, clippy::missing_safety_doc)]
     unsafe {
@@ -1228,6 +1276,20 @@ async fn a_parked_subagent_lives_five_idle_turns_then_collects() {
         .and_then(|v| v.as_str())
         .expect("the friendly id")
         .to_string();
+    let child_id = details
+        .get("child_id")
+        .and_then(|v| v.as_str())
+        .expect("the child session")
+        .to_string();
+    // The parked-child distinction (v23): completion is NOT death —
+    // nothing closed for the parked child's stream.
+    assert!(
+        !run1.iter().any(|frame| matches!(
+            &frame.event,
+            SessionEvent::SessionClosed { id } if id == &child_id
+        )),
+        "a completed, parked child closes nothing"
+    );
 
     // Turns 3-5: three idle one-turn runs.
     for n in 0..3 {
@@ -1254,10 +1316,11 @@ async fn a_parked_subagent_lives_five_idle_turns_then_collects() {
 
     // Turns 8-13: six idle one-turn runs — the fifth subsequent turn
     // passes unused, and turn 13's start collects.
+    let mut idle_frames = Vec::new();
     for n in 0..6 {
         model.push_stream_turn(text_turn(&format!("aging more {n}")));
         handle.message(&parent_id, "idle");
-        run_parent(&mut handle, &parent_id).await;
+        idle_frames.extend(run_parent(&mut handle, &parent_id).await);
     }
 
     // Turn 14: the same follow-up is now the expiry error (turn 15
@@ -1280,6 +1343,32 @@ async fn a_parked_subagent_lives_five_idle_turns_then_collects() {
         1,
         "the collected child served no request after collection"
     );
+
+    // The collection was the child's actual death (v23): exactly one
+    // `session_closed` crosses for its stream — it may have crossed
+    // inside the collecting run's frames or the expiry run's already.
+    let crossed: Vec<&tabit_protocol::EventFrame> = idle_frames
+        .iter()
+        .chain(run3.iter())
+        .filter(|frame| matches!(&frame.event, SessionEvent::SessionClosed { .. }))
+        .collect();
+    let mut closes = crossed.len();
+    for frame in crossed {
+        if let SessionEvent::SessionClosed { id } = &frame.event {
+            assert_eq!(id, &child_id, "the close names the collected child");
+        }
+    }
+    while closes == 0 {
+        let frame = tokio::time::timeout(std::time::Duration::from_secs(15), handle.next_event())
+            .await
+            .expect("the collected child's close crosses")
+            .expect("the stream stays open");
+        if let SessionEvent::SessionClosed { id } = &frame.event {
+            assert_eq!(id, &child_id, "the close names the collected child");
+            closes += 1;
+        }
+    }
+    assert_eq!(closes, 1, "exactly one close for the collected child");
 
     handle.close_commands();
     #[allow(unsafe_code, clippy::missing_safety_doc)]

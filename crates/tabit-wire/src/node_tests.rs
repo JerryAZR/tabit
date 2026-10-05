@@ -870,6 +870,118 @@ fn a_death_sweep_settles_cards_not_held_round_trips() {
     let _ = layer;
 }
 
+/// The lane-death law (v23): retraction closes every stream the lane
+/// taught — the child and, by the cascade, every descendant whose
+/// frames crossed the lane — each close fanning like an arrival from
+/// the lane (Remote, the dead lane skipped), exactly once per stamp,
+/// after the lane's swept settles. A repeated retraction (the pump's
+/// EOF and any later sweep racing) announces nothing more.
+#[test]
+fn a_lanes_retraction_closes_every_stream_it_taught_exactly_once() {
+    let node = Arc::new(Node::new("core"));
+    let (layer, saw) = stub_layer(&node, "layer");
+    // The lane: a child process's channel. It records what is
+    // delivered to it, so the skip is observable.
+    let lane_heard: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let sink = lane_heard.clone();
+    let lane = Channel::local(
+        "lane",
+        move |frame| {
+            sink.lock()
+                .expect("test lock")
+                .push(frame.event.tag().to_string());
+        },
+        |_| {},
+    );
+    // The lane taught two streams: the child's own and a
+    // grandchild's relayed through it. (A card arrives too, so its
+    // settle's place in the order is observable.)
+    for stream in ["child-sess", "grand-sess"] {
+        node.intake(
+            &lane,
+            Inbound::Event(EventFrame {
+                stream: Some(StreamId::new(stream)),
+                origin: None,
+                ttl: None,
+                event: SessionEvent::error_session("speech"),
+            }),
+        );
+    }
+    node.intake(
+        &lane,
+        Inbound::Event(EventFrame {
+            stream: Some(StreamId::new("child-sess")),
+            origin: None,
+            ttl: None,
+            event: SessionEvent::InteractionRequest {
+                id: "card-1".to_string(),
+                ui_type: "native:select_any".to_string(),
+                payload: json!({}),
+            },
+        }),
+    );
+    // A stream taught by ANOTHER channel is not the lane's to close.
+    node.emit(
+        &layer,
+        EventFrame {
+            stream: Some(StreamId::new("local-sess")),
+            origin: None,
+            ttl: None,
+            event: SessionEvent::error_session("local speech"),
+        },
+    );
+
+    node.retract_lane(&lane, "the child pipe closed");
+    node.retract_lane(&lane, "the child exited"); // the racing second sweep
+
+    let events = saw.events();
+    let mut closes: Vec<&String> = events
+        .iter()
+        .filter(|note| note.starts_with("session_closed"))
+        .collect();
+    closes.sort();
+    assert_eq!(
+        closes,
+        [&"session_closed@child-sess".to_string(),
+         &"session_closed@grand-sess".to_string()],
+        "exactly the lane's learned set closed, once each \
+         (cross-stream order is no contract — per-stream order is): {events:?}"
+    );
+    // The settles of the lane's swept asks precede the closes: the
+    // close is the final word on its stream.
+    let settle_pos = events
+        .iter()
+        .position(|note| note.starts_with("settled:card-1"))
+        .expect("the swept card settled");
+    let close_pos = events
+        .iter()
+        .position(|note| note == "session_closed@child-sess")
+        .expect("the close fanned");
+    assert!(
+        settle_pos < close_pos,
+        "the settle announced ahead of the close: {events:?}"
+    );
+    assert!(
+        lane_heard.lock().expect("test lock").is_empty(),
+        "the dead lane heard nothing back — the ingress skip held"
+    );
+    // The routes went with the sweep: a command to the closed
+    // session is the uniform miss now.
+    node.intake(
+        &layer,
+        Inbound::Command(SessionCommand::Message {
+            session: "child-sess".to_string(),
+            text: "anyone there".to_string(),
+        }),
+    );
+    assert!(
+        saw.has("error:session"),
+        "the closed session's route is gone: {:?}",
+        saw.events()
+    );
+    let _ = layer;
+}
+
 /// The fine-grained wire (owner ruling 2026-09-25, with locality):
 /// subscribing the request kind hears requests ALONE — the card
 /// lifecycle's pairing is the caller's declaration, never a bundle
