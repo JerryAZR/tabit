@@ -22,10 +22,10 @@
 //! ladder when over). An image already under both caps passes through
 //! byte-identical — no gratuitous re-encode.
 //!
-//! The label carries its own leading separator: the wire's `user_text`
-//! fold joins a message's text parts without one, and the label showing
-//! in the `user_message` event text (same as skill bodies) is the
-//! ruling's intended rendering.
+//! Parts carry no join punctuation — the wire's `user_text` fold owns
+//! the one separator (`\n\n` between text parts), so the label is the
+//! bare basename and the label showing in the `user_message` event
+//! text (same as skill bodies) is the ruling's intended rendering.
 
 use std::path::Path;
 use tabit_providers::completion::Message;
@@ -129,7 +129,7 @@ fn resolve(path: &str) -> Option<(String, UserContent)> {
         Some(media_type),
         None,
     );
-    Some((format!("\n\n{basename}"), image))
+    Some((basename.to_string(), image))
 }
 
 /// The in-scope raster formats, magic-byte detected (the read tool's

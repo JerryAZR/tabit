@@ -489,9 +489,9 @@ those connection-level).
 
 | event | payload | when |
 |---|---|---|
-| `message_queued` | `id`, `text` | a `message` accepted while a run is live (a steer that waits). `id` is the message's entry id, minted here. Idle sends never produce this event. |
+| `message_queued` | `id`, `text` | a `message` accepted while a run is live (a steer that waits). `id` is the message's entry id, minted here. `text` is the **authored text** — the message's first part, tags intact; the door's expansion (skill bodies, attachment labels) never rides it. Idle sends never produce this event. |
 | `user_message` | `entry_id`, `text` | the message drains into a run (opening batch or steer boundary) and becomes history. Consecutive `user_message`s = an opening batch. |
-| `messages_discarded` | `messages: [{ id, text }]` | a clear site: abort (what was queued at abort time — the notice is immediate, at the abort site, ahead of `run_aborted`) or checkout (what was submitted before the checkout; §7, ahead of `run_aborted` and `checked_out`). Omitted when nothing was pending. Salvage as drafts; the backend keeps no copy. |
+| `messages_discarded` | `messages: [{ id, text }]` | a clear site: abort (what was queued at abort time — the notice is immediate, at the abort site, ahead of `run_aborted`) or checkout (what was submitted before the checkout; §7, ahead of `run_aborted` and `checked_out`). Omitted when nothing was pending. Salvage as drafts; the backend keeps no copy. Each `text` is the **authored text** — the message's first part, tags intact — so a salvaged draft re-sent re-expands fresh at the door (no duplication). |
 | `turn_started` | `id`, `started_at_ms` | a model turn begins; `id` is the turn's entry id, minted here and reused at commit. `started_at_ms` is the turn's start, Unix milliseconds (live runs stamp at emission; replay stamps from the turn entry's recorded time, so a replayed bracket's two stamps coincide). |
 | `text_delta` | `turn_id`, `text` | assistant text; appends within the turn. Full-text exactly once in replay. |
 | `reasoning_delta` | `turn_id`, `id`, `reasoning` | model reasoning; `id` correlates blocks within the turn (several may interleave; same-id deltas append). Full-text once per block id in replay. |
@@ -960,7 +960,12 @@ v19 rode the deleted GUI's CHANGELOG.md — git history holds it.)
   extension), downscaled at the door (long edge ≤ 1568px, ≤ 5 MB).
   Unresolvable tags pass through untouched. The wire carries none of
   it: `user_message` events join the text parts (tags + labels), the
-  log and the model's request carry the parts. See §5.
+  log and the model's request carry the parts. See §5. **The
+  first-part law:** door expansion (skills, attachments) only ever
+  appends parts — part[0] IS the authored text, structurally — and
+  `message_queued`/`messages_discarded` hand back that authored text
+  (tags intact, no expansion), so a salvaged draft re-sent re-expands
+  exactly once.
 - **2026-10 (no bump — contract clarifications)** — the zero-config
   fix paths split on the catalog predicate a first-run flow branches
   on (§3.1): both `providers` and `missing_keys` empty means no

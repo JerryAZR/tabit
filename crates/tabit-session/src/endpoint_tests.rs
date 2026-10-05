@@ -4477,6 +4477,158 @@ async fn skill_and_attachment_tags_compose_skills_first() {
     let _ = std::fs::remove_dir_all(&cwd);
 }
 
+/// The first-part law at the wire (FRONTEND.md's `message_queued` and
+/// `messages_discarded` rows): the queued acknowledgment and the
+/// abort's discard both hand back the AUTHORED text — part[0], tags
+/// intact, no skill body, no attachment label — and a salvaged draft
+/// re-sent expands fresh, so history records the expansion exactly
+/// once. Live and replay `user_message` events render the full joined
+/// text; the §9 ledger closes across the roundtrip.
+#[tokio::test]
+async fn ack_and_discard_carry_the_authored_text_and_a_resend_expands_once() {
+    let store = temp_store("endpoint-authored");
+    let cwd = std::env::temp_dir().join(format!("tabit-authored-door-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&cwd);
+    std::fs::create_dir_all(cwd.join(".tabit/skills/commit")).expect("skill dir");
+    std::fs::write(
+        cwd.join(".tabit/skills/commit/SKILL.md"),
+        "---\nname: commit\ndescription: Make a commit.\n---\nCOMMIT-BODY-MARKER\n",
+    )
+    .expect("SKILL.md");
+    let (image_path, _png) = plant_png(&cwd, "shot.png");
+    let skills = std::sync::Arc::new(crate::skills::discover_with_home(None, &cwd));
+
+    let factory = Factory::new(vec![tool_turn("t1", "slow"), text_turn("done")]);
+    let session = factory
+        .clone()
+        .into_builder(store.clone())
+        .skills(skills)
+        .dynamic_tool(slow_tool())
+        .create(&cwd.display().to_string())
+        .expect("session");
+    let log_path = session.path().expect("file-backed").to_path_buf();
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store), plain_data());
+    let id = boot_id(&handle);
+
+    let authored =
+        format!("finish <skill name=\"commit\"/> with <attachment path=\"{image_path}\"/>");
+    handle.message(&id, "run the tool");
+    // While the slow tool runs: submit the tagged message (a queued
+    // steer), then abort — the discard hands the draft back.
+    let mut ack: Option<(String, String)> = None;
+    let mut draft: Option<(String, String)> = None;
+    let mut sent = false;
+    loop {
+        let frame = tokio::time::timeout(Duration::from_secs(5), handle.next_event())
+            .await
+            .expect("the abort terminal arrives")
+            .expect("the stream stays open");
+        match &frame.event {
+            SessionEvent::ToolCall { .. } if !sent => {
+                sent = true;
+                handle.message(&id, &authored);
+                handle.abort(&id);
+            }
+            SessionEvent::MessageQueued { id, text } => ack = Some((id.clone(), text.clone())),
+            SessionEvent::MessagesDiscarded { messages } => {
+                assert_eq!(messages.len(), 1, "the one queued steer");
+                draft = Some((messages[0].id.clone(), messages[0].text.clone()));
+            }
+            SessionEvent::RunAborted { .. } => break,
+            _ => {}
+        }
+    }
+    // Both carried the AUTHORED text: tags intact, no skill body, no
+    // attachment label — the expansion never reaches the wire here.
+    let (ack_id, ack_text) = ack.expect("the mid-run submit was acknowledged");
+    let (discarded_id, draft) = draft.expect("the abort discarded the queue");
+    assert_eq!(ack_text, authored, "message_queued hands back part[0]");
+    assert_eq!(
+        draft, authored,
+        "the salvaged draft carries no expansion — re-sending re-expands fresh"
+    );
+    assert_eq!(
+        ack_id, discarded_id,
+        "the §9 ledger: the queued id closed exactly once"
+    );
+
+    // Re-send the salvaged draft (the frontend's salvage flow): it
+    // expands at the door, fresh, and runs to completion.
+    handle.message(&id, &draft);
+    let mut frames = Vec::new();
+    collect_until(&mut handle, &mut frames, |event| {
+        matches!(event, SessionEvent::RunFinished { .. })
+    })
+    .await;
+    assert_eq!(finished_outputs(&frames), vec!["done".to_string()]);
+    assert!(
+        !frames
+            .iter()
+            .any(|frame| matches!(frame.event, SessionEvent::MessageQueued { .. })),
+        "an idle send never queues — user_message is the acknowledgment"
+    );
+    let texts = user_texts(&frames);
+    assert_eq!(texts.len(), 1, "one user message in the re-run");
+    assert!(
+        texts[0].starts_with(&authored),
+        "the authored text is part[0], tags the anchors: {}",
+        texts[0]
+    );
+    assert_eq!(
+        texts[0].matches("COMMIT-BODY-MARKER").count(),
+        1,
+        "the live user_message renders the expansion exactly once: {}",
+        texts[0]
+    );
+    assert!(
+        texts[0].contains("\n\nshot.png"),
+        "the fold-owned separator joins the attachment label: {}",
+        texts[0]
+    );
+
+    // Replay renders the same full joined text (the one constructor).
+    handle.replay(&id);
+    let mut pass = Vec::new();
+    collect_until(&mut handle, &mut pass, |event| {
+        matches!(event, SessionEvent::ReplayEnd)
+    })
+    .await;
+    let replayed = user_texts(&pass);
+    assert_eq!(
+        replayed.last(),
+        Some(&texts[0]),
+        "replay's user_message is the live one, verbatim"
+    );
+
+    handle.close_commands();
+    while handle.next_event().await.is_some() {}
+
+    // History records the expansion exactly once: the discarded draft
+    // was never logged, the re-send's expansion is the only one.
+    let branch = file_branch(&store, &log_path.display().to_string());
+    let user_entries: Vec<String> = branch
+        .iter()
+        .filter_map(|entry| match &entry.kind {
+            crate::EntryKind::UserMessage { message } => Some(crate::session::user_text(message)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        user_entries.len(),
+        2,
+        "the aborted run's opener and the re-sent draft: {user_entries:?}"
+    );
+    assert_eq!(
+        user_entries
+            .iter()
+            .map(|text| text.matches("COMMIT-BODY-MARKER").count())
+            .sum::<usize>(),
+        1,
+        "the expansion landed in history exactly once: {user_entries:?}"
+    );
+    let _ = std::fs::remove_dir_all(&cwd);
+}
+
 /// A mid-roundtrip checkout target resolves forward (the 2026-09-26
 /// ruling, replacing the old loud refusal): checking out to the tool
 /// turn's assistant entry — the announced turn id, mid-batch by

@@ -121,8 +121,13 @@ fn a_resolvable_tag_appends_label_and_image_after_the_text() {
     );
     assert_eq!(
         text_of(&parts[1]),
-        Some("\n\nshot.png"),
-        "the label is the basename, separated for the wire's text join"
+        Some("shot.png"),
+        "the label is the bare basename — the wire fold owns the separator"
+    );
+    assert_eq!(
+        crate::session::user_text(&expanded),
+        format!("{text}\n\nshot.png"),
+        "the joined rendering separates the label from the text"
     );
     let (data, media) = image_of(&parts[2]).expect("the image part");
     assert_eq!(media, &Some(ImageMediaType::PNG));
@@ -144,10 +149,15 @@ fn multiple_tags_append_in_tag_order() {
 
     let parts = parts(&expanded);
     assert_eq!(parts.len(), 5, "text, then label+image per tag");
-    assert_eq!(text_of(&parts[1]), Some("\n\nfirst.png"));
+    assert_eq!(text_of(&parts[1]), Some("first.png"));
     assert!(image_of(&parts[2]).is_some());
-    assert_eq!(text_of(&parts[3]), Some("\n\nsecond.png"));
+    assert_eq!(text_of(&parts[3]), Some("second.png"));
     assert!(image_of(&parts[4]).is_some());
+    assert_eq!(
+        crate::session::user_text(&expanded),
+        format!("{text}\n\nfirst.png\n\nsecond.png"),
+        "the fold joins the text parts with the one separator"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -185,7 +195,7 @@ fn an_image_with_a_text_extension_attaches_by_sniffing() {
     let expanded = expand_attachments(Message::user(format!("<attachment path=\"{path}\"/>")));
     let parts = parts(&expanded);
     assert_eq!(parts.len(), 3, "the content decides, not the name");
-    assert_eq!(text_of(&parts[1]), Some("\n\nactually-an-image.txt"));
+    assert_eq!(text_of(&parts[1]), Some("actually-an-image.txt"));
     assert_eq!(
         image_of(&parts[2]).expect("image").1,
         &Some(ImageMediaType::PNG)

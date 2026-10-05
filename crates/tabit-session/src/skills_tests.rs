@@ -544,8 +544,8 @@ fn extension_registration_is_first_writer_wins() {
     let _ = fs::remove_dir_all(&root);
 }
 
-// ---- receive-time invocation expansion (the tag, the append, the
-// pass-throughs)
+// ---- receive-time invocation expansion (the tag, the appended
+// parts, the pass-throughs)
 
 /// One catalog over a tempdir: `commit` with frontmatter + body, at
 /// the workspace skills level.
@@ -560,28 +560,50 @@ fn expand_catalog(tag: &str) -> (PathBuf, Skills) {
     (root.clone(), discover_with_home(None, &root))
 }
 
+/// The expanded message's text parts, in order.
+fn text_parts(message: &Message) -> Vec<String> {
+    let Message::User { content } = message else {
+        panic!("a user message");
+    };
+    content
+        .iter()
+        .map(|part| match part {
+            UserContent::Text(text) => text.text.clone(),
+            other => panic!("an unexpected part: {other:?}"),
+        })
+        .collect()
+}
+
 #[test]
-fn a_tag_appends_the_body_after_the_message_in_the_tool_format() {
+fn a_tag_appends_the_body_as_its_own_part_and_part_zero_is_the_authored_text() {
     let (root, skills) = expand_catalog("append");
     let text = r#"check this <skill name="commit"/> before you push"#;
-    let expanded = expand_invocations(text, &skills);
+    let expanded = expand_invocations(Message::user(text), &skills);
+    let parts = text_parts(&expanded);
+    assert_eq!(parts.len(), 2, "the authored text plus one skill block");
+    assert_eq!(
+        parts[0], text,
+        "part[0] is byte-identical to the authored text — the first-part law"
+    );
+    let block = &parts[1];
     assert!(
-        expanded.starts_with(text),
-        "the message is verbatim and the tag stays as the anchor: {expanded}"
+        block.starts_with("<skill name=\"commit\">Body line one.\nBody line two.\n"),
+        "the block is the wrapper then the verbatim body: {block}"
     );
     assert!(
-        expanded.contains(
-            "<skill name=\"commit\">Body line one.\nBody line two.\n\n\n[Skill base directory: "
-        ),
-        "the block is the verbatim body then the tool's footer: {expanded}"
+        block.contains("\n\n[Skill base directory: ") && block.ends_with("\n</skill>"),
+        "the tool's footer, then the wrapper closes: {block}"
     );
     assert!(
-        expanded.ends_with("\n</skill>"),
-        "the block closes: {expanded}"
-    );
-    assert!(
-        !expanded.contains("description: Make a commit"),
+        !block.contains("description: Make a commit"),
         "frontmatter is stripped from the appended body"
+    );
+    // The joined rendering (the wire fold) is the old string form:
+    // authored text, separator, block.
+    assert_eq!(
+        crate::session::user_text(&expanded),
+        format!("{text}\n\n{block}"),
+        "the fold owns the separator"
     );
     let _ = fs::remove_dir_all(&root);
 }
@@ -590,7 +612,8 @@ fn a_tag_appends_the_body_after_the_message_in_the_tool_format() {
 fn an_unknown_tag_is_left_as_is() {
     let (root, skills) = expand_catalog("unknown");
     let text = r#"run <skill name="nope"/> please"#;
-    assert_eq!(expand_invocations(text, &skills), text);
+    let expanded = expand_invocations(Message::user(text), &skills);
+    assert_eq!(text_parts(&expanded), vec![text.to_string()]);
     let _ = fs::remove_dir_all(&root);
 }
 
@@ -601,7 +624,8 @@ fn an_unreadable_skill_is_left_as_is() {
     let (root, skills) = expand_catalog("gone");
     fs::remove_file(root.join(".tabit/skills/commit/SKILL.md")).expect("remove the body");
     let text = r#"<skill name="commit"/>"#;
-    assert_eq!(expand_invocations(text, &skills), text);
+    let expanded = expand_invocations(Message::user(text), &skills);
+    assert_eq!(text_parts(&expanded), vec![text.to_string()]);
     let _ = fs::remove_dir_all(&root);
 }
 
@@ -616,33 +640,43 @@ fn plain_text_slash_paths_and_bare_names_are_untouched() {
         "/commit",
         "plain question, no tags",
     ] {
-        assert_eq!(expand_invocations(text, &skills), text, "untouched: {text}");
+        let expanded = expand_invocations(Message::user(text), &skills);
+        assert_eq!(
+            text_parts(&expanded),
+            vec![text.to_string()],
+            "untouched: {text}"
+        );
     }
     let _ = fs::remove_dir_all(&root);
 }
 
 #[test]
-fn multiple_tags_append_in_order_and_repeat() {
+fn multiple_tags_append_as_parts_in_tag_order_and_repeat() {
     let root = temp_dir("multi");
     let skills_root = root.join(".tabit/skills");
     skill_dir(&skills_root, "a", "name: a\ndescription: A.\n", "A-BODY\n");
     skill_dir(&skills_root, "b", "name: b\ndescription: B.\n", "B-BODY\n");
     let skills = discover_with_home(None, &root);
     let text = r#"<skill name="b"/> then <skill name="a"/>"#;
-    let expanded = expand_invocations(text, &skills);
-    let b = expanded.find("B-BODY").expect("b appended");
-    let a = expanded.find("A-BODY").expect("a appended");
-    assert!(b < a, "blocks append in tag order");
+    let expanded = expand_invocations(Message::user(text), &skills);
+    let parts = text_parts(&expanded);
+    assert_eq!(parts.len(), 3, "the authored text plus two blocks");
+    assert_eq!(parts[0], text, "part[0] is the authored text");
     assert!(
-        expanded.rfind("then").unwrap() < b,
-        "blocks append after the message text"
+        parts[1].contains("B-BODY") && parts[2].contains("A-BODY"),
+        "blocks append in tag order: {parts:?}"
     );
-    let twice = expand_invocations(r#"<skill name="a"/> <skill name="a"/>"#, &skills);
+    let twice = expand_invocations(
+        Message::user(r#"<skill name="a"/> <skill name="a"/>"#),
+        &skills,
+    );
+    let parts = text_parts(&twice);
     assert_eq!(
-        twice.matches("A-BODY").count(),
-        2,
-        "each occurrence appends its own block"
+        parts.len(),
+        3,
+        "each occurrence appends its own block part: {parts:?}"
     );
+    assert!(parts[1].contains("A-BODY") && parts[2].contains("A-BODY"));
     let _ = fs::remove_dir_all(&root);
 }
 
@@ -650,7 +684,8 @@ fn multiple_tags_append_in_order_and_repeat() {
 fn non_self_closing_forms_are_not_tags() {
     let (root, skills) = expand_catalog("paired");
     let text = r#"a <skill name="commit"> paired form is prose, not an invocation"#;
-    assert_eq!(expand_invocations(text, &skills), text);
+    let expanded = expand_invocations(Message::user(text), &skills);
+    assert_eq!(text_parts(&expanded), vec![text.to_string()]);
     let _ = fs::remove_dir_all(&root);
 }
 

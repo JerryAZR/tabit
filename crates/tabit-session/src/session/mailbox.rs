@@ -2,7 +2,7 @@
 //! enters, the handles frontends hold, and the engine's steering view.
 
 use super::Session;
-use super::wire::user_text;
+use super::wire::authored_text;
 use crate::lock::lock;
 use crate::notice::{NoticeSink, NoticeSlot};
 use tabit_engine::completion::Message;
@@ -22,8 +22,12 @@ pub(crate) struct QueuedMessage {
 }
 
 impl QueuedMessage {
-    pub(crate) fn text(&self) -> String {
-        user_text(&self.message)
+    /// The authored text (part[0], tags intact — never the door's
+    /// expansion): what `message_queued` and `messages_discarded`
+    /// hand back. The salvaged draft carries no expansion, so
+    /// re-sending re-expands exactly once.
+    pub(crate) fn authored(&self) -> String {
+        authored_text(&self.message)
     }
 }
 
@@ -89,24 +93,19 @@ impl Mailbox {
 
     pub(crate) fn push(&self, message: Message) {
         // Receive-time expansion (FRONTEND.md's tags), before the id is
-        // minted, so the queued acknowledgment, the steers, the events,
-        // and the log all carry the one expanded message — what the
-        // model actually sees is what replay shows. One door pass, the
-        // ruling's composition: skill invocation first (text blocks
-        // appended to the text), then attachment parts over the
-        // expanded text (attachments.rs — pure file IO, no wiring).
+        // minted, so the steers, the events, and the log all carry the
+        // one expanded message — what the model actually sees is what
+        // replay shows. One door pass, the ruling's composition: skill
+        // invocation first (text parts appended after the authored
+        // text — the first-part law: expansion only appends, part[0]
+        // IS the authored text), then attachment parts over the
+        // expanded message (attachments.rs — pure file IO, no wiring).
         // A message without resolvable tags passes through untouched
-        // (each expansion is the identity for it).
+        // (each expansion is the identity for it). The queued
+        // acknowledgment hands back the AUTHORED text (part[0], tags
+        // intact) — never the expansion.
         let message = match self.expander.get() {
-            Some(skills) => {
-                let text = user_text(&message);
-                let expanded = crate::skills::expand_invocations(&text, skills);
-                if expanded != text {
-                    Message::user(expanded)
-                } else {
-                    message
-                }
-            }
+            Some(skills) => crate::skills::expand_invocations(message, skills),
             None => message,
         };
         let message = crate::attachments::expand_attachments(message);
@@ -121,7 +120,7 @@ impl Mailbox {
         // next prompt with `user_message` as its only acknowledgment.
         let live = self.live.load(std::sync::atomic::Ordering::Acquire);
         if live {
-            self.notice_queued(queued.id.clone(), queued.text());
+            self.notice_queued(queued.id.clone(), queued.authored());
         }
         lock(&self.queue).push_back(queued);
         self.work.notify_one();
@@ -129,6 +128,7 @@ impl Mailbox {
 
     /// Tell the frontend a live-run submission waits. A dead or absent
     /// channel is a no-op (the frontend is gone, or there never was one).
+    /// `text` is the authored text (part[0], tags intact).
     fn notice_queued(&self, id: String, text: String) {
         if let Some(sink) = self.notices.get() {
             sink.emit(SessionEvent::MessageQueued { id, text });
@@ -171,7 +171,9 @@ impl Mailbox {
     /// `messages_discarded` immediately, through the same notice
     /// channel `message_queued` rides (the abort site and the checkout
     /// handler both — one emitter, one timing; a dead or absent channel
-    /// is a no-op, the frontend is gone or there never was one).
+    /// is a no-op, the frontend is gone or there never was one). The
+    /// pairs carry the AUTHORED text (part[0], tags intact — the
+    /// salvaged draft holds no expansion; re-sending re-expands fresh).
     pub(crate) fn clear_noticing(&self) {
         let cleared = self.clear();
         if cleared.is_empty() {
@@ -182,7 +184,7 @@ impl Mailbox {
                 messages: cleared
                     .into_iter()
                     .map(|queued| tabit_protocol::DiscardedMessage {
-                        text: queued.text(),
+                        text: queued.authored(),
                         id: queued.id,
                     })
                     .collect(),

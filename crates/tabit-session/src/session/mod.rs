@@ -44,7 +44,7 @@ pub use mailbox::{AbortHandle, MailboxHandle};
 pub use rewind::RewindSummary;
 pub use run::{RunOutcome, RunSummary};
 pub(crate) use selection::{ModelProbe, ModelRegister};
-pub(crate) use wire::{result_details, result_text, user_text, wire_status};
+pub(crate) use wire::{result_details, result_text, user_message_event, user_text, wire_status};
 pub(crate) use world::SharedWorld;
 
 use crate::context_manager::ContextManager;

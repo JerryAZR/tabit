@@ -284,6 +284,18 @@ them.
    stored or sent — so the server never rejects a big image and the
    durable record holds what the model saw (the faithful-copy
    doctrine).
+4. **The first-part law: expansion only appends parts; it never
+   touches the first part** (2026-10, closing the flaw the
+   string-based skill expansion admitted — it folded the skill body
+   INTO the authored text, destroying the authored form). A message
+   enters the door as exactly one text part — the wire's `message {
+   session, text }` command is text-only, a structural guarantee —
+   so part[0] IS the authored text: skill blocks land as their own
+   text parts (the `user_text` fold owns the join separator; parts
+   carry no join punctuation), and `message_queued` /
+   `messages_discarded` hand back part[0]. Double-expansion on a
+   salvaged re-send is then impossible: the draft contains no
+   expansion, so re-sending re-expands exactly once.
 
 ### The mechanics (verified against the tree 2026-10)
 
@@ -293,8 +305,9 @@ them.
   missing/unreadable/not a decodable image — type is *sniffed*, never
   extension-trusted) is left as-is with a warn; the message still
   enters. Skill and attachment expansions compose in one door pass:
-  skills first (text blocks appended), then attachment parts over the
-  expanded text.
+  skills first (skill blocks as their own text parts, after the
+  authored text — the first-part law), then attachment parts over
+  the expanded message.
 - **The wire never changes.** `message { session, text }` stays
   text-only; frontends send tags as plain text. `user_message`
   events stay text — the tag is the frontend-visible anchor; image
@@ -337,6 +350,14 @@ them.
   the model saw.
 - Draft salvage of a queued-but-discarded message is frontend-side
   text (the wire never held parts) — no impact.
+
+**B4 (parked): expansion is CPU/IO work on the command path.**
+Attachment expansion — the file read, the decode, the downscale —
+runs at receive, in the mailbox door, on the session's command
+path. Paste sizes keep this modest today (a screenshot decodes in
+milliseconds); if it ever shows, the parked options are
+`spawn_blocking`ing the expansion or a byte cap before decode (an
+over-cap file passes through like any unresolvable tag).
 
 ### The capability question (settled 2026-10): no gate — the server
 ### is the authority
