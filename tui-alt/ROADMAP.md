@@ -108,24 +108,29 @@ Invocation UX: `/name` autocomplete against the session's skill catalog
 inserts the chip (skills stop being display-only slash entries; the tag
 format happens at submit).
 
-## 4. Attachment blocks — v0 landed (TUI side), backend expansion is master's gap
+## 4. Attachment blocks — v0 landed (TUI paste + backend expansion)
 
-Ctrl+V in the editor: clipboard image → temp file (`<tmpdir>/tabit-paste/`)
+Ctrl+V in the editor: clipboard image → temp file (`<tmpdir>/tabit-paste/<human-id>.<ext>`)
 → an `<attachment path="…"/>` tag at the cursor (plain text — chips stay
 deferred); text on the clipboard inserts as-is (pi's chain). Acquisition
 rides pi-tui 1.0.2's bundled native clipboard with wl-paste/xclip
-fallbacks (`src/paste-image.ts`). **Backend gap (master, not this
-branch)**: nothing expands the attachment tag at the mailbox door yet —
-only the skill tag exists (`skills.rs`); until the expansion lands, the
-tag rides to the model verbatim. Also still open there: `read` taking
-image content (the provider/engine plumbing already carries
-`ToolResultContent::Image`).
+fallbacks (`src/paste-image.ts`). The backend expands the tag at the
+mailbox door (master, 0d17de5): per resolvable tag, the file's basename
+label plus **the image itself as a base64 content part** — raster only
+(PNG/JPEG/GIF/WebP, sniffed + decode-verified, extension never trusted),
+downscaled at the door (long edge ≤ 1568px, ≤ 5 MB). The wire stays
+text: `user_message` events join the text parts (tags + basename labels),
+so the transcript shows the attachment by name; the log and the model's
+request hold exactly what the model saw (the first-part law: door
+expansion only appends parts, part[0] is the authored text, salvaged
+drafts re-expand exactly once). Known mismatch to trim: the TUI's sniff
+also accepts BMP, which the backend leaves unexpanded (the tag passes
+through).
 
 Chips share item 3's blocker (the editor's marker machinery is private)
-and its deferral. True inline image content in `message` is a protocol
-decision with the backend — deferred. The catalog's per-model `input`
-modalities (v21) tell us whether the bound model accepts images at all —
-an early-warning UI can come later.
+and its deferral. The catalog's per-model `input` modalities (v21) tell
+us whether the bound model accepts images at all — an early-warning UI
+can come later.
 
 ## 5. M2: child streams / focus switching
 
