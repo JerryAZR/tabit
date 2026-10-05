@@ -561,7 +561,12 @@ at open (`run_failed { kind: "model" }`). **One announcement shape for every pat
 (`parent` set) is process state: keep it while frames arrive, discard
 it at `session_closed`. `session_closed` crosses for every session
 that died, descendants included — a frontend discards exactly the
-sessions it receives closes for; no tree inference required.
+sessions it receives closes for; no tree inference required. The
+vouch is recursive: each death is announced by the living spawner
+one level up, and the root session's close is the backend pipe's
+EOF itself (§3) — the OS vouches where no living process can. So
+the complete rule is two lines: discard on `session_closed`; at
+the pipe's close, discard everything.
 
 **Errors: one generic carrier with a `kind`.** Anything that goes
 wrong outside a run terminal rides `error { kind, message, … }`. A
