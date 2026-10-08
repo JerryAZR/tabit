@@ -48,6 +48,16 @@ describe("protocol: parseServerFrame", () => {
 		});
 	});
 
+	test("the v23 close parses: stamped with the dying stream, id in the payload", () => {
+		const parsed = parseServerFrame('{"type":"session_closed","stream":"019abc","id":"019abc"}');
+		assert.deepStrictEqual(parsed, {
+			kind: "event",
+			stream: "019abc",
+			origin: undefined,
+			event: { type: "session_closed", id: "019abc" },
+		});
+	});
+
 	test("backend-level events parse without a stream stamp", () => {
 		const parsed = parseServerFrame('{"type":"sessions_available","sessions":[]}');
 		assert.deepStrictEqual(parsed, {
@@ -148,6 +158,6 @@ describe("protocol: toWireLine", () => {
 		// The report-model version check kills mismatches; a silent bump here
 		// would strand every copy of this frontend against a backend it can't
 		// talk to.
-		assert.strictEqual(PROTOCOL_VERSION, 22);
+		assert.strictEqual(PROTOCOL_VERSION, 23);
 	});
 });

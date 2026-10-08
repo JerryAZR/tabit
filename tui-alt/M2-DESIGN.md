@@ -14,9 +14,18 @@ the end and nowhere else. When a rule changes, change it here first.
   open tool-call block in the parent's transcript), plus `cwd`/`model`/
   `resumed`. Child frames arrive relayed, stamped `[stream, ttl]`, run
   lifecycle per stream.
-- **Parked vs. reaped is unobservable** — no pool frames cross the wire.
-  A completed child's stream stays open; a followup is a new run on the
-  same stream.
+- **Reaped is observable, parked is not** (updated for protocol v23):
+  a child's actual process death crosses as `session_closed { id }` —
+  the stream's last frame, synthesized by the spawner-side wire at the
+  pipe's EOF. A *completed* child still emits nothing (the pool parks it
+  for followups; run completion is not death), so `idle` stays the
+  honest word for a parked child. The close is **advisory** (owner
+  ruling): it means "safe to drop, don't send requests", never "drop
+  now" — views stay while the stream is focused or listed, sends naming
+  it are intercepted with a synthesized error note (abort excepted: an
+  abort for a closed session is a frontend bug, and the backend's error
+  is how we hear about it), and a closed stream that is neither focused
+  nor listed is dropped to reclaim memory.
 - Children are **ephemeral** (no log): on session resume the parent
   transcript replays its tool cards, but child streams are gone. Child
   views are live-session-only.
@@ -35,8 +44,11 @@ the end and nowhere else. When a rule changes, change it here first.
 2. **Focus is a stream id** (root is the default). AltRoot renders the
    focused stream's blocks; components stay alive per stream, so scroll
    position and collapse state survive switching. Views are **kept in
-   memory** until the backend gains a reaped event — the list's display
-   policy is a separate question from view lifetime (owner ruling).
+   memory** — the list's display policy is a separate question from
+   view lifetime (owner ruling). The one exit: a `session_closed`
+   stream that is neither focused nor listed is unreachable memory and
+   drops (v23, owner ruling — the close is the last frame, so a dropped
+   stream can never emit again).
 3. **The parent's view of a child is its subagent tool card** — no child
    frames merge into the parent's transcript anymore (M2 removes the
    current merged folding; codex and opencode both converged on this).
@@ -132,13 +144,15 @@ subagent list** (the list exists only when it has entries).
 
 ## Explicit limits (stated, not solved)
 
-- Parked vs. reaped unobservable → rows say `idle`, never "parked".
+- Parked is unobservable → rows say `idle`, never "parked". Reaped IS
+  observable (v23) → the row says `closed` until it hides.
 - No child replay on resume (ephemeral) → after `--continue`, the
   parent's tool cards replay; no child views exist until children run
   again.
 - Hidden idle views are unreachable until they run again — the kept
-  views are memory, not navigation. A "show all" widget is a possible
-  later shape over the same seam.
+  views are memory, not navigation. (Closed views are the exception:
+  they can never run again, so hidden + unfocused + closed drops.)
+  A "show all" widget is a possible later shape over the same seam.
 - Extension-spawned grandchildren (deeper nesting) render flat in the
   list; indentation is a later refinement.
 

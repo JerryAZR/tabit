@@ -31,6 +31,14 @@
  * `session_opened`. A frame naming an unannounced stream violates the
  * contract (a child's session_opened is always its first line) — logged
  * and dropped, never adopted.
+ *
+ * v23's `session_closed` is advisory (owner ruling): the handler marks the
+ * stream closed — a note for "safe to drop, don't send requests", never
+ * "drop now". User-intent sends naming a closed stream get a synthesized
+ * error note and never reach the pipe; abort is deliberately unguarded
+ * (an abort for a closed session is our own bug, and the backend's error
+ * is how we hear about it). Views stay while the stream is focused or
+ * listed; the sweep reclaims closed streams nobody can reach.
  */
 
 import { log } from "./log.ts";
@@ -96,6 +104,9 @@ export interface FooterFacts {
 	/** The FOCUSED stream's run state (a child's run does not light the
 	 *  status line while the root is focused — the list carries it). */
 	running: boolean;
+	/** The focused stream is closed (v23) — viewing only; sends are
+	 *  intercepted with a synthesized error note. */
+	closed: boolean;
 }
 
 export interface SkillInfo {
@@ -168,6 +179,13 @@ export interface ModeView {
 	/** The subagent list's projection — re-emitted on any fold that could
 	 *  change it (registration, run state, tools, cards). */
 	setSubagents(entries: SubagentEntry[]): void;
+	/** Whether the subagent list currently shows this stream's row — the
+	 *  widget owns visibility policy; the mode queries it for the closed
+	 *  stream sweep (v23). */
+	isStreamListed(stream: string): boolean;
+	/** A closed, unfocused, unlisted stream's state was dropped — dispose
+	 *  its transcript pane (the sweep's memory ruling, v23). */
+	dropStream(stream: string): void;
 }
 
 /** What the mode needs of the backend — `Backend` satisfies it structurally. */
@@ -215,9 +233,10 @@ type PendingDelta =
 /**
  * One stream's fold state — everything M1 held once, M2 holds per session
  * host. Created by the stream's `session_opened` (the announce is always
- * the first stamped line); lives until the process ends (the wire has no
- * reaped event — parked vs. swept is unobservable, M2-DESIGN.md's stated
- * limit).
+ * the first stamped line); a child lives until its v23 `session_closed`
+ * marks it — and past it, while focused or listed (the close is advisory,
+ * owner ruling) — with the sweep dropping closed streams nobody can
+ * reach.
  */
 class StreamState {
 	readonly id: string;
@@ -243,9 +262,13 @@ class StreamState {
 	contextUsed: number | undefined;
 	running = false;
 	compacting = false;
+	/** v23: the spawner vouched for this stream's death — the last frame
+	 *  arrived. Advisory: viewing stays, sends are intercepted. */
+	closed = false;
 	/** The last run terminal (undefined while a run is open or none ever
-	 *  ran) + its wall-clock — the list's state word and idle-hide clock. */
-	terminal: "completed" | "failed" | "aborted" | undefined;
+	 *  ran) + its wall-clock — the list's state word and idle-hide clock.
+	 *  "closed" is the v23 death mark (a close is not a run terminal). */
+	terminal: "completed" | "failed" | "aborted" | "closed" | undefined;
 	terminalAt = 0;
 	/** Whether a replay pass is open on this stream (per-stream — a
 	 *  replaying stream never suppresses another's live display). */
@@ -374,12 +397,46 @@ export class InteractiveMode {
 		return this.#focusedState()?.tree ?? new SessionTree();
 	}
 
+	/** A row hid off the subagent list (the widget's onHidden intent) —
+	 *  one of the sweep's three trigger moments. */
+	notifyListHidden(): void {
+		this.#sweepClosed();
+	}
+
+	/** The memory ruling (owner, v23): a closed stream that is neither
+	 *  focused nor listed is unreachable memory — drop it, pane and all.
+	 *  Re-run at the three moments the predicate can flip: the close
+	 *  itself, a row hiding off the list, focus leaving. The root never
+	 *  closes (user-facing sessions die with the process, FRONTEND.md §6),
+	 *  and a dropped stream can never emit again (the close is the last
+	 *  frame) — the sweep cannot strand live state. */
+	#sweepClosed(): void {
+		for (const s of this.#streams.values()) {
+			if (!s.closed || s.parent === undefined || s.id === this.#focused) continue;
+			if (this.#view.isStreamListed(s.id)) continue;
+			if (s.flushTimer !== undefined) clearTimeout(s.flushTimer);
+			this.#streams.delete(s.id);
+			this.#view.dropStream(s.id);
+		}
+	}
+
+	/** The closed-session send guard (owner ruling, v23): user-intent
+	 *  commands naming a closed stream get a synthesized answer here,
+	 *  never the pipe. Abort is deliberately NOT guarded — an abort for
+	 *  a closed session is our own bug, and the backend's error is how
+	 *  we hear about it. */
+	#unlessClosed(s: StreamState, what: string): boolean {
+		if (!s.closed) return true;
+		this.#view.addNote(s.id, `session closed — ${what} not sent`, "warn");
+		return false;
+	}
+
 	/** Rewind the FOCUSED stream to an entry (the tree card's enter).
 	 *  Fire-and-forget like every command; `checked_out` + the replay pass
 	 *  are the outcome. */
 	checkout(entryId: string): void {
 		const s = this.#focusedState();
-		if (s !== undefined) this.#backend.checkout(s.id, entryId);
+		if (s !== undefined && this.#unlessClosed(s, "checkout")) this.#backend.checkout(s.id, entryId);
 	}
 
 	get replaying(): boolean {
@@ -396,6 +453,9 @@ export class InteractiveMode {
 		this.#focused = stream;
 		this.#view.showStream(stream);
 		this.#emitFocusedState();
+		// Focus leaving is one of the sweep's three trigger moments: a
+		// closed, unlisted stream just became unreachable.
+		this.#sweepClosed();
 	}
 
 	/** Esc's law (M2-DESIGN.md): abort the focused stream's run; when
@@ -436,6 +496,7 @@ export class InteractiveMode {
 			else this.#view.addNote(undefined, `/${name} is not a command — /help lists them`, "warn");
 			return;
 		}
+		if (!this.#unlessClosed(s, "message")) return;
 		this.#backend.message(s.id, text);
 	}
 
@@ -460,7 +521,7 @@ export class InteractiveMode {
 				kind: "command",
 				run: args => {
 					const s = focused();
-					if (s === undefined) return;
+					if (s === undefined || !this.#unlessClosed(s, "compact")) return;
 					const directives = args === "" ? undefined : args;
 					this.#backend.compact(s.id, directives);
 				},
@@ -482,7 +543,7 @@ export class InteractiveMode {
 				kind: "skill" as const,
 				run: (args: string) => {
 					const s = focused();
-					if (s === undefined) return;
+					if (s === undefined || !this.#unlessClosed(s, "message")) return;
 					const tag = `<skill name="${skill.name}"/>`;
 					this.#backend.message(s.id, args === "" ? tag : `${tag} ${args}`);
 				},
@@ -502,7 +563,7 @@ export class InteractiveMode {
 	 *  (a state write at receive; `model_changed` answers). */
 	switchModel(provider: string, model: string): void {
 		const s = this.#focusedState();
-		if (s !== undefined) this.#backend.setModel(s.id, provider, model);
+		if (s !== undefined && this.#unlessClosed(s, "model switch")) this.#backend.setModel(s.id, provider, model);
 	}
 
 	/** The login card's confirm: store the key. Backend-level and
@@ -573,6 +634,18 @@ export class InteractiveMode {
 		if (parsed.stream === undefined || GLOBAL_TYPES.has(event.type)) {
 			if (GLOBAL_TYPES.has(event.type)) {
 				this.#handleGlobal(event);
+				return;
+			}
+			// A close names its stream in the payload — folding it into the
+			// root would mark the ROOT dead. Route by id or drop.
+			if (event.type === "session_closed") {
+				const target = this.#streams.get(event.id);
+				if (target === undefined) {
+					log(`unstamped session_closed for unknown stream ${event.id} — dropped`);
+					return;
+				}
+				this.#handlers.session_closed(target, event);
+				this.#emitSubagents();
 				return;
 			}
 			const root = this.#root === undefined ? undefined : this.#streams.get(this.#root);
@@ -658,6 +731,7 @@ export class InteractiveMode {
 			contextUsed: s.contextUsed,
 			rates: s.rates,
 			running: s.running,
+			closed: s.closed,
 		});
 		this.#view.setStatus(this.#statusText(s));
 		this.#view.setPending(s.pending);
@@ -665,6 +739,7 @@ export class InteractiveMode {
 	}
 
 	#statusText(s: StreamState): string {
+		if (s.closed) return "session closed";
 		if (s.compacting) return "compacting context…";
 		if (s.running) return "working — esc interrupts";
 		return "idle";
@@ -1000,6 +1075,31 @@ export class InteractiveMode {
 				this.#emitFocusedState();
 			} else {
 				this.#view.addNote(this.#root, `subagent started: ${s.title ?? s.id}`, "info");
+			}
+		},
+		session_closed: s => {
+			// v23: the spawner vouched for this stream's death — the LAST
+			// frame on it (cards settled ahead of it; nothing arrives
+			// after). Advisory (owner ruling): mark, never chase. The
+			// queue's entries are dead — it drains only into runs, and a
+			// closed stream never runs again.
+			this.#flush(s);
+			s.closed = true;
+			s.running = false;
+			s.compacting = false;
+			s.terminal = "closed";
+			s.terminalAt = Date.now();
+			if (s.pending.length > 0) {
+				s.pending = [];
+				if (s.id === this.#focused) this.#view.setPending(s.pending);
+			}
+			this.#emitStatus(s);
+			this.#emitFooter(s);
+			this.#sweepClosed();
+			// Kept (focused or listed): the transcript explains itself.
+			// Dropped: the pane went with the state, note and all.
+			if (this.#streams.has(s.id)) {
+				this.#view.addNote(s.id, "session closed — viewing only; nothing more is sent", "info");
 			}
 		},
 		model_changed: (s, event) => {

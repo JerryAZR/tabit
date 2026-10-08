@@ -4,12 +4,18 @@
  * focused; absence means the root session.
  */
 
-import { accent } from "../../theme.ts";
+import { accent, dim } from "../../theme.ts";
 import type { FooterBadge } from "../registry.ts";
 
 export function createStreamBadge(): FooterBadge {
 	return {
 		id: "stream",
-		render: facts => (facts.streamLabel === undefined ? undefined : accent(`⏎ ${facts.streamLabel}`)),
+		// A closed focused stream keeps its label, dimmed — viewing only.
+		render: facts =>
+			facts.streamLabel === undefined
+				? undefined
+				: facts.closed
+					? dim(`⏎ ${facts.streamLabel} (closed)`)
+					: accent(`⏎ ${facts.streamLabel}`),
 	};
 }

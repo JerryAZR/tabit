@@ -7,6 +7,7 @@
 
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
+import { setTimeout as sleep } from "node:timers/promises";
 
 import { IDLE_HIDE_MS, SubagentList } from "../src/components/subagent-list.ts";
 import type { SubagentEntry } from "../src/mode.ts";
@@ -24,12 +25,14 @@ const entry = (stream: string, over: Partial<SubagentEntry> = {}): SubagentEntry
 function harness() {
 	const focused: string[] = [];
 	const emptied: number[] = [];
+	const hidden: number[] = [];
 	const list = new SubagentList({
 		onFocus: stream => focused.push(stream),
 		onEmpty: () => emptied.push(1),
+		onHidden: () => hidden.push(1),
 		requestRender: () => {},
 	});
-	return { list, focused, emptied };
+	return { list, focused, emptied, hidden };
 }
 
 describe("subagent list widget", () => {
@@ -84,5 +87,32 @@ describe("subagent list widget", () => {
 		list.active = true;
 		list.setEntries([]);
 		assert.strictEqual(emptied.length, 1);
+	});
+
+	test("a row leaving the visible set raises onHidden; lists() answers the sweep's query", () => {
+		const { list, hidden } = harness();
+		list.setEntries([entry("a"), entry("b")]);
+		assert.strictEqual(list.lists("a"), true);
+		assert.strictEqual(list.lists("zzz"), false);
+		assert.strictEqual(hidden.length, 0); // nothing hid — the set only grew
+
+		// b's window expires: the reprojection hides it, the intent fires.
+		list.setEntries([entry("a"), entry("b", { running: false, state: "idle", idleSince: Date.now() - IDLE_HIDE_MS - 1 })]);
+		assert.strictEqual(hidden.length, 1);
+		assert.strictEqual(list.lists("b"), false);
+
+		// A still-visible reprojection does not re-raise.
+		list.setEntries([entry("a")]);
+		assert.strictEqual(hidden.length, 1);
+	});
+
+	test("the hide timer's expiry raises onHidden (the sweep's second trigger)", async () => {
+		const { list, hidden } = harness();
+		// A live entry with a nearly-expired clock: the armed timer fires.
+		list.setEntries([entry("a", { running: false, state: "idle", idleSince: Date.now() - IDLE_HIDE_MS + 30 })]);
+		assert.strictEqual(list.lists("a"), true);
+		await sleep(80);
+		assert.strictEqual(list.lists("a"), false);
+		assert.strictEqual(hidden.length, 1);
 	});
 });

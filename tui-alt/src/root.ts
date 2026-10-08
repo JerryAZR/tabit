@@ -53,6 +53,7 @@ import { ModelPickerView } from "./model-picker.ts";
 import { AuthCardView } from "./auth-card.ts";
 import { cardViewFor } from "./card-view.ts";
 import { InputController, type Region } from "./input-controller.ts";
+import { log } from "./log.ts";
 import { AtPathCompletionProvider } from "./path-completion.ts";
 import { pasteClipboardIntoEditor, platformClipboardReader } from "./paste-image.ts";
 import { APP_KEYBINDING_IDS, applyKeybindings, loadTuiToml } from "./keybindings.ts";
@@ -129,6 +130,8 @@ export class AltRoot implements ModeView {
 			// The vanished-region law: the last row hid while the list held
 			// focus — yield the editor.
 			onEmpty: () => this.#setRegion("editor"),
+			// A row hid — maybe a closed stream just became unreachable.
+			onHidden: () => this.#mode?.notifyListHidden(),
 			requestRender: () => this.#touch(),
 		});
 		// The pre-boot scratch pane mounts now; the root's session_opened
@@ -398,6 +401,23 @@ export class AltRoot implements ModeView {
 
 	setSubagents(entries: SubagentEntry[]): void {
 		this.#subagentList.setEntries(entries);
+	}
+
+	/** The sweep's visibility query (v23) — the list widget owns the
+	 *  policy; this only asks it. */
+	isStreamListed(stream: string): boolean {
+		return this.#subagentList.lists(stream);
+	}
+
+	/** The sweep dropped a closed stream (v23): its pane goes with it.
+	 *  The mode drops only unfocused streams, and the shown pane is the
+	 *  focused one — a shown drop would be a mode bug: refuse it loud. */
+	dropStream(stream: string): void {
+		if (stream === this.#shownStream) {
+			log(`dropStream(${stream}) on the shown pane — refused (mode bug)`);
+			return;
+		}
+		this.#panes.delete(stream);
 	}
 
 	showCard(card: InteractionCard, streamLabel: string | undefined): void {

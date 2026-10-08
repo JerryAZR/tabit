@@ -9,6 +9,8 @@
  *
  * Scenarios: basic | tools | subagent | steer | ask | replay | crash.
  * Every scenario also honors abort, interaction_response, and stdin-close.
+ * The subagent scenario ends with the child's v23 `session_closed` (the
+ * pool kill, delayed).
  * Scope: the seven scenarios above are the contract — other commands
  * (`new_session`, `open_session`, `checkout`, `model`, `compact`,
  * `continue`) are total-semantics no-ops here, and the mock does not
@@ -264,6 +266,11 @@ async function subagentRun(session: string): Promise<void> {
 		completed_at_ms: ts(),
 	});
 	running = false;
+	// v23: the child parks for followups; the pool's kill comes later,
+	// and the spawner-side wire synthesizes the close at the pipe's EOF —
+	// the stream's last frame, vouching the death.
+	await sleep(1500);
+	emitEvent(CHILD, { type: "session_closed", id: CHILD });
 }
 
 // The free-text ask: a zero-option select_any. ask_user the tool is

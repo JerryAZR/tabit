@@ -45,10 +45,16 @@
  * its winning key source (`stored`/`env`/`keyless`/`none`), announced
  * unconditionally after `models_available` and re-announced with it on
  * every world change; **breaking**: `models_available.missing_keys` is
- * removed (login targets re-derive: `auth: "none"`).
+ * removed (login targets re-derive: `auth: "none"`). v23:
+ * `session_closed { id }` — the spawner-vouched child-death
+ * announcement, the LAST frame on a dead child's stream (synthesized at
+ * the pipe's EOF, cascading per dead session; children only —
+ * user-facing sessions die with the process, and run completion is not
+ * death). Advisory by owner ruling: mark the stream, never chase it —
+ * views stay while focused or listed.
  */
 
-export const PROTOCOL_VERSION = 22;
+export const PROTOCOL_VERSION = 23;
 
 // ---------------------------------------------------------------------------
 // Commands (frontend → backend). Fire-and-forget; outcomes arrive as
@@ -287,6 +293,7 @@ export type SessionEvent =
 	| { type: "replay_end" }
 	| { type: "checked_out"; entry_id: string; base_id: string | null }
 	| { type: "sessions_available"; sessions: AvailableSession[] }
+	| { type: "session_closed"; id: string }
 	| { type: "skills_available"; skills: AvailableSkill[] }
 	| {
 			type: "extensions_available";
@@ -368,6 +375,7 @@ const EVENT_TYPES = new Set([
 	"replay_end",
 	"checked_out",
 	"sessions_available",
+	"session_closed",
 	"skills_available",
 	"extensions_available",
 	"session_opened",

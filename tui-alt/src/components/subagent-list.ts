@@ -9,8 +9,10 @@
  * First widget's shape (owner ruling): a vertical list below the editor,
  * visible whenever it has rows. Running children always show; idle /
  * failed / aborted rows linger IDLE_HIDE_MS, then hide — hiding never
- * drops the kept transcript view (the projection and the list are
- * decoupled). ↑/↓ move the selection (vertical list — arrows are local
+ * drops a live stream's kept transcript view (the projection and the
+ * list are decoupled); a CLOSED stream's hide is different — it arms
+ * the mode's sweep, which drops the unreachable state (v23).
+ * ↑/↓ move the selection (vertical list — arrows are local
  * to the focused region); Enter focuses the stream; Esc/alt+↑ are the
  * region law's (the input controller's), not the widget's.
  */
@@ -33,6 +35,9 @@ export interface SubagentListHost {
 	/** The last visible row vanished while the list held region focus —
 	 *  the vanished-region law: focus yields the editor. */
 	onEmpty(): void;
+	/** One or more rows hid this reprojection — the closed-stream sweep's
+	 *  hide trigger (v23; the mode re-checks who became unreachable). */
+	onHidden(): void;
 	requestRender(): void;
 }
 
@@ -57,6 +62,13 @@ export class SubagentList implements Component {
 		return this.#visible.length === 0;
 	}
 
+	/** Whether a stream's row is currently visible — the mode's sweep
+	 *  query (the widget owns visibility policy; nobody else re-derives
+	 *  it). */
+	lists(stream: string): boolean {
+		return this.#visible.some(e => e.stream === stream);
+	}
+
 	setEntries(entries: SubagentEntry[]): void {
 		this.#entries = entries;
 		this.#reproject();
@@ -68,11 +80,13 @@ export class SubagentList implements Component {
 
 	/** Filter to visible rows (running, or idle within the hide window),
 	 *  keep the cursor on its entry, and re-arm the hide clock at the
-	 *  nearest expiry. */
+	 *  nearest expiry. Rows that left the visible set raise onHidden. */
 	#reproject(): void {
 		const now = Date.now();
 		const selected = this.#visible[this.#cursor]?.stream;
+		const before = new Set(this.#visible.map(e => e.stream));
 		this.#visible = this.#entries.filter(e => e.running || e.idleSince === undefined || now - e.idleSince < IDLE_HIDE_MS);
+		const hid = before.size > 0 && [...before].some(stream => !this.#visible.some(e => e.stream === stream));
 		const kept = selected === undefined ? -1 : this.#visible.findIndex(e => e.stream === selected);
 		this.#cursor = kept === -1 ? Math.min(this.#cursor, Math.max(0, this.#visible.length - 1)) : kept;
 		if (this.#hideTimer !== undefined) {
@@ -90,6 +104,7 @@ export class SubagentList implements Component {
 			}, delay);
 		}
 		if (this.active && this.#visible.length === 0) this.#host.onEmpty();
+		if (hid) this.#host.onHidden();
 		this.#host.requestRender();
 	}
 

@@ -28,6 +28,7 @@ const facts = (over: Partial<FooterFacts> = {}): FooterFacts => ({
 	contextUsed: undefined,
 	rates: undefined,
 	running: false,
+	closed: false,
 	...over,
 });
 
@@ -49,6 +50,10 @@ describe("footer badges", () => {
 		assert.strictEqual(renderOne(stream), undefined);
 		const rendered = renderOne(stream, { streamLabel: "fix the parser" })!;
 		assert.ok(rendered.includes("fix the parser"));
+		// v23: a closed focused stream keeps its label, marked.
+		const closed = renderOne(stream, { streamLabel: "fix the parser", closed: true })!;
+		assert.ok(closed.includes("fix the parser"));
+		assert.ok(closed.includes("(closed)"));
 	});
 
 	test("model: display name wins, id is the fallback, silence when neither", () => {

@@ -5,7 +5,7 @@ Process: merge `master` into this worktree during development; merge back
 to main as `tui/` when done. Follow pi's proven patterns (`reports/pi.md`,
 the pi repo); **deviations need justification stated in advance**.
 
-Protocol state: **v21** (synced; see FRONTEND.md's changelog).
+Protocol state: **v23** (synced; see FRONTEND.md's changelog).
 
 ## 1. `/model` picker — landed (f3d4699, v22 sync a7d2283)
 

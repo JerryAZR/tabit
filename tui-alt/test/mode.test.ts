@@ -80,6 +80,11 @@ class RecordingView implements ModeView {
 	closed: Array<{ id: string; note: string | undefined }> = [];
 	shownStreams: string[] = [];
 	subagents: SubagentEntry[] = [];
+	/** The streams the list widget would show — the sweep's visibility
+	 *  query reads this set (tests own the widget's policy here). */
+	listed = new Set<string>();
+	/** Streams the sweep dropped — pane disposal rides along. */
+	dropped: string[] = [];
 	/** Every block mutation in apply order: `text:t1`, `reasoning:t1:r1`, `tool:i1`, `user:e1`. */
 	order: string[] = [];
 
@@ -158,6 +163,12 @@ class RecordingView implements ModeView {
 	}
 	setSubagents(entries: SubagentEntry[]): void {
 		this.subagents = entries;
+	}
+	isStreamListed(stream: string): boolean {
+		return this.listed.has(stream);
+	}
+	dropStream(stream: string): void {
+		this.dropped.push(stream);
 	}
 }
 
@@ -540,6 +551,88 @@ describe("InteractiveMode", () => {
 		assert.strictEqual(view.replayEnded, 1);
 		assert.strictEqual(view.assistantText.get("t1"), "archived answer");
 		assert.strictEqual(view.footer?.inputTokens, 9); // history's usage rides the same handler
+	});
+
+	test("v23 session_closed: advisory mark, the send guard, and the sweep's three triggers", () => {
+		const { backend, view, mode, feed, control } = harness();
+		boot(control, feed);
+		feed({ type: "session_opened", id: CHILD, path: "", cwd: "", model: { provider: "p", model: "m1" }, resumed: false, parent: SESSION }, CHILD);
+		feed({ type: "user_message", entry_id: "cx", text: "child task" }, CHILD);
+		feed({ type: "message_queued", id: "q1", text: "steer the child" }, CHILD);
+
+		// Unfocused and unlisted: the close drops the stream outright —
+		// the sweep's first trigger, no note survives a dropped pane.
+		feed({ type: "session_closed", id: CHILD }, CHILD);
+		assert.deepStrictEqual(view.dropped, [CHILD]);
+		assert.strictEqual(view.subagents.some(e => e.stream === CHILD), false);
+		assert.strictEqual(view.notes.some(n => n.text.includes("session closed — viewing only")), false);
+		// Frames for the dropped stream are the unannounced-stream case:
+		// logged and dropped, never adopted.
+		const notesBefore = view.notes.length;
+		feed({ type: "user_message", entry_id: "cy", text: "ghost" }, CHILD);
+		assert.strictEqual(view.notes.length, notesBefore);
+		assert.strictEqual(view.users.some(u => u.entryId === "cy"), false);
+	});
+
+	test("v23 a focused closed stream: kept, viewing-only, the guard synthesizes errors, Esc walks up", () => {
+		const { backend, view, mode, feed, control } = harness();
+		boot(control, feed);
+		feed({ type: "session_opened", id: CHILD, path: "", cwd: "", model: { provider: "p", model: "m1" }, resumed: false, parent: SESSION }, CHILD);
+		feed({ type: "user_message", entry_id: "cx", text: "child task" }, CHILD);
+		feed({ type: "message_queued", id: "q1", text: "steer the child" }, CHILD);
+		mode.focusStream(CHILD);
+		assert.deepStrictEqual(view.pending.map(p => p.id), ["q1"]);
+
+		// Focused ⇒ kept: the mark lands, the queue clears (dead entries —
+		// a closed stream never runs again), the note explains the view.
+		feed({ type: "session_closed", id: CHILD }, CHILD);
+		assert.deepStrictEqual(view.dropped, []);
+		assert.deepStrictEqual(view.pending, []);
+		assert.strictEqual(view.status, "session closed");
+		assert.strictEqual(view.footer?.closed, true);
+		assert.strictEqual(view.subagents.find(e => e.stream === CHILD)?.state, "closed");
+		assert.strictEqual(view.notes.at(-1)?.text, "session closed — viewing only; nothing more is sent");
+
+		// The guard: user-intent sends are intercepted with a synthesized
+		// note, nothing crosses the pipe.
+		mode.submit("hello?");
+		mode.submit("/compact");
+		mode.switchModel("p", "m2");
+		mode.checkout("e1");
+		assert.deepStrictEqual(backend.sent, []);
+		const guardNotes = view.notes.filter(n => n.kind === "warn" && n.text.startsWith("session closed — "));
+		assert.strictEqual(guardNotes.length, 4);
+
+		// Esc: closed ⇒ not running ⇒ the idle law walks to the parent —
+		// and focus leaving is the sweep's third trigger. The child is
+		// listed, so it survives the walk…
+		view.listed.add(CHILD);
+		assert.strictEqual(mode.escape(), true);
+		assert.strictEqual(mode.focusedStream, SESSION);
+		assert.deepStrictEqual(backend.sent, []); // no abort — closed is never running
+		assert.deepStrictEqual(view.dropped, []);
+
+		// …until its row hides (the sweep's second trigger): unreachable
+		// and closed — dropped.
+		view.listed.delete(CHILD);
+		mode.notifyListHidden();
+		assert.deepStrictEqual(view.dropped, [CHILD]);
+	});
+
+	test("v23 a listed closed stream survives its close and drops when it hides", () => {
+		const { view, mode, feed, control } = harness();
+		boot(control, feed);
+		feed({ type: "session_opened", id: CHILD, path: "", cwd: "", model: { provider: "p", model: "m1" }, resumed: false, parent: SESSION }, CHILD);
+		view.listed.add(CHILD);
+		feed({ type: "session_closed", id: CHILD }, CHILD);
+		// Listed ⇒ kept, with the note and the "closed" list word.
+		assert.deepStrictEqual(view.dropped, []);
+		assert.strictEqual(view.subagents.find(e => e.stream === CHILD)?.state, "closed");
+		assert.strictEqual(view.subagents.find(e => e.stream === CHILD)?.running, false);
+		assert.strictEqual(typeof view.subagents.find(e => e.stream === CHILD)?.idleSince, "number"); // the hide clock armed at the close
+		view.listed.delete(CHILD);
+		mode.notifyListHidden();
+		assert.deepStrictEqual(view.dropped, [CHILD]);
 	});
 
 	test("M2 focus: submit and session commands route to the focused stream", () => {
