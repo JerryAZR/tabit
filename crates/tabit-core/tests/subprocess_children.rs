@@ -484,7 +484,10 @@ async fn aborting_the_parent_returns_promptly_and_the_child_flushes_its_terminal
         if let SessionEvent::SessionClosed { id } = &frame.event {
             assert_eq!(id, &child_id, "the close names the dead child");
             assert!(
-                frame.stream.as_ref().is_some_and(|s| s.as_str() == child_id),
+                frame
+                    .stream
+                    .as_ref()
+                    .is_some_and(|s| s.as_str() == child_id),
                 "the close is stamped with the child's stream"
             );
             closes += 1;

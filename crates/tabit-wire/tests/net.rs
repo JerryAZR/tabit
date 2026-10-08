@@ -745,8 +745,7 @@ fn a_parked_child_closes_nothing_until_it_dies() {
         // a racing close could land — the assertion is the absence.
         tokio::time::sleep(Duration::from_millis(300)).await;
         assert!(
-            !rig
-                .stream_frames("stub-sess")
+            !rig.stream_frames("stub-sess")
                 .iter()
                 .any(|seen| seen.starts_with("session_closed")),
             "completion is not death: {:?}",

@@ -45,8 +45,12 @@ pub use rewind::RewindSummary;
 pub use run::{RunOutcome, RunSummary};
 pub(crate) use selection::{ModelProbe, ModelRegister};
 pub(crate) use wire::{
-    authored_text, result_details, result_text, user_message_event, user_text, wire_status,
+    authored_text, result_details, result_text, user_message_event, wire_status,
 };
+// The joined fold's only consumers outside wire.rs are the tests (the
+// door's scans read `authored_text`; events ride `user_message_event`).
+#[cfg(test)]
+pub(crate) use wire::user_text;
 pub(crate) use world::SharedWorld;
 
 use crate::context_manager::ContextManager;

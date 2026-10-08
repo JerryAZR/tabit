@@ -942,8 +942,10 @@ fn a_lanes_retraction_closes_every_stream_it_taught_exactly_once() {
     closes.sort();
     assert_eq!(
         closes,
-        [&"session_closed@child-sess".to_string(),
-         &"session_closed@grand-sess".to_string()],
+        [
+            &"session_closed@child-sess".to_string(),
+            &"session_closed@grand-sess".to_string()
+        ],
         "exactly the lane's learned set closed, once each \
          (cross-stream order is no contract — per-stream order is): {events:?}"
     );

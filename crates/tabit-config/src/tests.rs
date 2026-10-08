@@ -315,9 +315,14 @@ fn load_default_missing_default_file_is_empty_not_an_error() {
     let home = std::env::temp_dir().join("tabit-config-tests/fresh-home");
     let _ = std::fs::remove_dir_all(&home);
     std::fs::create_dir_all(&home).expect("temp home");
+    // home_dir() prefers $USERPROFILE (Windows) over $HOME — set both,
+    // restoring $USERPROFILE after (it is always set on Windows, and
+    // other tests may read it).
+    let userprofile = std::env::var_os("USERPROFILE");
     // SAFETY: serialized by OVERRIDE_ENV_LOCK.
     unsafe {
         std::env::set_var("HOME", &home);
+        std::env::set_var("USERPROFILE", &home);
         std::env::remove_var("TABIT_CONFIG");
         std::env::remove_var("TABIT_CONFIG_EXTRA");
     }
@@ -325,6 +330,10 @@ fn load_default_missing_default_file_is_empty_not_an_error() {
     // SAFETY: see above.
     unsafe {
         std::env::remove_var("HOME");
+        match userprofile {
+            Some(saved) => std::env::set_var("USERPROFILE", saved),
+            None => std::env::remove_var("USERPROFILE"),
+        }
     }
     let config = result.expect("a bare machine boots on the empty config");
     assert!(config.providers.is_empty(), "nothing configured");
