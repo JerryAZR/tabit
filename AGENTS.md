@@ -1,493 +1,218 @@
 # AGENTS.md
 
-Guidance for AI coding agents (and humans) working on **tabit**.
+Guidance for AI coding agents (and humans) working on **tabit**. This
+file carries only what you need to work here: the rules, the map, the
+commands. Design docs and status live elsewhere (each area names its
+owning doc below); git history is the archive of how decisions got
+made.
 
 ## What this is
 
-`tabit` is an agent framework that started from a **vendored, trimmed copy of
-rig 0.41.0** (upstream: `rig-rs/rig`). The rig source was borrowed as source
-rather than an external crate precisely so it can be modified freely: **it is
-tabit's code now** — change, extend, or delete any of it wherever that makes
-sense. `VENDOR.md` is the historical record of the initial vendoring (what was
-trimmed and why), not a constraint on future edits.
+`tabit` is an agent framework that started from a **vendored, trimmed
+copy of rig 0.41.0** — borrowed as source precisely so it can be
+modified freely: **it is tabit's code now** (`VENDOR.md` is the
+historical record, not a constraint).
 
-Positioning (owner ruling 2026-09): tabit is a **study/research project in
-agent architecture, not a pi competitor**. pi is the feature reference and
-survey source, never the target — don't chase parity for its own sake, and
-don't add machinery because pi has it. The reasons to exist: the native Rust
-stack, the frozen-wire node model every tabit process shares (frontends,
-subagents, and extensions are all nodes over one substrate), the TUI-first
-frontend track, and a design we fully own.
+Positioning (owner ruling): tabit is a **study/research project in
+agent architecture, not a pi competitor**. pi is the feature reference
+and survey source, never the target — don't chase parity, and don't
+add machinery because pi has it.
 
-## The node model (2026-09 ruling)
+## Workspace map
 
-Every tabit process is a **node** with one bidirectional interface:
-it serves the process that spawned it over a frozen pipe, and may
-spawn nodes that serve it. A subagent is a node, a frontend is a
-node, an extension is a node — the vocabulary is shared, the
-mechanisms are shared. Process management is a tree (spawn,
-ownership, lifecycle — the spawner decides); **dataflow is a net**
-over those edges: a node's events fan to all its subscribers, never
-"the one and only frontend"; commands arrive from any link; asks
-are answered by id from any channel — first arrival wins, late
-answers are tolerated no-ops. **Mechanisms shared between core and
-the SDK live in `tabit-wire` — the one crate below both, and the
-only home for them** (`asks.rs` — the one pending-answer registry
-every node instantiates; `client.rs` — the one child-management
-mechanism; `process.rs` — the child substrate). Core never depends
-on `tabit-ext-sdk`: the SDK is the guest authoring library, and
-anything the host needs from it is node-mechanics that belongs in
-the wire.
+Every tabit process is a **node**: it serves its spawner over a frozen
+pipe and may spawn nodes that serve it — a frontend, a subagent, and
+an extension are all nodes over one substrate. Mechanisms shared
+between core and the extension SDK live in `tabit-wire`, the one crate
+below both. Each crate's module docs carry its details; the named
+docs carry the cross-cutting contracts:
 
-**Child management is one mechanism with two policies.** A node's
-child frames arrive through the shared client's pump and fan to
-local consumers and upstream relay, with the settle fold watching
-the same stream — all of it `tabit-wire`'s `ChildHandle` (pump,
-tap, fold). Core's bridge is the fixed policy (learn + relay
-always on; the fold consumes the terminal, most frames ignored);
-the SDK's wrapper is the general policy (registered handlers via
-the shared router; relay opt-in — the SDK's "frontend" is
-its parent node). What differs between the two drivers is policy,
-never mechanism.
+- `tabit-providers` — provider API clients (anthropic + openai + the
+  shared openai-compatible engine), streaming, message/tool types
+- `tabit-engine` — the agent loop / runtime (`ENGINE.md` is the flow
+  doc — consult it before any flow change)
+- `tabit-derive` — the `#[rig_tool]` proc macros
+- `tabit-rig` — facade re-exporting the three above
+- `tabit-protocol` — the wire vocabulary (`FRONTEND.md` is the
+  contract)
+- `tabit-config` — providers/auth/settings file layers
+- `tabit-log` — the durable conversation: log, tree, context manager,
+  writer
+- `tabit-wire` — the node runtime + spawned-child mechanisms
+- `tabit-session` — sessions over the engine: persistence, skills,
+  attachments, compaction (`COMPACTION.md`), subagents, the wire's
+  serve side
+- `tabit-tools` — the coding tools read/write/edit/bash (`TOOLS.md`)
+- `tabit-gate` — the default permission gate: a careless-mistake
+  catcher, never a security boundary
+- `tabit-ext` / `tabit-ext-sdk` / `tabit-ext-install` — the extension
+  host / guest SDK / installer (`EXTENSIONS.md` is the contract)
+- `tabit-app` — the composition root as a library (`EMBEDDING.md` is
+  the embedder contract)
+- `tabit-core` — the headless backend binary; frontends spawn it,
+  never the reverse. The `tabit` name is reserved for the frontend
+  that ships primary.
 
-Current workspace layout:
-
-- `crates/tabit-providers` — provider API clients, streaming, tools (providers kept:
-  **anthropic + openai** + the shared openai-compatible engine in
-  `providers/internal`)
-- `crates/tabit-engine` — agent loop / runtime, plus the host-service
-  capabilities (`tool/services.rs`: `HostServices` — the extension
-  envelope's ask + `model_prompt`, carried by contexts like
-  `UserInteraction`)
-- `crates/tabit-derive` — `#[rig_tool]` proc macros
-- `crates/tabit-rig` — facade crate re-exporting the three above
-- `crates/tabit-protocol` — the shared vocabulary crate (commands,
-  stamped events, handshake frames; `FRONTEND.md` is the contract),
-  plus `points` — the hook-point declarations (the per-point ruling,
-  2026-09: each point names its wire name, its answer type, and its
-  neutral; the SDK and the host serialize the same types, no
-  hand-kept wire mirror)
-- `crates/tabit-config` — provider/model configuration plus the
-  settings layers (`settings.toml`: the extension disable list —
-  packages mount by default; the built-in gate opt-out
-  (`[gate] enabled = false`) — the gate mounts by default; user +
-  workspace union, `$TABIT_SETTINGS` replaces the user file; the
-  same replace pattern for providers: `$TABIT_CONFIG` replaces the
-  home `providers.toml` (set but missing is an error, never a
-  fallthrough), `$TABIT_CONFIG_EXTRA` appends one more candidate;
-  see `ROADMAP.md`)
-- `crates/tabit-log` — the durable-conversation layer between
-  providers and agents: the session log (the entry vocabulary and
-  tree, format-versioned), the write-behind writer, the parser, the
-  context manager (the resident tree + the model-facing history
-  view), the delta-token regime compaction reads — engine-free,
-  consumed by tabit-engine and tabit-session
-- `crates/tabit-wire` — the frozen wire's client role and the node
-  runtime every tabit process is (routing layer + functional layer,
-  the 2026-09 architecture): `node.rs` is the node — the three
-  tables and their one law each (events by kind and locality + the
-  learning table, commands by learning table or by type, asks by id
-  — `Channel` the routable primitive: the in-process layer, the
-  process's stdio, a spawned node's stdio; every subscription
-  states its locality — Local, Remote, or Both (owner ruling
-  2026-09-25): locality is a fact of the dispatch site (the node's
-  two doors, `emit` and `intake`), never a frame field, so a pipe's
-  crossing policy is plain subscription config — the
-  additional-receiver override this replaces was the workaround the
-  origin-blind fan forced); verbatim crossing is channel
-  machinery alone — the forwarding law: a callback forwarding an
-  ask re-stamps it (the arriving ask consumed at this node, a new
-  ask minted, the linkage held in the callback, never on the wire);
-  identity is the CHANNEL's property, never a subscription
-  parameter (owner ruling 2026-09-25: a plain callback is code, not
-  a participant — nothing dies with it, no dedup keys on it; the
-  death sweep and the one-participant-one-kind dedup are the channel
-  flavor's, keyed on the channel's owner); `router.rs` is THE
-  event router (register by kind or wildcard, dispatch, retract by
-  owner — each callback owns its own dispatch); `asks.rs`
-  is THE pending-question registry (one entry per round-trip: an
-  owner key plus a delivery closure over answered-or-orphaned —
-  answers are races, the first wins; an entry owing no settle
-  obligation closes on its answer — the answer is its settle);
-  `client.rs` spawns a tabit-core child
-  in `--json` role (the child-role CLI knobs as one builder; the
-  bounded boot — the report's version check at the report, the
-  first stamped announce under one bound; `on_node` is THE lane
-  mount — the client's own pump arms the child's lane at the
-  report and intakes every stamped arrival through it, one mount
-  for the bridge and the SDK's owned children) and
-  speaks the frontend protocol to it — the bounded report wait, the
-  frame pump, the reaper; `process.rs` (moved
-  from tabit-ext) is the substrate every spawning site shares
-  (tree-kill wrapping, the stderr ring, the grace reaper,
-  `spawn_line_writer` — THE pipe pump: one ordered queue, one
-  exclusive writer, every tokio pipe site's outbound lines).
-  Consumers:
-  the subagent bridge, the extension host, and the extension SDK;
-  the wire's serve side is the session host's functional layer on
-  its node (`tabit-session`'s edge + endpoint)
-- `crates/tabit-session` — persistent sessions over the outer loop (native
-  only: filesystem-backed; the rig crates keep wasm support), the
-  compaction box (`src/compaction/`: the pass machinery, the doors, the
-  dials file — every threshold and prompt text as data), the
-  skills module (`src/skills.rs`: four-source discovery, the prompt
-  catalog, the confined `skill` tool, plus manual invocation — the
-  `<skill name=.../>` tag in a user message appends the skill body at
-  the mailbox door, the one funnel every message enters; FRONTEND.md
-  is the contract), plus the
-  serve side of the frozen wire as a functional layer on the node
-  (`src/endpoint.rs`: the session host — workers route by the node's
-  learning table, lifecycle by type, interaction cards by the ask
-  table; `src/edge.rs`: the json stdio edge — the report written
-  synchronously before any task starts, one feed, the writer ending
-  on the stream's end token), the
-  subagent framework (`subagent.rs`: `SpawnContext` — spawn/drive a
-  subprocess child, the one substrate; the tool policy crossing
-  (owner ruling 2026-09-27): the spawner forwards allow/deny lists —
-  the blacklist extended with `subagent`/`followup`, the recursion
-  guard, never a baked-in role check — and the child filters its own
-  toolset (include/exclude-if-it-exists; an allow matching nothing
-  is a legal tool-less child); `subprocess.rs`: the bridge —
-  the session adapter over `tabit-wire`'s client (the child's lane
-  on the node: stamped arrivals intake — one act serves the fan,
-  the grandchild learning, and the ask route home; the exit
-  retracts the lane), the drive fold, the ruled abort shape; the
-  `subagent` tool is the
-  opinionated example shape extensions override) plus the subagent
-  pool (`subagent_pool.rs`: completed children park under petname
-  ids, the `followup` tool addresses them by id over the same pipe —
-  one session's memory continues; the pool is session-scoped and
-  ages entries at the parent's turn boundary, five unused turns,
-  never wall-clock)
-- `crates/tabit-tools` — coding tools (`read`, `write`, `edit`, `bash`
-  — chosen at registration: verified Git Bash, else PowerShell on
-  Windows) as
-  contextual `#[rig_tool]`s (they read the session cwd and run token
-  from the per-run `ToolContext`), erasable to DynamicTools (native
-  only)
-- `crates/tabit-gate` — the default permission gate: pi-sanity's
-  heuristic policy ported verbatim (static checks, allow-when-unsure —
-  a careless-mistake catcher, never a security boundary; brush-parser
-  replaces the unbash parser) as a pure core crate. One rule book per
-  process, loaded at start, and the book carries the world it was
-  expanded against (`SanityConfig::context`, owner ruling 2026-09-27):
-  a check is normalize-then-match — no per-check context construction,
-  no repo probing (`{{REPO}}` falls back to cwd; the TS check-time git
-  probe is the port's deliberate deletion). The world is the process
-  cwd for every session a node hosts — resume included (owner ruling
-  2026-09-27: the session header records no cwd since log format 6.2;
-  a resumed session adopts the caller's cwd, so a moved project
-  resumes where it now lives and gate, skills, preamble, and tools
-  share one world). The `AgentHook`
-  member, the `native:select_one` ask, and the settings.toml
-  `[gate] enabled = false` opt-out assemble in `tabit-app` (the
-  composition root; extracted from the binary 2026-09) —
-  `tabit-session` stays a mechanism with no policy
-- `crates/tabit-ext-install` — extension installation (EXTENSIONS.md
-  is the record): npm (plain registry HTTP)/git/path sources,
-  stage-validate-place installs, name-only `requires` pulls, list,
-  and the refusal uninstall — the directory is the single truth (no
-  registry, no lockfile)
-- `crates/tabit-ext` — the extension host (the manifest's
-  `disables` list names core tools to remove — the names join the
-  `--without` deny list at the assembly, nothing separate):
-  manifest
-  discovery (`tabit.json` under the extensions root), the frozen
-  JSONL extension pipe (the extension's self-report first, the
-  host's facts after it, the tool lane, the flat
-  grammar), the supervisor (launch over the
-  disable-filtered scan, handshake, supervise,
-  mark-dead-and-report — no mid-run respawn; the tool-call dispatch
-  surface for proxy tools); the child-process substrate it spawns on
-  lives in `tabit-wire` (moved 2026-09 — every spawning site shares
-  it); the hook lane forwards
-  engine hook events over the same pipe (policy fails open on a dead
-  extension)
-- `crates/tabit-ext-sdk` — the extension SDK, the guest side of the
-  same pipe: authors register tools, consultations, and watched event
-  kinds; the SDK is the guest's functional layer over its node (the
-  2026-09 port: the private dispatcher and local ask registries are
-  gone — the loop is the dialect's parse cascade into the node's
-  intake, arriving calls and hooks are held on the ask table and
-  answered through it, watches are subscriptions, the author's
-  ask/emit/command ride the node's ask, emission fan, and outbound
-  command; owned children are lanes — the transit entry is the
-  relay, the card surface is one declared policy per mode (owner
-  ruling, second round: the lift and its settle are one unit —
-  the shipped lift subscribes the stdio to the card PAIR at the
-  remote door, the ingress law keeping a host-mirrored card from
-  bouncing back and tripping the mint law; the answerer mode hears
-  the pair and crosses nothing), death sweeps
-  the child's everything; the stdio subscribes every kind from the
-  local door — own speech crosses, arrivals do not) — so the author
-  surface stays
-  purely functional: one context per handler (command, emit, ask,
-  complete, the cancelled poll). The SDK is async (owner ruling
-  2026-09): bodies are futures, asks await their promises natively,
-  cancellation is the wire's own CancellationToken — the shared
-  recipe's leash primitive (the host's Cancel frame fires the
-  invocation's token, `Ctx::cancelled` polls it, owned children
-  ride it as their abort leash — the same type the session's tools
-  pass, nothing bridged), every invocation is its own task, and the
-  pipe's one writer is the wire's line pump. Shares
-  the host's wire types (the 2026-09 sharing ruling: one wire, one
-  set of shapes; EXTENSIONS.md stays the contract for other
-  languages, the conformance tests keep crate and docs honest).
-  Ships the example
-  extensions (`echo-ext`, `shadow-ext`, the clash pair, `lmstudio-ext` —
-  the provider relay speaking LM Studio's native REST API behind a
-  `providers.toml` fragment; `autotitle-ext` — the `model_prompt`
-  attribution demo, `child-ext` — the owned-children demo) as its
-  bins — `gate-ext` was deleted 2026-09
-  (the gate returns as the built-in `tabit-gate`; examples will ride
-  the extension SDK when it is developed)
-- `crates/tabit-app` — the composition root as a library: the
-  opinionated assembly an embedder mounts to build their own agent
-  app over the stack (extracted from the binary 2026-09 so the
-  stack is reusable above Session without copying glue).
-  `AppOptions` is the library's input shape (the assembly fields
-  only — the binary converts from argv); the surface is
-  `core_tools` (the default toolset), `world_registry` +
-  `mount_world` (the extension world's two halves), the gate hook
-  (`PermissionGate`), `assemble`/`host_data` (the session builders
-  behind the host), `host_node` (the process's one net),
-  `install_root`, and `serve_json_stdio` — the frozen wire's stdio
-  serving as one never-returning call (the binary's `--json` arm,
-  and an embedder's child-role entry: dispatch it in your main and
-  the subagent self-spawn works for your binary too). EMBEDDING.md
-  is the embedder contract; the crate's two examples are its tiers,
-  compile-pinned. tabit-session stays mechanism with no policy —
-  this crate is the policy's linkable home
-- `crates/tabit-core` — the backend binary (`tabit-core`): headless,
-  no UI and no frontend references — frontends spawn it, never the
-  other way. argv in (`cli.rs` converts to `tabit_app::AppOptions`),
-  two I/O arms out. Print mode (`-p <PROMPT>`, `--rewind <n>`) and
-  JSON mode (`--json` — the stdio protocol edge) over the session
-  host (create / `--continue` / `--session <path>` / `--list`); both
-  session modes ride tabit-app's same extension world (owner ruling
-  2026-09-27: `world_registry`/`mount_world` — an
-  installed package exists in every mode; no mode-specific
-  surprises), differing only at the I/O arm: print reads no wire
-  frames (Esc/card answers on plain stdin) and stdout carries
-  exactly the response text — one buffered copy printed at the run
-  terminal, every other rendering on stderr — while the child-role
-  flags (`--parent`, `--parent-call`, `--ephemeral`) cross to print
-  too (a one-shot print child is a natural spawn shape). The
-  `tabit` name is reserved for the frontend that ships primary
-  (2026-09: the egui GUI deleted, the TUI candidates lead; no
-  in-repo binary carries the name yet)
+`ROADMAP.md` carries the planned work.
 
 ## Design rules
 
-1. **API abstraction only — no model catalog.** No model-name constants, no
-   model-name-keyed branching anywhere. Users supply provider endpoints, model
-   ids, and parameters via their own config; the framework passes them through.
-   The one required-with-default parameter: Anthropic requests with no
-   `max_tokens` get `anthropic::DEFAULT_MAX_TOKENS` (65,536) — a plain
-   provider constant, overridable per model via config.
-2. **Front/back split.** Provider backends (wire clients, streaming, auth) stay
-   strictly decoupled from front-facing logic (agents, sessions, tools, user
-   config). Front-facing code never grows provider-specific knowledge.
-3. **Modular.** One concern per crate. Cross-crate dependencies point downward
-   (facade → agent/derive → core). No feature may require reaching into another
-   crate's internals.
-4. **We own the code.** The rig source was vendored to be a starting point, not
-   a frozen upstream copy. Feel free to rewrite, restructure, or delete any of
-   it. `VENDOR.md` documents the initial state for provenance only.
-5. **Tests run offline.** Provider behavior is covered by cassette replay
-   (httpmock) — never live network in CI/default test runs. Live tests are
-   `#[ignore]`d.
-6. **Fail loud, not silent.** No silent fallbacks that paper over missing user
-   config. A documented provider constant (like `DEFAULT_MAX_TOKENS`) is a
-   default, not a fallback — it is visible, named, and config-overridable.
-7. **Implementation quality.** Clean module boundaries — expose only what
-   callers need; a change in one module shouldn't force changes in many
-   others. One purpose per function/module; if a description needs "and",
-   split it. No duplicated logic for the same concern — extract a shared,
-   well-named abstraction that is genuinely simpler than the repetition.
-   Concern identity is the *output artifact*, not the input shape: two
-   folds that consume different inputs (engine stream items vs. log
-   records) but produce the same artifact (the model-facing context) are
-   one concern — extract or extend, never write a sibling. Before adding
-   any fold, builder, projection, or accumulator, enumerate the existing
+1. **API abstraction only — no model catalog.** No model-name
+   constants, no model-name-keyed branching anywhere. Users supply
+   provider endpoints, model ids, and parameters via their own config;
+   the framework passes them through.
+2. **Front/back split.** Provider backends (wire clients, streaming,
+   auth) stay strictly decoupled from front-facing logic (agents,
+   sessions, tools, user config). Front-facing code never grows
+   provider-specific knowledge.
+3. **Modular.** One concern per crate. Cross-crate dependencies point
+   downward. No feature may require reaching into another crate's
+   internals.
+4. **We own the code.** The rig source was vendored to be a starting
+   point, not a frozen upstream copy. Rewrite, restructure, or delete
+   any of it.
+5. **Tests run offline.** Provider behavior is covered by cassette
+   replay (httpmock) — never live network in CI/default test runs.
+   Live tests are `#[ignore]`d.
+6. **Fail loud, not silent.** No silent fallbacks that paper over
+   missing user config. A documented, config-overridable constant is
+   a default, not a fallback.
+7. **Implementation quality.** Clean module boundaries — expose only
+   what callers need. One purpose per function/module; if a
+   description needs "and", split it. No duplicated logic for the
+   same concern — extract a shared, well-named abstraction that is
+   genuinely simpler than the repetition. Concern identity is the
+   *output artifact*, not the input shape: two folds that consume
+   different inputs but produce the same artifact are one concern —
+   extract or extend, never write a sibling. Before adding any fold,
+   builder, projection, or accumulator, enumerate the existing
    implementations of the same output anywhere in the workspace,
-   dependencies and vendored code included, and say why this isn't the
-   Nth. Prefer battle-tested algorithms/crates over hand-rolled ones; if
-   you must hand-roll, document why. Internal errors fail hard and loud;
-   external errors fail gracefully and clearly; never swallow an error
-   or substitute a default that masks the real cause.
+   dependencies and vendored code included, and say why this isn't
+   the Nth. Prefer battle-tested algorithms/crates over hand-rolled
+   ones; if you must hand-roll, document why.
 8. **Canonical surfaces.** Tabit's tools are contextual
-   `#[rig_tool]`s (they take `#[rig(context)] &mut ToolContext` —
-   the session cwd, the run token, capabilities); `PortableTool`
-   remains tabit-providers's surface for non-contextual tools. Erasure into
-   `DynamicTool` goes through `tabit_engine::tool::dynamic_contextual`
-   (one implementation). OpenAI code targets
-   the Responses API; chat completions is the compat-gateway wire format.
-   Tool-call arguments parse strictly — truncated JSON is an error, never a
-   silent partial call. Tool cancellation is token-and-detach (ENGINE.md's
-   execution substrate): bodies poll on the sidecar runtime, abort detaches
-   the task and the token is the ask — drop is no longer the mechanism;
-   `bash` is the reference implementation, `subagent` follows its shape
-   (the child's leash is the parent's token).
-9. **Fighting the architecture is a stop signal.** If the work feels like
-   fighting the design — wrestling the borrow checker, reaching for an
-   unintuitive workaround for a recurring error, or ping-ponging between
-   two designs — assume the design is wrong, not the code. Do not "make it
-   work" with a dirty hack. Stop, then summarize for the user: the goal,
-   the problem, and why it is hard — and ask for a design discussion first.
-10. **All-MIT.** The GPL split existed only to admit the claurst TUI
-    harvest; that frontend is dead (the not-planned list below), so nothing in the
-    workspace is GPL and nothing will be. Frontends stay leaf consumers of
-    the protocol (dependencies run frontend → backend only) — architecture
-    hygiene, not license law.
+   `#[rig_tool]`s (they take `#[rig(context)] &mut ToolContext`);
+   `PortableTool` remains tabit-providers' surface for non-contextual
+   tools. Erasure into `DynamicTool` goes through
+   `tabit_engine::tool::dynamic_contextual` (one implementation).
+   OpenAI code targets the Responses API; chat completions is the
+   compat-gateway wire format. Tool-call arguments parse strictly —
+   truncated JSON is an error, never a silent partial call. Tool
+   cancellation is token-and-detach (ENGINE.md's execution
+   substrate): the token is the ask, drop is not the mechanism;
+   `bash` is the reference implementation.
+9. **Fighting the architecture is a stop signal.** If the work feels
+   like fighting the design — wrestling the borrow checker, reaching
+   for an unintuitive workaround, or ping-ponging between two designs
+   — assume the design is wrong, not the code. Stop, then summarize
+   for the user: the goal, the problem, and why it is hard — and ask
+   for a design discussion first.
+10. **All-MIT.** Nothing in the workspace is or becomes GPL.
+    Frontends stay leaf consumers of the protocol (dependencies run
+    frontend → backend only).
 11. **Flow changes go through ENGINE.md.** Flow-level changes (turn
     loop, run lifecycle, steering, failure handling) consult
     `ENGINE.md` first and amend it before touching code. New flow
-    behavior gets new states or edges — never conditionals grown inside
-    existing states, never driver-side control flow outside the
-    machine.
+    behavior gets new states or edges — never conditionals grown
+    inside existing states, never driver-side control flow outside
+    the machine.
 12. **Bugs are design questions.** Patching the symptom is step one,
     never the deliverable: before calling a bug fixed, ask why it was
     structurally possible — what design choice admitted it, what
     constraint a workaround served and whether that constraint still
-    exists (constraints die quietly; verify, then delete the machinery
-    they justified), and whether one semantic is being re-assembled at
-    several sites that should share a single home. The death-door
-    checkout bug was three abort doors re-assembling
-    drop-all-pending-intent, split by a discard-staging workaround
-    built when the handler could not emit events — obsolete the day it
-    could, deleted only after the second bug. The same audit applies
-    *proactively*: when a change removes or alters a mechanism's
-    justification (sync → write-behind, eager → lazy, one writer →
-    queue), the machinery that justification built is re-derived in
-    the same change. Elaborating machinery to preserve it — adding a
-    buffer, flag, or second pass so an existing mechanism keeps
-    working under a new regime — is the stop signal: the mechanism is
-    usually dead weight the regime change just exposed.
+    exists (constraints die quietly; verify, then delete the
+    machinery they justified), and whether one semantic is being
+    re-assembled at several sites that should share a single home.
+    The same audit applies *proactively*: when a change removes or
+    alters a mechanism's justification, the machinery that
+    justification built is re-derived in the same change. Elaborating
+    machinery to preserve it — adding a buffer, flag, or second pass
+    so an existing mechanism keeps working under a new regime — is
+    the stop signal: the mechanism is usually dead weight the regime
+    change just exposed.
 
 ## Reporting
 
 Status summaries state the **reason** each mechanism exists, not just
-what it did. "The session re-derives context from the log after every
-run because persistence was synchronous" dies in one read; "the
-session keeps its resident chain" launders implementation into
-architecture-sounding nouns and breaks the owner's review — the
-summary is the owner's review surface. A mechanism you cannot give a
-reason for appears in the summary as reason-less: that is the
-finding, not a phrasing problem. Gate results report internal
-consistency, never design fit (see the gate bullet below).
+what it did — the summary is the owner's review surface. "The session
+re-derives context from the log after every run because persistence
+was synchronous" dies in one read; "the session keeps its resident
+chain" launders implementation into architecture-sounding nouns. A
+mechanism you cannot give a reason for appears in the summary as
+reason-less: that is the finding, not a phrasing problem. Gate
+results report internal consistency, never design fit (see the gate
+bullet below).
 
 ## Environment / commands
 
-- **Windows.** Use `python` (not `python3`); read/write files as UTF-8 explicitly.
-- **Hang diagnosis.** Every sync lock claim funnels through
-  `tabit_log::lock` (the claim contract — order, no re-entrancy, no
-  guard across an await — is documented there). `TABIT_LOCK_TRACE=1`
-  logs each acquire/release; `TABIT_LOCK_TIMEOUT=<secs>` bounds each
-  claim and panics with a waiting-for report (who holds what, from
-  which site) instead of hanging silently. Diagnose a hung test by
-  running it alone under both variables.
-- The green gate (verify by **exit code**, not by grepping output — a piped
-  grep once masked a failing suite): `cargo fmt --check`,
+- **Windows.** Use `python` (not `python3`); read/write files as UTF-8
+  explicitly.
+- The green gate (verify by **exit code**, never by grepping output):
+  `bash scripts/test.sh --gate` runs `cargo fmt --check`,
   `cargo clippy --workspace --all-targets`, and
-  `cargo test --workspace --no-fail-fast`. A hung suite fails the gate
-  instead of parking it forever: `scripts/test.sh` bounds the test legs
-  (`TABIT_TEST_TIMEOUT` seconds, default 1200) and prints how to find the
-  hang; CI bounds the tests step at 20 minutes. The suite runs fully
-  offline
-  (see rule 5); some tests carry upstream-marked `#[ignore]`s
-  (live-network scenarios). Don't record pass counts here — they change
-  constantly; run the suite for current numbers. The gate proves
-  **internal consistency** — code, tests, and docs agree with each
-  other — and nothing more; artifacts written in one sitting are
-  mutually consistent even when the design is wrong. Never report gate
-  results as evidence that a design is right.
-- Scripted or regex mass-edits of source files are a last resort, and
-  the result is read back before the next build. The compiler is not a
-  reviewer.
-- In shell commands, avoid `;` chaining — it runs the next step regardless
-  of the previous one's failure. Prefer `&&` (proceed only on success) or
-  `||` (fallback), so a failed step can never be talked past.
+  `cargo test --workspace --no-fail-fast` with a filtered report and
+  bounded test legs (`TABIT_TEST_TIMEOUT` seconds, default 1200).
+  Extra args pass through to cargo test (e.g. `-p crate filter`, or
+  `--target-dir target-test` when a running binary holds a lock on
+  `target\debug`). The suite runs fully offline (rule 5). The gate
+  proves **internal consistency** — code, tests, and docs agree with
+  each other — and nothing more; never report gate results as
+  evidence that a design is right.
+- **Hang diagnosis.** Every sync lock claim funnels through
+  `tabit_log::lock` (the claim contract is documented there).
+  `TABIT_LOCK_TRACE=1` logs each acquire/release;
+  `TABIT_LOCK_TIMEOUT=<secs>` bounds each claim and panics with a
+  waiting-for report instead of hanging silently. Diagnose a hung
+  test by running it alone under both variables.
 - Error doctrine: **internal errors (bugs, invariants, unexpected
-  state) fail hard and loud — they panic** — so they are noticed and
-  fixed; not crashing means the app runs in a broken state that could
-  damage the user's system. **External errors (invalid user input,
-  missing files, network failures, unavailable extensions) fail
-  gracefully and clearly** as typed errors. The crash-family lints
-  (`panic`, `unwrap_used`, `expect_used`, `indexing_slicing`,
-  `unreachable`, …) are warnings — they prompt a second look, they do
-  not forbid the sanctioned crash; `dbg_macro`, `todo!`,
-  `unimplemented!()` stay forbidden (leftovers, not failure
-  handling). Test code relaxes the warnings via an identical
+  state) fail hard and loud — they panic**; not crashing means the
+  app runs broken. **External errors (invalid user input, missing
+  files, network failures, unavailable extensions) fail gracefully
+  and clearly** as typed errors. The crash-family lints (`panic`,
+  `unwrap_used`, `expect_used`, `indexing_slicing`, `unreachable`, …)
+  are warnings — they prompt a second look, they do not forbid the
+  sanctioned crash; `dbg_macro`, `todo!`, `unimplemented!()` stay
+  forbidden. Test code relaxes the warnings via the identical
   `#![cfg_attr(test, allow(..))]` header at the top of each crate's
-  lib.rs — new crates copy the current version from an existing crate
-  rather than an old one.
+  lib.rs — new crates copy the current version from an existing one.
 - Coverage: `cargo llvm-cov --workspace --html --output-dir target/llvm-cov/html`.
-  Every gap must be filled, justified, or explicitly deferred — the ledger
-  and policy live in `COVERAGE.md`.
-- `scripts/test.sh` is the gate's runner: filtered report (totals,
-  failing tests with panic blocks, compile errors) with cargo's own
-  exit codes; `--gate` runs all three legs, and any extra args pass
-  through to cargo test (e.g. `-p crate filter`, or
-  `--target-dir target-test` when a running binary holds a lock
-  on `target\debug`). Prefer it over hand-rolled `cargo test | grep`
-  pipelines.
-- Cassettes are byte-sensitive (LF endings enforced via `.gitattributes`).
+  Every gap must be filled, justified, or explicitly deferred — the
+  ledger and policy live in `COVERAGE.md`.
+- Scripted or regex mass-edits of source files are a last resort, and
+  the result is read back before the next build. The compiler is not
+  a reviewer.
+- In shell commands, avoid `;` chaining — it runs the next step
+  regardless of the previous one's failure. Prefer `&&` or `||`.
+- Cassettes are byte-sensitive (LF endings enforced via
+  `.gitattributes`).
 - CI rides the latest stable toolchain; keep the local one current
-  (`rustup update`) — if CI clippy fails on a lint local passes, that is
-  skew, not a flake: update first, then fix.
+  (`rustup update`) — if CI clippy fails on a lint local passes, that
+  is skew, not a flake: update first, then fix.
 
 ## Terminology
 
-- **Outer loop** — what the user feels: prompt → agent thinks → calls tools →
-  repeat until done. One outer loop = one `AgentRun`. The engine's state
-  machine (states, responsibilities, machine/driver split) is designed in
-  `ENGINE.md`.
+- **Outer loop** — what the user feels: prompt → agent thinks → calls
+  tools → repeat until done. One outer loop = one `AgentRun`.
 - **Turn** — one model call within a run.
-- **Tool-use roundtrip** — the boundary between a model turn's tool calls and
-  the next model call (execute tools → feed results back). This is where
-  steering, permission checks, and future extension hooks intervene.
+- **Tool-use roundtrip** — the boundary between a model turn's tool
+  calls and the next model call. This is where steering, permission
+  checks, and extension hooks intervene.
 
 ## Not planned
 
-- The egui GUI: **deleted** (2026-09, owner ruling) — the paused
-  frontend's sync twin kept surfacing as the exception on every
-  review, so the tree is gone. The TUI candidates lead (ROADMAP's
-  frontend item); a future frontend that runs no tokio extracts a sync
-  core into `tabit-wire`'s client rather than growing a twin.
+(kept so ruled-out work stops being re-derived; ROADMAP.md carries
+what IS planned)
 
-- WebSocket streaming: **removed** — HTTP SSE only.
-
-- In-process subagents: **removed whole** — subprocess children are
-  the ONE substrate (a child is a full session host over the frozen
-  wire; no second execution path).
-
-- Model catalog / name-keyed behavior: design rule 1.
-
-- A GPL anything: rule 10 — all-MIT.
-- Companion crates (bedrock, gemini-grpc, vector stores, …), `discord-bot`,
-  `rmcp` (the tabit-engine `rmcp` module is **kept, feature-gated, off by
-  default** — MCP is a bad protocol, but some services are only
-  reachable through it; whether tabit ships an MCP client is a later
-  decision, low priority).
-- Mid-conversation system messages: **unsupported by design** — always hoisted
-  into the preamble.
-- SSE reconnect/resumption for completion streams (retry belongs at the
-  request layer, only before any body bytes are consumed).
-- Vendor instruction files (CLAUDE.md etc.): **AGENTS.md only**.
-- Instruction-file directory walking: home (`~/.tabit/AGENTS.md` with a
-  `~/.agents/AGENTS.md` fallback) and cwd only — no upward/child scans.
-- Dedicated search tools (grep/glob shapes): **not planned** — the
-  agent searches through `bash` with piping and filtering; no second
-  tool surface for what the shell already does (owner ruling, stated
-  multiple times, recorded here 2026-09-26 so it stops being
-  re-derived against reference agents' inventories).
-
-## Open items for the owner
-
-(none — the skills_available session-level item landed 2026-09 with
-protocol v20: one discovery per session build, `skills_available`
-stamped with the session's stream and announced as each session
-becomes visible, frontends folding per stream; children are full
-session hosts, so a subagent in another directory announces and runs
-its own catalog; extension listings stay backend-level, display-only)
+- The egui GUI (deleted 2026-09) — no in-repo GUI.
+- In-process subagents — subprocess children are the ONE substrate.
+- WebSocket streaming — HTTP SSE only; no SSE reconnect/resumption.
+- Mid-conversation system messages — hoisted into the preamble.
+- Model catalog / name-keyed behavior — rule 1.
+- A GPL anything — rule 10.
+- Companion crates (bedrock, gemini-grpc, vector stores, …),
+  `discord-bot`, an MCP client (`rmcp` stays feature-gated, off).
+- Vendor instruction files (CLAUDE.md etc.) — AGENTS.md only; home +
+  cwd, no directory walking.
+- Dedicated search tools (grep/glob shapes) — `bash` with piping and
+  filtering is the search surface (owner ruling, re-derived too many
+  times).
