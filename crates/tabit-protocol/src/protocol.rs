@@ -16,7 +16,11 @@ use serde::{Deserialize, Serialize};
 /// its [`ServerControlFrame::Report`] carrying this version; the
 /// spawner reads it and kills an incompatible child (owner ruling
 /// 2026-09-25 — the report model: children report first, spawners
-/// decide). v22: providers — the unconditional `providers_available`
+/// decide). v23: `session_closed` — the wire-level child-death
+/// announcement: the LAST frame on a dead child session's stream,
+/// synthesized by the spawner-side wire at the pipe's EOF, cascading
+/// to every session learned through the lane (process death is
+/// subtree death). v22: providers — the unconditional `providers_available`
 /// boot announcement (every configured provider with its winning key
 /// source; absence of the frame now means "protocol older than v22"),
 /// re-announced with `models_available` on every world change; and
@@ -43,7 +47,7 @@ use serde::{Deserialize, Serialize};
 /// compaction — the `compact` command and its event family (reshaped
 /// in v15 into the
 /// `compaction_begin`/`compaction_step`/`compaction_end` envelope).
-pub const PROTOCOL_VERSION: u32 = 22;
+pub const PROTOCOL_VERSION: u32 = 23;
 
 /// Which session produced an event. The stamp is the session id
 /// itself (v3: the `"main"` alias is retired — one name per session);

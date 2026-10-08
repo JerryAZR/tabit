@@ -385,6 +385,30 @@ pub enum SessionEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         parent_call: Option<String>,
     },
+    /// A child session's stream ended permanently (v23): **this
+    /// session will never emit again — discarding its frontend state
+    /// is safe.** The LAST frame on the session's stream, and
+    /// exactly one per session: synthesized by the spawner-side wire
+    /// when the child's pipe reaches EOF (never by the session
+    /// itself — birth is self-announced, `session_opened` crossing
+    /// its lineage at the source; death is vouched by the
+    /// spawner-side wire, because a crash path cannot announce
+    /// itself and one synthesis point cannot duplicate). The cascade
+    /// is the backend's: process death is subtree death (tree-kill
+    /// is the substrate), so a dying child closes every session
+    /// whose frames crossed its lane, descendants included — a
+    /// frontend discards exactly the sessions it receives closes
+    /// for, with no tree inference. **Children only**: a user-facing
+    /// session never gets one (its death is the backend process's
+    /// own — the pipe closing is the signal), and run completion is
+    /// NOT death — a completed subagent parked for `followup` emits
+    /// nothing until its process actually exits. Never replayed: a
+    /// resumed session is a live session again.
+    SessionClosed {
+        /// The closing session's id — the same id the frame's stream
+        /// stamp carries.
+        id: String,
+    },
     /// The active model changed: a `model` command applied (a state
     /// write at receive), or the register announcement leading a
     /// replay pass — the session's current selection, announced live,
@@ -810,6 +834,7 @@ impl SessionEvent {
             SessionEvent::ModelsAvailable { .. } => tags::MODELS_AVAILABLE,
             SessionEvent::ProvidersAvailable { .. } => tags::PROVIDERS_AVAILABLE,
             SessionEvent::SessionOpened { .. } => tags::SESSION_OPENED,
+            SessionEvent::SessionClosed { .. } => tags::SESSION_CLOSED,
             SessionEvent::ModelChanged { .. } => tags::MODEL_CHANGED,
             SessionEvent::NativeItem { .. } => tags::NATIVE_ITEM,
             SessionEvent::InteractionRequest { .. } => tags::INTERACTION_REQUEST,
@@ -858,6 +883,7 @@ pub mod tags {
     pub const MODELS_AVAILABLE: &str = "models_available";
     pub const PROVIDERS_AVAILABLE: &str = "providers_available";
     pub const SESSION_OPENED: &str = "session_opened";
+    pub const SESSION_CLOSED: &str = "session_closed";
     pub const MODEL_CHANGED: &str = "model_changed";
     pub const NATIVE_ITEM: &str = "native_item";
     pub const INTERACTION_REQUEST: &str = "interaction_request";
@@ -896,6 +922,7 @@ pub mod tags {
         MODELS_AVAILABLE,
         PROVIDERS_AVAILABLE,
         SESSION_OPENED,
+        SESSION_CLOSED,
         MODEL_CHANGED,
         NATIVE_ITEM,
         INTERACTION_REQUEST,

@@ -100,6 +100,9 @@ impl Mailbox {
         // text — the first-part law: expansion only appends, part[0]
         // IS the authored text), then attachment parts over the
         // expanded message (attachments.rs — pure file IO, no wiring).
+        // Both scans read the authored first part only, so the
+        // composition order affects the appended parts' ordering,
+        // never what gets expanded.
         // A message without resolvable tags passes through untouched
         // (each expansion is the identity for it). The queued
         // acknowledgment hands back the AUTHORED text (part[0], tags

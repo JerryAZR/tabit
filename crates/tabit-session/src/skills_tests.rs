@@ -703,3 +703,26 @@ fn the_body_after_frontmatter_mirrors_the_parser() {
         "an unterminated block degrades to raw text"
     );
 }
+
+#[test]
+fn the_scan_reads_the_authored_first_part_only() {
+    // The ruling pin: an appended part (an attachment label, a prior
+    // expansion's block) mentioning the invocation tag never expands —
+    // every door expansion scans what the user typed, so composition
+    // order affects only the appended parts' ordering.
+    let (root, skills) = expand_catalog("first-part");
+    let message = Message::User {
+        content: tabit_providers::OneOrMany::many(vec![
+            UserContent::text("explain skill tags"),
+            UserContent::text(r#"a label naming <skill name="commit"/>"#),
+        ])
+        .expect("two parts"),
+    };
+    let expanded = expand_invocations(message, &skills);
+    assert_eq!(
+        text_parts(&expanded).len(),
+        2,
+        "no block appended for a tag outside part[0]"
+    );
+    let _ = fs::remove_dir_all(&root);
+}

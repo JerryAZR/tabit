@@ -28,7 +28,7 @@ tabit-providers = { path = "../tabit-providers", version = "0.1.0", default-feat
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 similar = "2"
-tabit-protocol = { path = "../tabit-protocol" }
+tabit-protocol = { path = "../tabit-protocol", version = "0.1.0" }
 tempfile = "3"
 tokio = { workspace = true, features = ["sync"] }
 tokio-util = { version = "0.7", default-features = false }

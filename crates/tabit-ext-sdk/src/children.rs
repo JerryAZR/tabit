@@ -5,7 +5,10 @@
 //! node's intake (each card registering a transit entry whose
 //! delivery carries the answer home down the child's stdin), and its
 //! death sweeps the lane — learned routes and open asks, every
-//! stranded card settling announced.
+//! stranded card settling announced, and every stream the lane
+//! taught closing with the wire's synthesized `session_closed` (the
+//! lane machinery's vouch, v23 — the author watches the kind like
+//! any other).
 //!
 //! Registration is node-level config, never child-shaped (owner
 //! ruling 2026-09-25): the author declares how each event kind is

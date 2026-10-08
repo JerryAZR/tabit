@@ -125,8 +125,12 @@ fn print_event(event: &SessionEvent) {
             let _ = writeln!(std::io::stderr(), "warning: compaction failed: {message}");
         }
         // The host's session catalog and creations are frontend
-        // concerns; print mode is a single-session consumer.
-        SessionEvent::SessionsAvailable { .. } | SessionEvent::SessionOpened { .. } => {}
+        // concerns; print mode is a single-session consumer. A
+        // child's close is bookkeeping likewise — the subagent tool's
+        // result already reported the outcome.
+        SessionEvent::SessionsAvailable { .. }
+        | SessionEvent::SessionOpened { .. }
+        | SessionEvent::SessionClosed { .. } => {}
         // Non-terminal error conditions (startup degradations,
         // persistence): stderr is the human surface in print mode —
         // stdout stays the answer channel.

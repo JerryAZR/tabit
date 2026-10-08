@@ -12,7 +12,8 @@ const TEXT_PART_SEPARATOR: &str = "\n\n";
 
 /// The text of a user message: every text part, in order, joined by
 /// [`TEXT_PART_SEPARATOR`] — the one joined rendering (events, the
-/// subagent task text, the door's tag scans).
+/// subagent task text). The door's tag scans read [`authored_text`]
+/// instead: they scan what the user typed, never the expansion.
 pub(crate) fn user_text(message: &Message) -> String {
     let Message::User { content } = message else {
         return String::new();

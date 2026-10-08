@@ -505,7 +505,11 @@ fn footer(entry: &SkillEntry) -> String {
 // law (ROADMAP.md's attachments design record, 2026-10): expansion
 // only appends parts, it never touches the first part — part[0] IS
 // the authored text, structurally, so a skill block lands as its own
-// text part (the wire fold owns the join separator). Unresolvable
+// text part (the wire fold owns the join separator). The scan reads
+// the authored first part only (owner ruling): every door expansion
+// scans what the user typed, so expansion order affects only the
+// appended parts' ordering, never what gets expanded — an appended
+// part mentioning a tag never expands it. Unresolvable
 // tags (no such skill, unreadable file) are left as-is — external,
 // graceful: the message passes, never rejected. No arguments by
 // ruling (agentskills.io has none; pi's prompt-template is the
@@ -520,14 +524,18 @@ const TAG_CLOSE: &str = r#""/>"#;
 /// Expand a message's invocation tags: the message verbatim — the
 /// authored first part untouched, tags intact — then one text part
 /// per resolvable tag in order of appearance (the first-part law).
-/// A message without tags, or whose tags all pass through, returns
-/// unchanged.
+/// The scan reads the AUTHORED first part only (owner ruling): every
+/// door expansion scans the same input — what the user typed — so
+/// expansion order affects only the appended parts' ordering, never
+/// what gets expanded (an appended skill body documenting a tag must
+/// not expand it). A message without tags, or whose tags all pass
+/// through, returns unchanged.
 #[allow(clippy::unreachable)] // sanctioned crash: the re-match's else arm is dead by the check above
 pub(crate) fn expand_invocations(message: Message, skills: &Skills) -> Message {
     let Message::User { .. } = &message else {
         return message;
     };
-    let text = crate::session::user_text(&message);
+    let text = crate::session::authored_text(&message);
     if !text.contains(TAG_OPEN) {
         return message;
     }

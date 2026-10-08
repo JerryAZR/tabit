@@ -253,6 +253,14 @@ through a few patch rounds. That is the re-evaluation trigger.
   checkout/replay indexing). Unscheduled; the trigger is real log
   bloat once attachments land.
 
+- **Session titles** (design sketch, awaiting frontend demand):
+  an append-only side record in the session log — last-wins, the
+  header stays write-once — behind a log-format minor bump; the wire
+  surface is a `title` field on `session_opened` and the
+  `sessions_available` catalog plus a `rename` command and a
+  rename event (one protocol bump for the set). `autotitle-ext`
+  already demonstrates the generation side over `model_prompt`.
+
 ## Design record: attachments (image content in user messages)
 
 The design for user-attached images, recorded before implementation
@@ -379,6 +387,48 @@ stay advisory picker-display data (`models_available`), never a
 gate. The summarization call is equally ungated — a provider that
 rejects images fails the compaction pass through the same graceful
 path (`compaction_failed`), never a special case.
+
+## Design record: session_closed (the wire-level child-death
+## announcement)
+
+Landed 2026-10 (protocol v23; FRONTEND.md §6 carries the wire
+facts). The rulings:
+
+1. **One field, no reason.** `session_closed { id }`, stamped with
+   the closing session's id, the LAST frame on that stream: *this
+   session will never emit again; discard of frontend state is
+   safe.*
+2. **The vouch asymmetry.** Birth is self-announced
+   (`session_opened` crosses `--parent` at the source); death is
+   vouched by the spawner-side wire. A child never announces its own
+   death — a crash path cannot — and one synthesis point (the lane's
+   retraction at the pipe's EOF, in tabit-wire's client) cannot
+   duplicate.
+3. **Synthesis is wire-level mechanism, not policy**: the lane
+   machinery itself, so the subagent bridge and the extension SDK's
+   owned children both get it from the one mount.
+4. **Ordering falls out of the pump**: the close synthesizes only
+   after the child's stdout reaches EOF, so it is genuinely the
+   stream's last frame. The reaper's exit observation sweeps only
+   the lane's asks (a pipe-holding descendant can outlive the
+   process; stranded cards cannot wait for that EOF) and never
+   synthesizes — the graceful EOF and the reaper cannot
+   double-announce, and the enumeration the cascade reads (the
+   learning table's per-lane stamps) survives until the pump drains
+   it.
+5. **The cascade is backend-synthesized** (the owner's "either seems
+   fine, just make sure it's clear in the contract" — backend
+   chosen): process death is subtree death (tree-kill is the
+   substrate), so a retracting lane closes every stamp learned
+   through it, and the synthesized frames fan and relay exactly like
+   child-arrived frames — they cross upstream indistinguishably.
+   Contract line: a frontend discards exactly the sessions it
+   receives closes for; no tree inference required.
+6. **Parked children emit nothing**: run completion is not death
+   (the subagent pool parks completed children for `followup`);
+   closes fire only on actual process exit. User-facing sessions
+   never get one — their death is the process's own, and the pipe
+   close is the signal (FRONTEND.md §3).
 
 ## Design record: compaction (final form)
 

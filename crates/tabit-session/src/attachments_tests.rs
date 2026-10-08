@@ -268,3 +268,30 @@ fn non_user_messages_pass_through() {
         panic!("an assistant message is never a door for attachments");
     };
 }
+
+#[test]
+fn the_scan_reads_the_authored_first_part_only() {
+    // The ruling pin: expansion appends parts, and an appended part
+    // (a skill block, a label) mentioning the tag never attaches —
+    // every door expansion scans what the user typed, so composition
+    // order affects only the appended parts' ordering.
+    let dir = temp_dir("first-part");
+    let path = plant(&dir, "shot.png", &solid_png(4, 4));
+    let skill_block =
+        format!("<skill name=\"demo\">document the tag: <attachment path=\"{path}\"/></skill>");
+    let message = Message::User {
+        content: tabit_providers::OneOrMany::many(vec![
+            UserContent::text("explain attachment tags"),
+            UserContent::text(skill_block),
+        ])
+        .expect("two parts"),
+    };
+    let expanded = expand_attachments(message);
+    let parts = parts(&expanded);
+    assert_eq!(
+        parts.len(),
+        2,
+        "no label/image appended for a tag outside part[0]: {parts:?}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

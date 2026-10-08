@@ -8,7 +8,12 @@
 //! `die` emits one step and exits mid-run (no terminal crosses —
 //! the crash-synthesis shape), and `hang` emits one step then parks
 //! (no terminal until the driver's abort closes stdin; later
-//! messages are ignored — the abort-leash shape).
+//! messages are ignored — the abort-leash shape). `relay-grandchild`
+//! emits one frame stamped with a SECOND stream (a relayed
+//! grandchild's speech — the wire-level shape of a child relaying
+//! its own child's frames), then answers normally: the parent
+//! learns the second stamp through this child's lane, and the
+//! lane's death must close both.
 
 use std::io::{BufRead, Write};
 
@@ -91,6 +96,17 @@ fn main() {
             let _ = out.flush();
             hung = true;
             continue;
+        }
+        if text == "relay-grandchild" {
+            // A grandchild's speech, relayed: the parent learns the
+            // second stamp through this child's lane.
+            let relayed = wire(&ServerFrame::Event(EventFrame {
+                stream: Some(StreamId::new("stub-grand-sess")),
+                origin: None,
+                ttl: None,
+                event: SessionEvent::error_session("grandchild speech"),
+            }));
+            let _ = writeln!(out, "{relayed}");
         }
         for index in 0..2 {
             let _ = writeln!(out, "{}", stamped(step(&text, index)));
