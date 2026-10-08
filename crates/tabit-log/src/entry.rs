@@ -48,7 +48,7 @@ use tabit_providers::message::ToolResult;
 /// written; files from 6.1 and earlier may still carry it, tolerated
 /// and ignored. v6.2 note (2026-10, no bump): `user_message` entries
 /// may now carry MULTI-PART messages — the attachments expansion
-/// (ROADMAP.md's design record) appends a basename label text part and
+/// (FRONTEND.md §5) appends a basename label text part and
 /// the image as an inline-base64 part. The `Message` serde already
 /// (de)serializes image parts (v6: content blocks are model
 /// modalities), so the schema is unchanged and every 6.x reader reads

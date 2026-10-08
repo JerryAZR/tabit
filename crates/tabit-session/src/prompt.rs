@@ -1,7 +1,6 @@
-//! System prompt composition — the default tabit preamble (ROADMAP
-//! item 3, v1).
+//! System prompt composition — the default tabit preamble.
 //!
-//! Policy (decided; see ROADMAP.md and AGENTS.md):
+//! Policy (decided; see AGENTS.md):
 //! - **AGENTS.md only.** No CLAUDE.md or other vendor instruction files.
 //! - **No directory walking.** Two candidate locations: the home level
 //!   (`~/.tabit/AGENTS.md`, falling back to `~/.agents/AGENTS.md`) and

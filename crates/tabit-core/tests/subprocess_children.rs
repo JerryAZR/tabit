@@ -1,4 +1,4 @@
-//! The subprocess substrate end to end (ROADMAP item 5): the parent's
+//! The subprocess substrate end to end: the parent's
 //! `subagent` tool spawns THIS
 //! repository's real binary in `--json` child role, drives it over
 //! the stdio protocol, and the child's model is an httpmock SSE

@@ -1,4 +1,4 @@
-//! Tabit extension installation (ROADMAP item 9, task 6; the design
+//! Tabit extension installation (the design
 //! record lives in EXTENSIONS.md's install entry). **The directory
 //! is the truth** — no registry, no lockfile, no source tracking:
 //! each package's manifest carries the facts, hand-placed and

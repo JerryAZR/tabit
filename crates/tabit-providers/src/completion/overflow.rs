@@ -1,5 +1,5 @@
 //! Context-overflow classification — typed, at the transport layer
-//! (the compaction ruling, ROADMAP item 6: we own the anthropic and
+//! (the compaction ruling, COMPACTION.md: we own the anthropic and
 //! openai wire clients, so no regex-port of pi's matcher).
 //!
 //! Both first-party providers reject an over-window prompt with the

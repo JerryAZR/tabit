@@ -1,4 +1,5 @@
-//! The compaction box (ROADMAP item 6, the 2026-09 rulings; the flow
+//! The compaction box (the 2026-09 rulings — COMPACTION.md is the
+//! policy record; the flow
 //! facts live in ENGINE.md's compaction amendment). Its own system, a
 //! black box with three doors — **pre-request** (mid-run, condition
 //! B), **idle** (the beat, A ∨ B), **manual** (the `compact` command,

@@ -1,4 +1,4 @@
-//! Extension assembly (ROADMAP item 9, task 2): turn the
+//! Extension assembly: turn the
 //! supervisor's resolved reports into the model-facing toolset —
 //! flat names, one name one tool — plus the wire catalog with
 //! provenance and the load-time conflict reports.

@@ -1,4 +1,4 @@
-//! Extension tools end to end (ROADMAP item 9, task 2): the REAL
+//! Extension tools end to end: the REAL
 //! `tabit --json` backend, a REAL installed extension package (the
 //! `ext-double` behavior double), and a scripted model whose turn
 //! calls the extension's tool — the proxy roundtrip proven across

@@ -1,5 +1,5 @@
 //! The model registry: the single construction site for models the
-//! session layer uses (ROADMAP item 2).
+//! session layer uses.
 //!
 //! It owns the loaded config and auth, caches one HTTP client per
 //! provider so switching models mid-session reuses the provider's
@@ -400,7 +400,7 @@ impl ModelRegistry {
             .ok_or_else(|| SessionError::Config {
                 message: format!("model `{model_id}` for provider `{provider_id}`"),
             })?;
-        // Keyless is a supported state (ROADMAP item 1: local endpoints
+        // Keyless is a supported state (local endpoints
         // run keyless) — but only when DECLARED. A provider with
         // neither a key nor `keyless = true` is not a usable model
         // provider (owner ruling 2026-09): the selection fails here,

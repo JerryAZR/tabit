@@ -336,7 +336,7 @@ Current workspace layout:
    work" with a dirty hack. Stop, then summarize for the user: the goal,
    the problem, and why it is hard — and ask for a design discussion first.
 10. **All-MIT.** The GPL split existed only to admit the claurst TUI
-    harvest; that frontend is dead (ROADMAP's not-planned), so nothing in the
+    harvest; that frontend is dead (the not-planned list below), so nothing in the
     workspace is GPL and nothing will be. Frontends stay leaf consumers of
     the protocol (dependencies run frontend → backend only) — architecture
     hygiene, not license law.
@@ -457,6 +457,14 @@ consistency, never design fit (see the gate bullet below).
   core into `tabit-wire`'s client rather than growing a twin.
 
 - WebSocket streaming: **removed** — HTTP SSE only.
+
+- In-process subagents: **removed whole** — subprocess children are
+  the ONE substrate (a child is a full session host over the frozen
+  wire; no second execution path).
+
+- Model catalog / name-keyed behavior: design rule 1.
+
+- A GPL anything: rule 10 — all-MIT.
 - Companion crates (bedrock, gemini-grpc, vector stores, …), `discord-bot`,
   `rmcp` (the tabit-engine `rmcp` module is **kept, feature-gated, off by
   default** — MCP is a bad protocol, but some services are only

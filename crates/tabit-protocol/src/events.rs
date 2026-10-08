@@ -1,7 +1,7 @@
 //! The serializable event stream a tabit frontend consumes.
 //!
 //! Events are the item-level view of one outer loop plus session-level
-//! bookkeeping. The enum is closed: the CLI/RPC surface (ROADMAP item 7)
+//! bookkeeping. The enum is closed: the CLI/RPC surface
 //! ships in this workspace, so an added variant is a coordinated change,
 //! not a compatibility hazard.
 

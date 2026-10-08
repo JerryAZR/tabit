@@ -477,6 +477,18 @@ Draft salvage of a discarded queued message is therefore text (the
 parts were never on the wire) — re-attaching means re-sending with the
 tag.
 
+**Capability is never gated (owner ruling 2026-10):** the backend
+sends image parts unconditionally. The `input` modalities
+`models_available` announces are advisory picker-display data, never
+an admission check — a provider stack knows its own capability better
+than user config does (vision preprocessing upstream of a text-only
+model makes pastes just work), and a declared text-only default would
+mostly fire as false refusals on undeclared but capable models. A
+server that truly cannot carry the content fails the request through
+the existing provider-error path (`run_failed { kind: "provider" }`,
+§6) — history carries forward; a model switch or a `checkout`
+repairs.
+
 ## 6. Events
 
 The `report` (the backend's first line) and `protocol_error` are

@@ -164,7 +164,7 @@ fn assemble_session(
         None => build_system_prompt(&cwd, &skills).map_err(|e| e.to_string())?,
     };
 
-    // Subagent support (ROADMAP item 5): the process-wide parts. The
+    // Subagent support: the process-wide parts. The
     // child's toolset is the CHILD's assembly over its own candidate
     // set — the parent forwards policy, never tools: the assembly's
     // effective lists cross as `--tools`/`--without`, the blacklist
