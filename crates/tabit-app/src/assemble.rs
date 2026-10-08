@@ -133,7 +133,7 @@ fn retain_filtered(
 fn assemble_session(
     args: &AppOptions,
     registry: ModelRegistry,
-    selection: ModelSelection,
+    selection: Option<ModelSelection>,
     resume_target: Option<PathBuf>,
     store: SessionStore,
     extensions: Option<&std::sync::Arc<extensions::Mounted>>,
@@ -243,7 +243,7 @@ fn assemble_session(
     )
     .map_err(|e| e.to_string())?
     .preamble(preamble)
-    .model_factory(registry.factory())
+    .world_factory(registry.factory())
     .hooks(hooks)
     .subagents(subagents)
     .skills(skills);
@@ -305,10 +305,13 @@ pub fn core_tools() -> Vec<tabit_engine::tool::DynamicTool> {
 /// the boot (config, tools, preamble), behind closures so
 /// tabit-session stays free of front-facing wiring. The process's
 /// `--model`/`--max-turns` apply to sessions created later;
-/// `open_session` resolves by stored id and resumes that file.
-/// One registry for the whole process (the ruling: providers are user
-/// config, not per-session) — every session the host builds shares
-/// the provider client caches.
+/// `open_session` resolves by stored id and resumes that file. The
+/// startup catalogs ride along: the extension world, and the model
+/// catalog — folded from the current-world cell the closures and the
+/// login/logout handler share: the builders read the registry AT
+/// CALL TIME through the cell, so a login/logout world refresh
+/// reaches the next built session (resident sessions refresh through
+/// the endpoint's walk).
 pub fn host_data(
     args: &AppOptions,
     registry: &ModelRegistry,
@@ -324,19 +327,26 @@ pub fn host_data(
         ephemeral: false,
         ..args.clone()
     };
-    let fresh_registry = registry.clone();
+    let world = tabit_session::current_world(registry.clone());
+    let fresh_world = world.clone();
     let fresh_store = store.clone();
     let fresh_extensions = extensions.clone();
     let open_args = args.clone();
-    let open_registry = registry.clone();
+    let open_world = world.clone();
     let open_store = store.clone();
     let open_extensions = extensions.clone();
     tabit_session::SessionHostData {
         extensions: extensions.catalog.clone(),
+        world,
+        // The auth file login/logout write — the same resolution the
+        // boot's auth load read, so the written file is the one the
+        // next boot reads.
+        auth_path: tabit_config::auth_default_path(),
         create: Arc::new(move || {
+            let registry = tabit_session::lock::lock(&fresh_world).registry();
             assemble(
                 &fresh_args,
-                &fresh_registry,
+                &registry,
                 &fresh_store,
                 ContinueMiss::StartFresh,
                 Some(fresh_extensions.clone()),
@@ -354,9 +364,10 @@ pub fn host_data(
                 session: Some(path),
                 ..open_args.clone()
             };
+            let registry = tabit_session::lock::lock(&open_world).registry();
             assemble(
                 &args,
-                &open_registry,
+                &registry,
                 &open_store,
                 ContinueMiss::Fail,
                 Some(open_extensions.clone()),
@@ -629,7 +640,11 @@ pub fn assemble(
 ) -> Result<(Session, Vec<String>), String> {
     // Default-model resolution (registry): an explicit --model wins,
     // then the resumed session's last model, then default_model in
-    // providers.toml, then the first configured model.
+    // providers.toml, then the first configured model. Nothing usable
+    // anywhere degrades to a selection-less session (the first-run
+    // ruling reversal, 2026-10: zero config boots; the teaching note
+    // rides the startup notes, and the run-open failure is the
+    // carrier) — never a startup death.
     let resume_target = match (&args.session, args.continue_newest) {
         (Some(path), _) => Some(path.clone()),
         (None, true) => {
@@ -658,7 +673,9 @@ pub fn assemble(
         .map_err(|e| e.to_string())?;
     // Startup degradations are data (ruled: external errors ride the
     // channel): the worker emits them as `error { kind: model }` frames —
-    // the first frames after the handshake ack.
+    // the first frames after the handshake ack. `selection` may be
+    // `None` (nothing usable at this backend): the session opens
+    // selection-less and the note above teaches the fix.
     let session = assemble_session(
         args,
         registry.clone(),
@@ -962,6 +979,7 @@ id = "m2"
                 .default_selection(None, None)
                 .expect("preference from default_model")
                 .0
+                .expect("selected")
                 .provider,
             "lmstudio"
         );
@@ -989,21 +1007,23 @@ id = "m"
                 .default_selection(None, None)
                 .expect("first-seen")
                 .0
+                .expect("selected")
                 .model,
             "m"
         );
 
+        // The zero-config assembly (the first-run ruling reversal):
+        // nothing usable degrades to a selection-less session with a
+        // teaching note — never a startup error.
         let empty = ModelRegistry::new(
             std::sync::Arc::new(TabitConfig::default()),
             std::sync::Arc::new(AuthConfig::default()),
         );
-        let error = empty
+        let (selection, notes) = empty
             .default_selection(None, None)
-            .expect_err("nothing configured");
-        assert!(
-            error.to_string().contains("usable model provider"),
-            "{error}"
-        );
+            .expect("zero config boots");
+        assert_eq!(selection, None, "selection-less");
+        assert_eq!(notes.len(), 1, "the teaching note rides: {notes:?}");
     }
 
     #[test]

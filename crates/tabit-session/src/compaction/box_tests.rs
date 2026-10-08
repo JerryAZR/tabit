@@ -67,6 +67,7 @@ fn cell_with_measured_dialogue(rounds: usize, delta: u64) -> ConversationCell {
                 total_tokens: (round as u64 + 1) * delta,
                 ..Usage::default()
             },
+            None,
         );
     }
     cell
@@ -281,6 +282,7 @@ fn the_head_measurement_is_the_newest_reported_total() {
             total_tokens: 10_000,
             ..Usage::default()
         },
+        None,
     );
     assert_eq!(read(&cell).measured_total(), Some(10_000));
 }
@@ -301,12 +303,14 @@ fn an_unreported_turn_inherits_the_previous_valid_total() {
             total_tokens: 10_000,
             ..Usage::default()
         },
+        None,
     );
     crate::lock::write(&cell).fold(Message::user("q2"));
     crate::lock::write(&cell).fold_turn_with_id(
         Message::assistant("a2"),
         "a2".to_string(),
         Usage::new(),
+        None,
     );
     assert_eq!(read(&cell).measured_total(), Some(10_000));
 }
@@ -324,6 +328,7 @@ fn the_window_read_in_the_post_compaction_gap_is_the_regime_base() {
         36_000,
         18_020,
         Usage::default(),
+        None,
     );
     assert_eq!(read(&cell).measured_total(), Some(18_020));
     // The view leads with the compaction, and a boundary right after
@@ -354,6 +359,7 @@ fn a_stale_tail_total_is_unreachable_the_regime_base_wins() {
             total_tokens: 100_000,
             ..Usage::default()
         },
+        None,
     );
     // The compaction retains the stale entry in its tail.
     let cut_child = branch_of(&cell)[0].clone();
@@ -364,6 +370,7 @@ fn a_stale_tail_total_is_unreachable_the_regime_base_wins() {
         100_000,
         3_500,
         Usage::default(),
+        None,
     );
     assert_eq!(
         read(&cell).measured_total(),
@@ -382,6 +389,7 @@ fn a_stale_tail_total_is_unreachable_the_regime_base_wins() {
             total_tokens: 3_500,
             ..Usage::default()
         },
+        None,
     );
     assert_eq!(read(&cell).measured_total(), Some(3_500));
 }
@@ -451,6 +459,102 @@ async fn a_committed_pass_bills_the_ledger_and_carries_its_facts() {
     assert_eq!(
         billed_cost, None,
         "no rate card in this config: no dollars claimed"
+    );
+}
+
+#[tokio::test]
+async fn a_committed_pass_bills_one_computed_number_to_every_sink() {
+    // The spend point's one-number law on the compaction path: with a
+    // rate card in config, the pass's dollars are computed ONCE by
+    // the session side (from the door's snapshot pair) and handed
+    // down — the durable entry, the ledger add, and the
+    // CompactionStep event all carry that same value. The log
+    // records; it never computes.
+    let cell = cell_with_measured_dialogue(3, 25_000);
+    let agent = AgentBuilder::new(MockCompletionModel::from_stream_turns(vec![vec![
+        MockStreamEvent::text("## Goal\n- keep working"),
+        MockStreamEvent::FinalResponse(tabit_providers::test_utils::mock_final(
+            tabit_providers::completion::Usage {
+                input_tokens: 100,
+                output_tokens: 20,
+                total_tokens: 120,
+                ..Default::default()
+            },
+        )),
+    ]]))
+    .build();
+    let config = Arc::new(
+        TabitConfig::from_toml_str(
+            r#"
+[providers.p]
+base_url = "http://127.0.0.1:9999/v1"
+api = "openai-completions"
+
+[[providers.p.models]]
+id = "m"
+context_window = 80_000
+cost = { input = 2.0, output = 4.0, cache_read = 0.0, cache_write = 0.0 }
+"#,
+            std::path::Path::new("test.toml"),
+        )
+        .expect("valid config"),
+    );
+    let state = Compaction::new();
+    let token = CancellationToken::new();
+    let ledger = std::sync::Arc::new(std::sync::Mutex::new(crate::stats::UsageLedger::default()));
+    let mut events = Vec::new();
+    let outcome = run(
+        Door::Manual { directives: None },
+        &cell,
+        &state,
+        &agent,
+        &token,
+        &config,
+        &selection(),
+        &ledger,
+        true,
+        &mut |event| events.push(event),
+    )
+    .await;
+    assert!(
+        matches!(&outcome, Outcome::Compacted { passes: 1, .. }),
+        "{outcome:?}"
+    );
+    // $2/M in, $4/M out: 100 in + 20 out = $0.00028.
+    const PASS_COST: f64 = 0.00028;
+    let step_cost = events
+        .iter()
+        .find_map(|event| match event {
+            SessionEvent::CompactionStep { cost, .. } => Some(*cost),
+            _ => None,
+        })
+        .expect("a committed step");
+    assert!(
+        (step_cost.expect("the step carries the dollars") - PASS_COST).abs() < 1e-12,
+        "the event bills the card's arithmetic"
+    );
+    let billed = ledger.lock().unwrap_or_else(|p| p.into_inner()).clone();
+    let billed_cost = billed
+        .per_model()
+        .first()
+        .and_then(|row| row.cost)
+        .expect("the ledger bills the pass");
+    assert_eq!(
+        billed_cost,
+        step_cost.expect("billed"),
+        "the ledger's add is the event's exact value"
+    );
+    let entry_cost = read(&cell)
+        .active_branch()
+        .iter()
+        .find_map(|entry| match &entry.kind {
+            EntryKind::Compaction { cost, .. } => Some(*cost),
+            _ => None,
+        })
+        .expect("the compaction entry");
+    assert_eq!(
+        entry_cost, step_cost,
+        "the entry records the same computed number, verbatim"
     );
 }
 
@@ -926,6 +1030,7 @@ async fn a_huge_late_growth_the_cut_cannot_shed_stops_the_loop_loud() {
             total_tokens: 1_000,
             ..Usage::default()
         },
+        None,
     );
     crate::lock::write(&cell).fold(Message::user("second question"));
     crate::lock::write(&cell).fold_turn_with_id(
@@ -937,6 +1042,7 @@ async fn a_huge_late_growth_the_cut_cannot_shed_stops_the_loop_loud() {
             total_tokens: 2_000,
             ..Usage::default()
         },
+        None,
     );
     crate::lock::write(&cell).fold(Message::user(paste));
     crate::lock::write(&cell).fold_turn_with_id(
@@ -948,6 +1054,7 @@ async fn a_huge_late_growth_the_cut_cannot_shed_stops_the_loop_loud() {
             total_tokens: 62_000,
             ..Usage::default()
         },
+        None,
     );
     let summary = || {
         vec![

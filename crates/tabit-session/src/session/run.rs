@@ -3,14 +3,14 @@
 //! fan-out every emission goes through.
 
 use super::mailbox::SessionSteers;
-use super::wire::{result_details, result_text, user_text, wire_status, wire_usage};
+use super::wire::{result_details, result_text, user_message_event, wire_status, wire_usage};
 use super::{Session, TOOL_CONCURRENCY};
 use crate::entry::{FileRecord, SideKind, SideRecord};
 use crate::error::SessionError;
 use crate::lock::lock;
 use futures::StreamExt;
 use std::sync::Arc;
-use tabit_engine::agent::{MultiTurnStreamItem, StreamingError};
+use tabit_engine::agent::{Agent, MultiTurnStreamItem, StreamingError};
 use tabit_engine::completion::Message;
 use tabit_engine::streaming::{StreamedUserContent, StreamingChat};
 use tabit_protocol::SessionEvent;
@@ -176,32 +176,51 @@ impl Session {
         }
         self.drain_persist_transitions();
         // The agent-cache check at run open — the single point of use.
-        // A selection that validates against config but cannot be
+        // A session with no selection at all (the zero-config boot) or
+        // a selection that validates against config but cannot be
         // constructed in this environment (client build trouble, the
         // only residual class: config is immutable per process) fails
         // here, before any turn: the frontend sees the queued
         // `user_message`s (the failed open's drain acknowledges them)
         // then `run_failed` — the same shape a provider stream error
         // takes.
-        if let Err(error) = self.ensure_agent() {
-            self.fail_before_engine(
-                tabit_protocol::RunFailedKind::MODEL,
-                run_started_ms,
-                format!(
-                    "{error} — the message is kept; switch the model and retry to \
-                     answer it"
-                ),
-                &mut sink,
-            );
-            return RunSummary {
-                outcome: RunOutcome::Failed,
-                output: String::new(),
-                events: sink.events,
-            };
-        }
-        let stream = self.open_run(&run_token).await;
+        let (agent, selection) = match self.ensure_agent() {
+            Ok(pair) => pair,
+            Err(error) => {
+                self.fail_before_engine(
+                    tabit_protocol::RunFailedKind::MODEL,
+                    run_started_ms,
+                    format!(
+                        "{error} — the message is kept; switch the model and retry to \
+                         answer it"
+                    ),
+                    &mut sink,
+                );
+                return RunSummary {
+                    outcome: RunOutcome::Failed,
+                    output: String::new(),
+                    events: sink.events,
+                };
+            }
+        };
+        // The run's turn-cost channel: the drive's CompletionCall arm
+        // computes each call's dollars from the bound selection and
+        // writes them here; the engine's turn commit takes the value
+        // onto the durable entry — one computation, three sinks (the
+        // ledger add, the completion_call event, the log entry).
+        let turn_costs = tabit_engine::TurnCostSlot::default();
+        let stream = self
+            .open_run(&run_token, &agent, &selection, &turn_costs)
+            .await;
         let mut driven = self
-            .drive(stream, &run_token, run_started_ms, &mut sink)
+            .drive(
+                stream,
+                &run_token,
+                &selection,
+                run_started_ms,
+                &turn_costs,
+                &mut sink,
+            )
             .await;
         driven = self.overflow_intercept(driven).await;
         let (outcome, output) = self.conclude(driven, run_started_ms, &mut sink);
@@ -261,9 +280,9 @@ impl Session {
             // Commit first, then announce — the engine's CONVERGE idiom;
             // the helper is synchronous, so no suspension can interleave,
             // but one ordering lives in the codebase, not two.
-            let text = user_text(&queued);
-            crate::lock::write(&self.conversation).fold_with_id(queued, id.clone());
-            sink.emit(SessionEvent::UserMessage { text, entry_id: id });
+            let event = user_message_event(id.clone(), &queued);
+            crate::lock::write(&self.conversation).fold_with_id(queued, id);
+            sink.emit(event);
         }
         if let Some(hub) = &self.interaction {
             hub.clear_pending();
@@ -278,20 +297,21 @@ impl Session {
 
     /// Assemble the engine request for one run: the abort token and
     /// interaction capability in the tool context, the permission gate,
-    /// and steering over the run-agnostic mailbox. The conversation is
-    /// the shared cell — the loop's folds ARE the durable commits; the
-    /// session never folds.
+    /// and steering over the run-agnostic mailbox. `agent`/`selection`
+    /// are the run-open snapshot pair [`Self::ensure_agent`] guaranteed
+    /// — a mid-run register write reaches the next run's open, never
+    /// this one. The conversation is the shared cell — the loop's
+    /// folds ARE the durable commits; the session never folds.
     async fn open_run(
         &self,
         run_token: &CancellationToken,
+        agent: &Arc<Agent>,
+        selection: &tabit_protocol::ModelSelection,
+        turn_costs: &tabit_engine::TurnCostSlot,
     ) -> tabit_engine::agent::StreamingResult {
         let mut tool_context = tabit_engine::tool::ToolContext::new();
         tool_context.insert(run_token.clone());
         tool_context.insert(tabit_engine::tool::SessionCwd(self.cwd.clone()));
-        // The active model's image limits, per run: the `read` tool's
-        // image arm resizes to them (the same limits the message door's
-        // attachment expansion reads off the selection cell).
-        tool_context.insert(tabit_engine::tool::SessionImageLimits(self.image_limits()));
         // The session identity, per run: process-level hook forwarders
         // (extension policies) read it per event to scope their state.
         tool_context.insert(tabit_engine::tool::SessionTag(self.id.as_str().into()));
@@ -302,11 +322,13 @@ impl Session {
         // (task 5): `model_prompt` — the envelope's one verb (the ask
         // verb is gone; asks ride the grammar), billed through this
         // session's ledger under the caller's name. Snapshotted at
-        // open like every per-run capability.
+        // open like every per-run capability (the pair under one lock
+        // — a world refresh must not tear it).
+        let (world_config, world_factory) = self.world_snapshot();
         tool_context.insert(std::sync::Arc::new(crate::services::ExtensionServices::new(
-            self.model_factory.clone(),
-            self.config.clone(),
-            self.selection(),
+            world_factory,
+            world_config,
+            selection.clone(),
             self.ledger.clone(),
         ))
             as std::sync::Arc<dyn tabit_engine::tool::services::HostServices>);
@@ -319,7 +341,7 @@ impl Session {
                 parts.clone(),
                 self.subagent_pool.clone(),
                 self.id.clone(),
-                self.selection(),
+                selection.clone(),
                 self.cwd.clone(),
             )));
         }
@@ -332,8 +354,7 @@ impl Session {
         // conversation): the run folds the session's one durable
         // manager, and the opening message — if any — arrives through
         // the steering drain at the loop's first convergence.
-        let mut request = self
-            .agent
+        let mut request = agent
             .stream_over(self.conversation.clone())
             .max_turns(self.max_turns)
             .tool_concurrency(TOOL_CONCURRENCY);
@@ -350,7 +371,8 @@ impl Session {
             // assembles. Ordering, not coordination — the drain at
             // CONVERGE and the history read at PREPARE sit either
             // side of it.
-            .pre_request(self.pre_request_door(run_token))
+            .pre_request(self.pre_request_door(run_token, agent.clone(), selection.clone()))
+            .turn_cost_slot(turn_costs.clone())
             .tool_context(tool_context)
             // Announced turn ids are entry ids (ENGINE.md behavior delta
             // 10): the engine mints from tabit's UUIDv7 source, so the id
@@ -370,7 +392,9 @@ impl Session {
         &mut self,
         mut stream: tabit_engine::agent::StreamingResult,
         run_token: &CancellationToken,
+        selection: &tabit_protocol::ModelSelection,
         started_at_ms: u64,
+        turn_costs: &tabit_engine::TurnCostSlot,
         sink: &mut EventSink<'_>,
     ) -> DriveOutcome {
         let mut driven = DriveOutcome {
@@ -472,8 +496,11 @@ impl Session {
                     // The whole batch is already committed (the fold and
                     // the yield share one poll); announce every pair in
                     // one synchronous loop — an abort cannot split it.
-                    for (entry_id, text) in batch {
-                        sink.emit(SessionEvent::UserMessage { text, entry_id });
+                    // The event text is the session's wire fold (text
+                    // parts joined — a multi-part message, e.g. an
+                    // expanded attachment, announces its text parts).
+                    for (entry_id, message) in batch {
+                        sink.emit(user_message_event(entry_id, &message));
                     }
                 }
                 Ok(MultiTurnStreamItem::CompletionCall(call)) => {
@@ -482,11 +509,35 @@ impl Session {
                     // facts (the fold commits them — reload counts the
                     // same numbers; live adds only what is new).
                     {
-                        let selection = self.selection();
-                        // The invoice fact: dollars from the rates in
-                        // effect, stamped now — commit and ledger bill
-                        // the same value.
-                        let cost = crate::model::turn_cost(&self.config, &selection, &call.usage);
+                        // The one-number law: the dollars are computed
+                        // ONCE, here at the spend point, from the run's
+                        // BOUND selection (run open's snapshot — a
+                        // mid-run `model` switch lands on the next run,
+                        // so this run's usage and cost attribute to the
+                        // model that produced them) — and the same
+                        // value flows to all three sinks: the ledger
+                        // add, the completion_call event, and the
+                        // durable entry (the engine's turn commit takes
+                        // it from the cost channel; this item always
+                        // precedes that commit, and the consumer's
+                        // processing resumes the stream). The log never
+                        // computes — it records what the spend point
+                        // computed.
+                        // Dormant assumption (the config-reload
+                        // follow-up, ROADMAP): the rate card is read
+                        // LIVE from the world config. The
+                        // bound-at-open invoice invariant holds today
+                        // only because a world refresh (login/logout)
+                        // swaps AUTH — the config Arc is shared, so
+                        // this read cannot diverge from the run's
+                        // bound world. A config reload swaps the
+                        // config mid-run and breaks it: reload must
+                        // snapshot the config into the run's bound
+                        // pair (or re-derive the invariant) when it
+                        // lands.
+                        let cost =
+                            crate::model::turn_cost(&self.world_config(), selection, &call.usage);
+                        *crate::lock::lock(turn_costs) = cost;
                         tabit_log::lock::lock(&self.ledger).add(
                             &selection.provider,
                             &selection.model,

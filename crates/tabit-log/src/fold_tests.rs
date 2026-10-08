@@ -89,6 +89,36 @@ fn fold_branch_folds_user_and_assistant_messages_verbatim() {
     assert!(matches!(&messages[1], Message::Assistant { .. }));
 }
 
+/// The attachments ruling: images ride compaction. The fold — which IS
+/// the compaction request's history (tabit-session's pass builds its
+/// view from `fold_branch`) — carries a multi-part user message
+/// verbatim, image parts included.
+#[test]
+fn fold_branch_carries_a_multi_part_user_message_verbatim() {
+    use tabit_providers::message::ImageMediaType;
+    let attached = EntryKind::UserMessage {
+        message: Message::User {
+            content: OneOrMany::many(vec![
+                UserContent::text("see <attachment path=\"/tmp/shot.png\"/>"),
+                UserContent::text("\n\nshot.png"),
+                UserContent::image_base64("aGVsbG8=", Some(ImageMediaType::PNG), None),
+            ])
+            .expect("three parts"),
+        },
+    };
+    let entries = vec![entry(attached), entry(assistant_text("a"))];
+    let messages = fold_branch(&entries);
+    assert_eq!(messages.len(), 2);
+    let Message::User { content } = &messages[0] else {
+        panic!("a user message");
+    };
+    assert_eq!(content.len(), 3, "every part survived the fold");
+    assert!(matches!(
+        &content.iter().last(),
+        Some(UserContent::Image(_))
+    ));
+}
+
 #[test]
 fn a_closed_branch_passes() {
     let entries = vec![

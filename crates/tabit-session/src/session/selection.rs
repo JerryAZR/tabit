@@ -7,30 +7,7 @@ use crate::error::SessionError;
 use crate::lock::lock;
 use crate::model::validate_selection;
 use std::sync::{Arc, Mutex};
-use tabit_config::TabitConfig;
 use tabit_protocol::{ModelFacts, ModelSelection};
-
-/// The image-preparation limits for one selection: the model's
-/// config-declared `image_limits` over the pipeline's provider-safe
-/// defaults (tabit-providers' `image` module). Both image doors read it
-/// — the message door's attachment expansion and the per-run
-/// `SessionImageLimits` capability the `read` tool's image arm reads.
-pub(crate) fn image_limits(
-    config: &TabitConfig,
-    selection: &ModelSelection,
-) -> tabit_providers::image::Limits {
-    let configured = config
-        .model(&selection.provider, &selection.model)
-        .and_then(|(_, model)| model.image_limits);
-    let mut limits = tabit_providers::image::Limits::default();
-    if let Some(configured) = configured {
-        if let Some(max_bytes) = configured.max_bytes {
-            limits.max_bytes = max_bytes;
-        }
-        limits.max_long_edge = configured.max_long_edge;
-    }
-    limits
-}
 
 /// Validates a selection against a session's config without touching
 /// the session — the `model` command's receive-time check (the
@@ -45,15 +22,20 @@ impl Session {
     /// selection that validates against config but fails to construct
     /// surfaces as that run's `run_failed`.
     pub fn set_model(&mut self, selection: ModelSelection) -> Result<(), SessionError> {
-        validate_selection(&selection, &self.config)?;
+        validate_selection(&selection, &self.world_config())?;
         self.model_register().write(selection);
         Ok(())
     }
 
     /// Change the thinking level without changing provider/model. `None`
-    /// clears it.
+    /// clears it. A selection-less session has nothing to re-level —
+    /// the loud, named error.
     pub fn set_thinking_level(&mut self, level: Option<&str>) -> Result<(), SessionError> {
-        let current = self.selection();
+        let Some(current) = self.selection() else {
+            return Err(SessionError::Config {
+                message: "no model selected — set one first with the `model` command".to_string(),
+            });
+        };
         let selection = ModelSelection {
             provider: current.provider,
             model: current.model,
@@ -64,14 +46,11 @@ impl Session {
 
     /// The active model selection (an owned clone — three strings; the
     /// cell is shared with the endpoint's receive-time writes).
-    pub fn selection(&self) -> ModelSelection {
+    /// `None` when the session is selection-less (the zero-config
+    /// boot): nothing usable at this backend until a `model` command
+    /// lands one.
+    pub fn selection(&self) -> Option<ModelSelection> {
         lock(&self.selection).clone()
-    }
-
-    /// The active model's image-preparation limits (config over the
-    /// pipeline's defaults — [`image_limits`]).
-    pub(crate) fn image_limits(&self) -> tabit_providers::image::Limits {
-        image_limits(&self.config, &self.selection())
     }
 
     /// The shared register handle — the `model` command's write path at
@@ -82,7 +61,7 @@ impl Session {
         ModelRegister {
             selection: self.selection.clone(),
             buffer: self.buffer.clone(),
-            config: self.config.clone(),
+            world: self.world.clone(),
         }
     }
 
@@ -93,22 +72,17 @@ impl Session {
         self.model_register().facts(selection)
     }
 
-    /// The commit-time cost stamp over this session's config and
-    /// register cell (the reload path hands it to the context manager
-    /// it installs).
-    pub(crate) fn cost_resolver(&self) -> tabit_log::TurnCost {
-        cost_resolver(self.config.clone(), self.selection.clone())
-    }
-
     /// The receive-time model validator — the checkout probe's sibling
     /// for the `model` command: validates a selection against this
-    /// session's config without touching the session, so the worker
-    /// can reject an unusable ref at the command (a picker's
-    /// immediate feedback, even mid-run). The write itself is
+    /// session's CURRENT config (read at call time through the world
+    /// cell — a world refresh swaps it) without touching the session,
+    /// so the worker can reject an unusable ref at the command (a
+    /// picker's immediate feedback, even mid-run). The write itself is
     /// [`Session::set_model`], at the beat.
     pub(crate) fn model_probe(&self) -> ModelProbe {
-        let config = self.config.clone();
+        let world = self.world.clone();
         Arc::new(move |selection| {
+            let config = lock(&world).config.clone();
             validate_selection(selection, &config).map_err(|error| error.to_string())
         })
     }
@@ -131,15 +105,20 @@ impl Session {
 /// record — write-behind, last model_change wins).
 #[derive(Clone)]
 pub(crate) struct ModelRegister {
-    selection: Arc<Mutex<ModelSelection>>,
+    selection: Arc<Mutex<Option<ModelSelection>>>,
     buffer: crate::writer::SharedBuffer,
-    config: Arc<TabitConfig>,
+    /// The world cell — the facts resolve against the CURRENT config
+    /// (a world refresh swaps it), never a spawn-time snapshot.
+    world: super::world::SharedWorld,
 }
 
 impl ModelRegister {
     /// Record + swap, atomic under the cell lock. Unconditional — a
     /// dedup guard would be machinery without a failure it prevents
-    /// (repeat values are harmless under last-write-wins).
+    /// (repeat values are harmless under last-write-wins). The first
+    /// write on a selection-less session lands its first selection —
+    /// the register knows no way back to `None` (there is no unselect
+    /// command).
     pub(crate) fn write(&self, selection: ModelSelection) {
         let mut cell = lock(&self.selection);
         if let Err(error) = crate::lock::lock(&self.buffer).enqueue(&[register_record(&selection)])
@@ -148,15 +127,17 @@ impl ModelRegister {
             // later enqueue — a refusal is degradation, not loss.
             tracing::warn!(%error, "model_change record failed to flush; queued for retry");
         }
-        *cell = selection;
+        *cell = Some(selection);
     }
 
     /// The announcement facts for a selection (protocol v11) — the
-    /// register resolves what it announces: the model record's context
-    /// window, display name, and cost, or all-None when the record is
-    /// gone from config (see [`crate::model::resolve_facts`]).
+    /// register resolves what it announces against the CURRENT config
+    /// (the world cell's): the model record's context window, display
+    /// name, and cost, or all-None when the record is gone from config
+    /// (see [`crate::model::resolve_facts`]).
     pub(crate) fn facts(&self, selection: &ModelSelection) -> ModelFacts {
-        crate::model::resolve_facts(selection, &self.config)
+        let config = lock(&self.world).config.clone();
+        crate::model::resolve_facts(selection, &config)
     }
 }
 
@@ -170,18 +151,5 @@ pub(super) fn register_record(selection: &ModelSelection) -> FileRecord {
             model: selection.model.clone(),
             thinking_level: selection.thinking_level.clone(),
         },
-    })
-}
-
-/// The commit-time cost stamp (the invoice ruling): config + the live
-/// register → dollars at call time. One construction for the context
-/// manager's injected resolver and every other stamp site.
-pub(super) fn cost_resolver(
-    config: Arc<TabitConfig>,
-    selection: Arc<Mutex<ModelSelection>>,
-) -> tabit_log::TurnCost {
-    Arc::new(move |usage| {
-        let selection = lock(&selection).clone();
-        crate::model::turn_cost(&config, &selection, usage)
     })
 }

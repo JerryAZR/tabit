@@ -28,7 +28,11 @@
 //!   boot (the child's report, then its first stamped announce),
 //!   and the frame pump — control frames resolve the boot and die
 //!   as diagnostics after it; stamped frames cross to the caller
-//!   **as-is** (forward, don't re-stamp).
+//!   **as-is** (forward, don't re-stamp). The pump is also the
+//!   child-death announcement (v23): at the pipe's EOF it retracts
+//!   the lane, synthesizing one `session_closed` per stream the
+//!   lane taught — each its stream's last frame, descendants
+//!   included (the cascade).
 //! - **The handle** ([`ChildHandle`]): commands out, frames in, the
 //!   closing token, the exit machinery. The drive fold — mapping a
 //!   child's run to the driver's own terminal vocabulary — is the
@@ -196,9 +200,14 @@ impl ChildSpec {
     /// can beat it (the caller-assembled mount this replaces dropped
     /// a child's first frames whenever they shared the pipe read with
     /// the ack). Every stamped arrival intakes through the lane (the
-    /// fan, the learning table, the ask route home); the child's exit
-    /// retracts the lane (learned routes and transit asks sweep with
-    /// it, every stranded card settling announced).
+    /// fan, the learning table, the ask route home); the pipe's EOF
+    /// retracts the lane — learned routes and transit asks sweep
+    /// with it, every stranded card settling announced, and every
+    /// stream the lane taught closes with a synthesized
+    /// `session_closed` (v23, the child-death announcement: a child
+    /// never announces its own death — a crash path cannot — so the
+    /// spawner-side wire vouches for it, once, descendants
+    /// included).
     pub fn on_node(mut self, node: Arc<Node>) -> Self {
         self.node = Some(node);
         self
@@ -414,13 +423,20 @@ impl ChildSpec {
                     }
                 }
             }
-            // The pipe's end sweeps the mounted lane: learned routes
-            // and transit asks go, every stranded card settling
-            // announced. (The reaper's exit path sweeps too — this is
-            // the stdout-closed shape, that one the process shape;
-            // the sweep is idempotent.)
-            if let Some(node) = &pump_mount {
-                node.retract(&lane_for_pump, "the child pipe closed");
+            // The pipe's end is the child-death announcement (v23):
+            // the lane retracts, and every stream it taught closes —
+            // the cascade (process death is subtree death), each
+            // `session_closed` fanning exactly like an arrival from
+            // the lane. Synthesized HERE, at the EOF, because the
+            // close is its stream's LAST frame: the pump delivered
+            // every frame the pipe carried before it ends, so the
+            // ordering falls out of the read loop. One synthesis
+            // point, exactly one close per session — the reaper's
+            // exit observation (below) sweeps the asks but never
+            // synthesizes, so the graceful EOF and the reaper cannot
+            // double-announce.
+            if let (Some(node), Some(lane)) = (&pump_mount, &lane) {
+                node.retract_lane(lane, "the child pipe closed");
             }
         });
 
@@ -473,11 +489,16 @@ impl ChildSpec {
                 *lock(&exit_for_reaper) =
                     Some(format!("exit code {}", status.code().unwrap_or(-1)));
             }
-            // The mounted lane sweeps with the process (the pump's
-            // own sweep covers the stdout-EOF shape; this one covers
-            // a grandchild holding the pipe open past the exit).
+            // The exit observation sweeps the lane's open asks — a
+            // pipe-holder (a descendant that inherited the pipe) can
+            // hold stdout open past the process's death, and stranded
+            // cards cannot wait for that EOF. Routes and the close
+            // announcements are the pump's alone (the ordering law: a
+            // `session_closed` is its stream's last frame, so only
+            // the pipe's end may synthesize it); the pump's sweep
+            // covers them when the EOF arrives.
             if let Some(node) = &sweep_mount {
-                node.retract(&sweep_lane, "the child exited");
+                node.retract_asks(&sweep_lane, "the child exited");
             }
         });
 

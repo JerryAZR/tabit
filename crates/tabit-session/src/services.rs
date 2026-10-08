@@ -46,7 +46,12 @@ const MODEL_PROMPT_MAX_TOKENS: u64 = 4096;
 pub struct ExtensionServices {
     model_factory: ModelFactory,
     config: Arc<TabitConfig>,
-    selection: ModelSelection,
+    /// The fallback selection for a `model_prompt` that names no
+    /// model — `None` when the session itself is selection-less (a
+    /// run open guarantees one, so `None` only reaches a directly
+    /// constructed capability; the failure is then a graceful,
+    /// named error at the call, not a crash).
+    selection: Option<ModelSelection>,
     /// The session's live ledger — shared with the session itself, so
     /// extension spend is part of the session's totals the moment it
     /// happens. Not persisted (no log entry carries it): a reload
@@ -59,13 +64,13 @@ impl ExtensionServices {
     pub fn new(
         model_factory: ModelFactory,
         config: Arc<TabitConfig>,
-        selection: ModelSelection,
+        selection: impl Into<Option<ModelSelection>>,
         ledger: Arc<Mutex<UsageLedger>>,
     ) -> Self {
         Self {
             model_factory,
             config,
-            selection,
+            selection: selection.into(),
             ledger,
         }
     }
@@ -90,7 +95,16 @@ impl HostServices for ExtensionServices {
                         return Err(format!("model reference `{reference}`: {message}"));
                     }
                 },
-                None => fallback_selection,
+                None => match fallback_selection {
+                    Some(selection) => selection,
+                    None => {
+                        return Err(
+                            "no model selected — pass `model` in the request, or select one \
+                             with the `model` command"
+                                .to_string(),
+                        );
+                    }
+                },
             };
             // The extension's own cache route (clamped like every
             // cache key): its prompts share nothing with the

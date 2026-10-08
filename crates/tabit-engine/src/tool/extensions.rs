@@ -167,13 +167,6 @@ pub struct ToolContext {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SessionCwd(pub std::path::PathBuf);
 
-/// The active model's image-preparation limits, inserted by the run's
-/// opener — the image pipeline's input for the `read` tool's image arm.
-/// Absent for standalone tool use: tools fall back to the pipeline's
-/// provider-safe defaults.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct SessionImageLimits(pub tabit_providers::image::Limits);
-
 /// The executing call's correlation id — the same id the
 /// `ToolCall`/`ToolResult` stream items carry as `internal_call_id`,
 /// inserted freshly into every model-turn dispatch; absent when a

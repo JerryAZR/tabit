@@ -229,6 +229,279 @@ async fn the_skills_catalog_is_the_sessions_stamped() {
 }
 
 #[tokio::test]
+async fn the_models_catalog_announces_once_unstamped_after_the_extension_catalog() {
+    // v21: the usable model catalog is a backend-level boot
+    // announcement — exactly one frame, no stream stamp, ordered
+    // after `extensions_available`, its content the registry's fold
+    // (the endpoint only emits; the fold's own tests are the
+    // registry's). v22: `providers_available` follows it in the same
+    // boot act — every configured provider with its winning key
+    // source, usable or not.
+    let store = temp_store("endpoint-models");
+    let session = Factory::new(vec![text_turn("hi")])
+        .into_builder(store.clone())
+        .create("C:/w")
+        .expect("session");
+    let registry = crate::ModelRegistry::new(
+        std::sync::Arc::new(
+            tabit_config::TabitConfig::from_toml_str(
+                r#"
+[providers.local]
+base_url = "http://127.0.0.1:1234/v1"
+api = "openai-completions"
+keyless = true
+
+[[providers.local.models]]
+id = "m"
+context_window = 128000
+
+[[providers.local.models.thinking_levels]]
+name = "off"
+
+[[providers.local.models.thinking_levels]]
+name = "high"
+
+[providers.locked]
+base_url = "https://locked.example/v1"
+api = "openai-completions"
+
+[[providers.locked.models]]
+id = "l1"
+"#,
+                std::path::Path::new("providers.toml"),
+            )
+            .expect("config"),
+        ),
+        std::sync::Arc::new(tabit_config::AuthConfig::default()),
+    );
+    let data = SessionHostData {
+        extensions: tabit_protocol::ExtensionsCatalog {
+            extensions: vec![tabit_protocol::AvailableExtension {
+                name: "echo".to_string(),
+                version: "0.1.0".to_string(),
+                description: None,
+                dir: "C:/u/.tabit/extensions/echo".to_string(),
+                status: "alive".to_string(),
+                reason: None,
+                tools: Vec::new(),
+                hooks: Vec::new(),
+            }],
+            conflicts: Vec::new(),
+        },
+        world: crate::registry::current_world(registry),
+        auth_path: None,
+        ..plain_data()
+    };
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store), data);
+    handle.message(&boot_id(&handle), "go");
+    let frames = drain(&mut handle).await;
+
+    let mut extensions_at = None;
+    let mut announced = Vec::new();
+    let mut providers_announced = Vec::new();
+    for (index, frame) in frames.iter().enumerate() {
+        match &frame.event {
+            SessionEvent::ExtensionsAvailable { .. } => extensions_at = Some(index),
+            SessionEvent::ModelsAvailable { providers } => {
+                assert_eq!(frame.stream, None, "backend-level: no stream stamp");
+                announced.push((index, providers));
+            }
+            SessionEvent::ProvidersAvailable { providers } => {
+                assert_eq!(frame.stream, None, "backend-level: no stream stamp");
+                providers_announced.push((index, providers));
+            }
+            _ => {}
+        }
+    }
+    let extensions_at = extensions_at.expect("the extension catalog announced");
+    assert_eq!(
+        announced.len(),
+        1,
+        "exactly one model catalog per boot — never a per-session repeat"
+    );
+    let (models_at, providers) = announced[0];
+    assert!(
+        models_at > extensions_at,
+        "models_available follows extensions_available"
+    );
+    // The usable fold crossed the wire: `locked` (no key, not
+    // keyless) is absent from the picker list with its models; the
+    // usable provider's stated facts and the dial's names ride.
+    assert_eq!(providers.len(), 1);
+    assert_eq!(providers[0].id, "local");
+    assert_eq!(providers[0].models.len(), 1);
+    let model = &providers[0].models[0];
+    assert_eq!(model.id, "m");
+    assert_eq!(model.context_window, Some(128_000));
+    assert_eq!(model.max_tokens, None, "unstated stays absent");
+    assert_eq!(model.thinking_levels, vec!["off", "high"]);
+    // v22: the provider catalog follows the model catalog in the
+    // same act, once, covering EVERY configured provider — `locked`
+    // reports `auth: "none"` (the login target), `local` reports
+    // `keyless`.
+    assert_eq!(
+        providers_announced.len(),
+        1,
+        "exactly one provider catalog per boot"
+    );
+    let (providers_at, statuses) = providers_announced[0];
+    assert_eq!(
+        providers_at,
+        models_at + 1,
+        "providers_available immediately follows models_available"
+    );
+    assert_eq!(
+        statuses
+            .iter()
+            .map(|p| (p.id.as_str(), p.auth))
+            .collect::<Vec<_>>(),
+        vec![
+            ("local", tabit_protocol::ProviderAuth::Keyless),
+            ("locked", tabit_protocol::ProviderAuth::None),
+        ],
+        "every configured provider, usable or not, with its key source"
+    );
+    std::fs::remove_dir_all(store.dir()).ok();
+}
+
+#[tokio::test]
+async fn an_empty_models_catalog_still_announces() {
+    // The all-unusable boot (e.g. an explicit `--model` on a key-less
+    // provider — the explicit rung of `default_selection` validates
+    // existence only, so this boots): `providers: []` is the legal
+    // state and the frame STILL emits — absence of the frame means
+    // "protocol older than v21", never "no models".
+    let store = temp_store("endpoint-models-empty");
+    let session = Factory::new(vec![text_turn("hi")])
+        .into_builder(store.clone())
+        .create("C:/w")
+        .expect("session");
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store), plain_data());
+    handle.message(&boot_id(&handle), "go");
+    let frames = drain(&mut handle).await;
+    let catalogs: Vec<(Option<StreamId>, usize)> = frames
+        .iter()
+        .filter_map(|frame| match &frame.event {
+            SessionEvent::ModelsAvailable { providers, .. } => {
+                Some((frame.stream.clone(), providers.len()))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(catalogs.len(), 1, "exactly one announcement, even empty");
+    assert_eq!(catalogs[0].0, None, "backend-level: no stream stamp");
+    assert_eq!(catalogs[0].1, 0, "no usable models at this backend");
+    std::fs::remove_dir_all(store.dir()).ok();
+}
+
+#[tokio::test]
+async fn the_providers_catalog_announces_all_four_auth_states() {
+    // v22: `providers_available` is unstamped, unconditional, and
+    // covers every configured provider with its winning key source —
+    // stored (auth.toml) over env (a set `api_key_env` var) over
+    // declared keyless over none.
+    let var = "TABIT_SESSION_TEST_ENDPOINT_ENV_KEY";
+    // SAFETY: unique variable name; set and removed around the test.
+    unsafe {
+        std::env::set_var(var, "env-secret");
+    }
+    let store = temp_store("endpoint-providers");
+    let session = Factory::new(vec![text_turn("hi")])
+        .into_builder(store.clone())
+        .create("C:/w")
+        .expect("session");
+    let registry = crate::ModelRegistry::new(
+        std::sync::Arc::new(
+            tabit_config::TabitConfig::from_toml_str(
+                &format!(
+                    r#"
+[providers.env-backed]
+base_url = "https://env.example/v1"
+api = "openai-completions"
+api_key_env = "{var}"
+
+[[providers.env-backed.models]]
+id = "e1"
+
+[providers.keyless]
+base_url = "http://127.0.0.1:1234/v1"
+api = "openai-completions"
+keyless = true
+
+[[providers.keyless.models]]
+id = "k1"
+
+[providers.locked]
+base_url = "https://locked.example/v1"
+api = "openai-completions"
+
+[[providers.locked.models]]
+id = "l1"
+
+[providers.stored]
+base_url = "https://stored.example/v1"
+api = "openai-completions"
+keyless = true
+
+[[providers.stored.models]]
+id = "s1"
+"#
+                ),
+                std::path::Path::new("providers.toml"),
+            )
+            .expect("config"),
+        ),
+        std::sync::Arc::new(
+            tabit_config::AuthConfig::from_toml_str(
+                "[providers.stored]\napi_key = \"sk-stored\"\n",
+                std::path::Path::new("auth.toml"),
+            )
+            .expect("auth"),
+        ),
+    );
+    let data = SessionHostData {
+        world: crate::registry::current_world(registry),
+        auth_path: None,
+        ..plain_data()
+    };
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store), data);
+    handle.message(&boot_id(&handle), "go");
+    let frames = drain(&mut handle).await;
+
+    let announced: Vec<&Vec<tabit_protocol::ProviderStatus>> = frames
+        .iter()
+        .filter_map(|frame| match &frame.event {
+            SessionEvent::ProvidersAvailable { providers } => {
+                assert_eq!(frame.stream, None, "backend-level: no stream stamp");
+                Some(providers)
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(announced.len(), 1, "exactly one provider catalog per boot");
+    assert_eq!(
+        announced[0]
+            .iter()
+            .map(|p| (p.id.as_str(), p.auth))
+            .collect::<Vec<_>>(),
+        vec![
+            ("env-backed", tabit_protocol::ProviderAuth::Env),
+            ("keyless", tabit_protocol::ProviderAuth::Keyless),
+            ("locked", tabit_protocol::ProviderAuth::None),
+            // Keyless WITH a stored key reports stored — the explicit
+            // act wins over the fallback declaration.
+            ("stored", tabit_protocol::ProviderAuth::Stored),
+        ],
+        "all four auth states, in resolution order's winning form"
+    );
+    // SAFETY: see above.
+    unsafe {
+        std::env::remove_var(var);
+    }
+    std::fs::remove_dir_all(store.dir()).ok();
+}
+
+#[tokio::test]
 async fn an_idle_message_runs_to_completion_over_the_stream() {
     let store = temp_store("endpoint-idle");
     let session = Factory::new(vec![text_turn("hello there")])
@@ -260,7 +533,7 @@ async fn an_idle_message_runs_to_completion_over_the_stream() {
     // The info block carries the startup facts, and closing stats landed.
     assert_eq!(
         handle.info().model,
-        tabit_protocol::ModelSelection::new("p", "m")
+        Some(tabit_protocol::ModelSelection::new("p", "m"))
     );
     assert!(
         handle.closing_stats().is_some(),
@@ -381,21 +654,30 @@ async fn abort_while_idle_discards_queued_messages() {
     let frames = drain(&mut handle).await;
     // No run ever happened — and nothing user-authored leaves
     // silently (flag 6): both queued pairs come back as one
-    // `messages_discarded`, after session_opened and the catalog.
+    // `messages_discarded`, after session_opened and the catalogs
+    // (the model catalog is unconditional — v21).
     let types: Vec<&str> = frames
         .iter()
         .map(|f| match &f.event {
             SessionEvent::SessionOpened { .. } => "session_opened",
             SessionEvent::SessionsAvailable { .. } => "sessions_available",
+            SessionEvent::ModelsAvailable { .. } => "models_available",
+            SessionEvent::ProvidersAvailable { .. } => "providers_available",
             SessionEvent::MessagesDiscarded { .. } => "messages_discarded",
             _ => "other",
         })
         .collect();
     assert_eq!(
         types,
-        vec!["session_opened", "sessions_available", "messages_discarded"]
+        vec![
+            "session_opened",
+            "sessions_available",
+            "models_available",
+            "providers_available",
+            "messages_discarded"
+        ]
     );
-    let texts: Vec<String> = match &frames[2].event {
+    let texts: Vec<String> = match &frames[4].event {
         SessionEvent::MessagesDiscarded { messages } => {
             messages.iter().map(|m| m.text.clone()).collect()
         }
@@ -643,6 +925,8 @@ async fn every_session_becoming_visible_announces_its_own_skills() {
         }),
         open: std::sync::Arc::new(|_| Err("not driven".to_string())),
         extensions: Default::default(),
+        world: crate::tests::plain_world(),
+        auth_path: None,
     };
     let mut handle = SessionHost::spawn(session, Vec::new(), wiring, data);
     let boot = boot_id(&handle);
@@ -694,6 +978,8 @@ async fn new_session_runs_a_second_stream_and_both_route_by_id() {
         }),
         open: std::sync::Arc::new(|_| Err("not driven".to_string())),
         extensions: Default::default(),
+        world: crate::tests::plain_world(),
+        auth_path: None,
     };
     let mut handle = SessionHost::spawn(session, Vec::new(), wiring, data);
     let boot = boot_id(&handle);
@@ -712,7 +998,7 @@ async fn new_session_runs_a_second_stream_and_both_route_by_id() {
         SessionEvent::SessionOpened { id, model, .. } => {
             assert_eq!(
                 model,
-                tabit_protocol::ModelSelection::new("p", "m"),
+                Some(tabit_protocol::ModelSelection::new("p", "m")),
                 "the frame carries the new session's selection"
             );
             id
@@ -804,6 +1090,8 @@ async fn open_session_loads_a_stored_session_and_replays_it() {
                 .map_err(|error| error.to_string())
         }),
         extensions: Default::default(),
+        world: crate::tests::plain_world(),
+        auth_path: None,
     };
     let mut handle = SessionHost::spawn(boot_session, Vec::new(), wiring, data);
     let boot = boot_id(&handle);
@@ -843,6 +1131,14 @@ async fn open_session_loads_a_stored_session_and_replays_it() {
             .await
             .expect("the pass keeps producing events")
             .expect("the stream stays open through the pass");
+        // The boot's backend-level catalogs may still be draining
+        // (they are not the pass); the pass frames are stamped.
+        if matches!(
+            frame.event,
+            SessionEvent::ModelsAvailable { .. } | SessionEvent::ProvidersAvailable { .. }
+        ) {
+            continue;
+        }
         assert_eq!(
             frame.stream.as_ref().map(StreamId::as_str),
             Some(stored_id.as_str()),
@@ -960,6 +1256,8 @@ async fn open_session_emits_its_model_notes_ahead_of_the_replay() {
                 .map_err(|error| error.to_string())
         }),
         extensions: Default::default(),
+        world: crate::tests::plain_world(),
+        auth_path: None,
     };
     let mut handle = SessionHost::spawn(boot_session, Vec::new(), wiring, data);
     boot_id(&handle);
@@ -1054,10 +1352,13 @@ async fn a_replay_request_streams_the_pass_onto_the_event_channel() {
             .await
             .expect("the worker answers a replay request");
         match frame.event {
-            // The boot's announcement and the startup catalog precede
+            // The boot's announcement and the startup catalogs precede
             // the pass; session-level announcements are not pass
             // content.
-            SessionEvent::SessionOpened { .. } | SessionEvent::SessionsAvailable { .. } => {}
+            SessionEvent::SessionOpened { .. }
+            | SessionEvent::SessionsAvailable { .. }
+            | SessionEvent::ModelsAvailable { .. }
+            | SessionEvent::ProvidersAvailable { .. } => {}
             SessionEvent::ReplayBegin { .. } => pass.push("started".to_string()),
             SessionEvent::ReplayEnd => {
                 pass.push("done".to_string());
@@ -1130,6 +1431,8 @@ async fn a_catalog_failure_is_the_carrier_in_place_of_the_announcement() {
             create: std::sync::Arc::new(|| Err("not driven".to_string())),
             open: std::sync::Arc::new(|_| Err("not driven".to_string())),
             extensions: Default::default(),
+            world: crate::tests::plain_world(),
+            auth_path: None,
         },
     );
 
@@ -1177,6 +1480,8 @@ async fn lifecycle_failures_and_notes_ride_the_carrier() {
             }),
             open: std::sync::Arc::new(|id: &str| Err(format!("no stored session with id `{id}`"))),
             extensions: Default::default(),
+            world: crate::tests::plain_world(),
+            auth_path: None,
         },
     );
     let _boot = boot_id(&handle);
@@ -1245,6 +1550,8 @@ async fn a_created_sessions_selection_notes_follow_its_stream() {
             }),
             open: std::sync::Arc::new(|_| Err("not driven".to_string())),
             extensions: Default::default(),
+            world: crate::tests::plain_world(),
+            auth_path: None,
         },
     );
     handle.command_link().send(SessionCommand::NewSession);
@@ -1312,6 +1619,8 @@ async fn new_session_is_never_blocked_by_a_running_session() {
         }),
         open: std::sync::Arc::new(|_| Err("not driven".to_string())),
         extensions: Default::default(),
+        world: crate::tests::plain_world(),
+        auth_path: None,
     };
     let mut handle = SessionHost::spawn(session, Vec::new(), wiring, data);
     let boot = boot_id(&handle);
@@ -1477,6 +1786,8 @@ async fn frontend_death_aborts_every_sessions_run() {
         }),
         open: std::sync::Arc::new(|_| Err("not driven".to_string())),
         extensions: Default::default(),
+        world: crate::tests::plain_world(),
+        auth_path: None,
     };
     let mut handle = SessionHost::spawn(session, Vec::new(), wiring, data);
     let boot = boot_id(&handle);
@@ -2161,6 +2472,103 @@ async fn a_mid_run_model_switch_lands_at_receive_under_the_run() {
         last_model(&handle, &store),
         Some(("q".to_string(), "m2".to_string(), None)),
         "durable at receive — before the run even finished"
+    );
+    std::fs::remove_dir_all(store.dir()).ok();
+}
+
+#[tokio::test]
+async fn a_mid_run_switch_bills_every_sink_the_bound_models_one_number() {
+    // The one-number law inside the divergence window: the `model`
+    // command lands mid-run (the slow tool is executing), so the
+    // register — and the file's model_change record — move to q/m2
+    // BEFORE the run's turns commit. The run bound p/m at open, and
+    // the spend point computes from that bound selection, once per
+    // call: the emitted completion_call events, the live ledger, and
+    // the durable entries all carry the SAME dollars for the BOUND
+    // model. (Replay sums those recorded dollars but attributes the
+    // windowed turns to the NEW model — the log records no producing
+    // selection; that residual is parked in ROADMAP's usage-billing
+    // section.)
+    let store = temp_store("endpoint-model-midrun-billing");
+    let factory = Factory::new(vec![tool_turn("t1", "slow"), text_turn("after")]);
+    let session = factory
+        .clone()
+        .into_builder(store.clone())
+        .dynamic_tool(slow_tool())
+        .create("C:/w")
+        .expect("session");
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store), plain_data());
+    let id = boot_id(&handle);
+
+    handle.message(&id, "go");
+    let mut frames = Vec::new();
+    let mut sent = false;
+    while let Some(frame) = handle.next_event().await {
+        if matches!(frame.event, SessionEvent::ToolCall { .. }) && !sent {
+            sent = true;
+            handle.model(&id, ModelSelection::new("q", "m2"));
+        }
+        let done = terminal(&frame.event);
+        frames.push(frame);
+        if done {
+            break;
+        }
+    }
+    frames.extend(drain(&mut handle).await);
+
+    // p/m's card is $2/M in, $4/M out: the tool turn (120+5) is
+    // $0.00026, the final turn (100+10) is $0.00024. q/m2's card
+    // prices both differently — any window leak shows.
+    const TURN_ONE: f64 = 0.00026;
+    const TURN_TWO: f64 = 0.00024;
+    let event_costs: Vec<Option<f64>> = frames
+        .iter()
+        .filter_map(|frame| match &frame.event {
+            SessionEvent::CompletionCall { cost, .. } => Some(*cost),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(event_costs.len(), 2, "one completion_call per turn");
+    for (event_cost, expected) in event_costs.iter().zip([TURN_ONE, TURN_TWO]) {
+        assert!(
+            (event_cost.expect("billed") - expected).abs() < 1e-12,
+            "the completion_call event bills the bound model's card"
+        );
+    }
+
+    // The live ledger: one row, the BOUND model, the same dollars.
+    let stats = handle.closing_stats().expect("the host wound down");
+    assert_eq!(stats.per_model.len(), 1, "only the bound model served");
+    assert_eq!(stats.per_model[0].key(), "p/m");
+    assert!(
+        (stats.per_model[0].cost.expect("billed") - (TURN_ONE + TURN_TWO)).abs() < 1e-12,
+        "the ledger's add is the same computed value"
+    );
+    assert!((stats.total_cost - (TURN_ONE + TURN_TWO)).abs() < 1e-12);
+
+    // The durable entries: the same dollars, verbatim — the log
+    // records what the spend point computed; it never computes.
+    let parsed = store
+        .open_path(std::path::PathBuf::from(&handle.info().session_path).as_path())
+        .expect("reload");
+    let entry_costs: Vec<Option<f64>> = parsed
+        .tree
+        .path_to_head()
+        .iter()
+        .filter_map(|entry| match &entry.kind {
+            crate::EntryKind::AssistantMessage { cost, .. } => Some(*cost),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        entry_costs, event_costs,
+        "the entries carry exactly the event's dollars — one computed value \
+         (identical bits through the file's shortest-roundtrip JSON)"
+    );
+    // Replay sums the recorded dollars — never recomputes — so the
+    // totals agree even inside the attribution window.
+    assert!(
+        (parsed.stats.total_cost().expect("the file bills") - (TURN_ONE + TURN_TWO)).abs() < 1e-12
     );
     std::fs::remove_dir_all(store.dir()).ok();
 }
@@ -3339,7 +3747,6 @@ async fn the_idle_door_compacts_after_a_large_run_and_the_file_holds_the_entry()
     let messages = crate::ContextManager::from_tree(
         parsed.tree,
         Arc::new(std::sync::Mutex::new(tabit_log::NullBuffer)),
-        tabit_log::uncosted(),
     )
     .messages();
     assert!(matches!(
@@ -3490,7 +3897,6 @@ async fn an_overflow_failure_is_intercepted_compacted_and_the_run_retried() {
     let messages = crate::ContextManager::from_tree(
         parsed.tree,
         Arc::new(std::sync::Mutex::new(tabit_log::NullBuffer)),
-        tabit_log::uncosted(),
     )
     .messages();
     assert!(matches!(
@@ -3576,7 +3982,15 @@ async fn the_stream_is_live_from_the_mount_in_arrival_order() {
     let tags: Vec<&str> = frames.iter().map(|f| f.event.tag()).collect();
     assert_eq!(
         tags,
-        vec!["error", "session_opened", "sessions_available"],
+        // (the model/provider catalogs are the v21/v22 unconditional
+        // boot emissions)
+        vec![
+            "error",
+            "session_opened",
+            "sessions_available",
+            "models_available",
+            "providers_available"
+        ],
         "live from the mount, in arrival order — no buffer, no drop"
     );
     std::fs::remove_dir_all(store.dir()).ok();
@@ -3674,6 +4088,8 @@ async fn an_opened_session_announces_its_own_skills() {
                 .map_err(|error| error.to_string())
         }),
         extensions: Default::default(),
+        world: crate::tests::plain_world(),
+        auth_path: None,
     };
     let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store), data);
     let boot = boot_id(&handle);
@@ -3922,6 +4338,297 @@ async fn a_tagged_message_expands_at_the_door() {
     let _ = std::fs::remove_dir_all(&cwd);
 }
 
+/// A small PNG planted under a temp dir, returning its path string as
+/// the tag carries it.
+fn plant_png(dir: &std::path::Path, name: &str) -> (String, Vec<u8>) {
+    let img = image::RgbImage::from_pixel(8, 6, image::Rgb([200, 30, 30]));
+    let mut bytes = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgb8(img)
+        .write_to(&mut bytes, image::ImageFormat::Png)
+        .expect("encode png");
+    let bytes = bytes.into_inner();
+    let path = dir.join(name);
+    std::fs::write(&path, &bytes).expect("plant the image");
+    (path.display().to_string(), bytes)
+}
+
+/// Receive-time attachment expansion (FRONTEND.md's tag), through the
+/// real door: a message carrying `<attachment path="..."/>` expands at
+/// submit — the wire stays text (the `user_message` event carries the
+/// message text, tag as anchor, plus the basename label; image bytes
+/// never cross), while the log's `user_message` entry and the model's
+/// request carry the multi-part message.
+#[tokio::test]
+async fn an_attachment_expands_at_the_door_and_the_wire_stays_text() {
+    let store = temp_store("endpoint-attachment");
+    let cwd = std::env::temp_dir().join(format!("tabit-attach-door-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&cwd);
+    std::fs::create_dir_all(&cwd).expect("cwd");
+    let (image_path, png) = plant_png(&cwd, "shot.png");
+
+    let factory = Factory::new(vec![text_turn("done")]);
+    let session = factory
+        .clone()
+        .into_builder(store.clone())
+        .create(&cwd.display().to_string())
+        .expect("session");
+    let log_path = session.path().expect("file-backed").to_path_buf();
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store), plain_data());
+    let id = boot_id(&handle);
+
+    let text = format!("what is in <attachment path=\"{image_path}\"/>?");
+    handle.message(&id, &text);
+    let frames = drain(&mut handle).await;
+    assert_eq!(finished_outputs(&frames), vec!["done".to_string()]);
+
+    // The wire is text-only: the event text is the message verbatim
+    // (the tag the anchor) plus the basename label — never the bytes.
+    let texts = user_texts(&frames);
+    assert_eq!(texts.len(), 1, "one user message");
+    assert_eq!(
+        texts[0],
+        format!("{text}\n\nshot.png"),
+        "the event text joins the message and the label"
+    );
+    use base64::Engine as _;
+    let b64 = base64::engine::general_purpose::STANDARD.encode(&png);
+    assert!(!texts[0].contains(&b64), "image bytes never cross the wire");
+
+    // The model's request carried the image part (the door, not the
+    // engine, expanded — the request is the folded conversation).
+    let requests = factory.requests();
+    let request = requests.last().expect("one model call");
+    let serialized = serde_json::to_string(&request.chat_history).expect("serialize");
+    assert!(
+        serialized.contains(&b64),
+        "the image part rode the model's request"
+    );
+
+    // The log's user_message entry is the expanded multi-part message:
+    // text (tag intact), the basename label, the image.
+    let parsed = crate::parser::parse_file(&log_path).expect("the file reloads");
+    let chain = parsed.tree.path_to_head();
+    let entry = chain
+        .iter()
+        .find_map(|entry| match &entry.kind {
+            crate::EntryKind::UserMessage { message } => Some(message),
+            _ => None,
+        })
+        .expect("the user message entry");
+    let tabit_providers::completion::Message::User { content } = entry else {
+        panic!("a user message");
+    };
+    assert_eq!(content.len(), 3, "text, label, image");
+    let last = content.iter().last().expect("the image part");
+    assert!(
+        matches!(last, tabit_providers::message::UserContent::Image(image)
+            if image.media_type == Some(tabit_providers::message::ImageMediaType::PNG))
+    );
+    let _ = std::fs::remove_dir_all(&cwd);
+}
+
+/// The door's composition order (the ruling): skills first — the body
+/// appends to the text — then attachment parts over the expanded text,
+/// so the label lands after the skill block in the joined event text.
+#[tokio::test]
+async fn skill_and_attachment_tags_compose_skills_first() {
+    let store = temp_store("endpoint-skill-attachment");
+    let cwd = std::env::temp_dir().join(format!("tabit-compose-door-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&cwd);
+    std::fs::create_dir_all(cwd.join(".tabit/skills/commit")).expect("skill dir");
+    std::fs::write(
+        cwd.join(".tabit/skills/commit/SKILL.md"),
+        "---\nname: commit\ndescription: Make a commit.\n---\nCOMMIT-BODY-MARKER\n",
+    )
+    .expect("SKILL.md");
+    let (image_path, _png) = plant_png(&cwd, "attach.png");
+
+    let skills = std::sync::Arc::new(crate::skills::discover_with_home(None, &cwd));
+    let factory = Factory::new(vec![text_turn("done")]);
+    let session = factory
+        .clone()
+        .into_builder(store.clone())
+        .skills(skills)
+        .create(&cwd.display().to_string())
+        .expect("session");
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store), plain_data());
+    let id = boot_id(&handle);
+
+    let text = format!("run <skill name=\"commit\"/> with <attachment path=\"{image_path}\"/>");
+    handle.message(&id, &text);
+    let frames = drain(&mut handle).await;
+    assert_eq!(finished_outputs(&frames), vec!["done".to_string()]);
+
+    let texts = user_texts(&frames);
+    assert_eq!(texts.len(), 1);
+    let body_at = texts[0].find("COMMIT-BODY-MARKER").expect("skill body");
+    // The tag itself names the file (the anchor); the label is the
+    // newline-separated basename after the text.
+    let label_at = texts[0].find("\n\nattach.png").expect("the label");
+    assert!(
+        body_at < label_at,
+        "the skill block lands in the text, the attachment label after it: {}",
+        texts[0]
+    );
+    assert!(
+        texts[0].contains(&text),
+        "the message is verbatim, both tags the anchors"
+    );
+    let _ = std::fs::remove_dir_all(&cwd);
+}
+
+/// The first-part law at the wire (FRONTEND.md's `message_queued` and
+/// `messages_discarded` rows): the queued acknowledgment and the
+/// abort's discard both hand back the AUTHORED text — part[0], tags
+/// intact, no skill body, no attachment label — and a salvaged draft
+/// re-sent expands fresh, so history records the expansion exactly
+/// once. Live and replay `user_message` events render the full joined
+/// text; the §9 ledger closes across the roundtrip.
+#[tokio::test]
+async fn ack_and_discard_carry_the_authored_text_and_a_resend_expands_once() {
+    let store = temp_store("endpoint-authored");
+    let cwd = std::env::temp_dir().join(format!("tabit-authored-door-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&cwd);
+    std::fs::create_dir_all(cwd.join(".tabit/skills/commit")).expect("skill dir");
+    std::fs::write(
+        cwd.join(".tabit/skills/commit/SKILL.md"),
+        "---\nname: commit\ndescription: Make a commit.\n---\nCOMMIT-BODY-MARKER\n",
+    )
+    .expect("SKILL.md");
+    let (image_path, _png) = plant_png(&cwd, "shot.png");
+    let skills = std::sync::Arc::new(crate::skills::discover_with_home(None, &cwd));
+
+    let factory = Factory::new(vec![tool_turn("t1", "slow"), text_turn("done")]);
+    let session = factory
+        .clone()
+        .into_builder(store.clone())
+        .skills(skills)
+        .dynamic_tool(slow_tool())
+        .create(&cwd.display().to_string())
+        .expect("session");
+    let log_path = session.path().expect("file-backed").to_path_buf();
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store), plain_data());
+    let id = boot_id(&handle);
+
+    let authored =
+        format!("finish <skill name=\"commit\"/> with <attachment path=\"{image_path}\"/>");
+    handle.message(&id, "run the tool");
+    // While the slow tool runs: submit the tagged message (a queued
+    // steer), then abort — the discard hands the draft back.
+    let mut ack: Option<(String, String)> = None;
+    let mut draft: Option<(String, String)> = None;
+    let mut sent = false;
+    loop {
+        let frame = tokio::time::timeout(Duration::from_secs(5), handle.next_event())
+            .await
+            .expect("the abort terminal arrives")
+            .expect("the stream stays open");
+        match &frame.event {
+            SessionEvent::ToolCall { .. } if !sent => {
+                sent = true;
+                handle.message(&id, &authored);
+                handle.abort(&id);
+            }
+            SessionEvent::MessageQueued { id, text } => ack = Some((id.clone(), text.clone())),
+            SessionEvent::MessagesDiscarded { messages } => {
+                assert_eq!(messages.len(), 1, "the one queued steer");
+                draft = Some((messages[0].id.clone(), messages[0].text.clone()));
+            }
+            SessionEvent::RunAborted { .. } => break,
+            _ => {}
+        }
+    }
+    // Both carried the AUTHORED text: tags intact, no skill body, no
+    // attachment label — the expansion never reaches the wire here.
+    let (ack_id, ack_text) = ack.expect("the mid-run submit was acknowledged");
+    let (discarded_id, draft) = draft.expect("the abort discarded the queue");
+    assert_eq!(ack_text, authored, "message_queued hands back part[0]");
+    assert_eq!(
+        draft, authored,
+        "the salvaged draft carries no expansion — re-sending re-expands fresh"
+    );
+    assert_eq!(
+        ack_id, discarded_id,
+        "the §9 ledger: the queued id closed exactly once"
+    );
+
+    // Re-send the salvaged draft (the frontend's salvage flow): it
+    // expands at the door, fresh, and runs to completion.
+    handle.message(&id, &draft);
+    let mut frames = Vec::new();
+    collect_until(&mut handle, &mut frames, |event| {
+        matches!(event, SessionEvent::RunFinished { .. })
+    })
+    .await;
+    assert_eq!(finished_outputs(&frames), vec!["done".to_string()]);
+    assert!(
+        !frames
+            .iter()
+            .any(|frame| matches!(frame.event, SessionEvent::MessageQueued { .. })),
+        "an idle send never queues — user_message is the acknowledgment"
+    );
+    let texts = user_texts(&frames);
+    assert_eq!(texts.len(), 1, "one user message in the re-run");
+    assert!(
+        texts[0].starts_with(&authored),
+        "the authored text is part[0], tags the anchors: {}",
+        texts[0]
+    );
+    assert_eq!(
+        texts[0].matches("COMMIT-BODY-MARKER").count(),
+        1,
+        "the live user_message renders the expansion exactly once: {}",
+        texts[0]
+    );
+    assert!(
+        texts[0].contains("\n\nshot.png"),
+        "the fold-owned separator joins the attachment label: {}",
+        texts[0]
+    );
+
+    // Replay renders the same full joined text (the one constructor).
+    handle.replay(&id);
+    let mut pass = Vec::new();
+    collect_until(&mut handle, &mut pass, |event| {
+        matches!(event, SessionEvent::ReplayEnd)
+    })
+    .await;
+    let replayed = user_texts(&pass);
+    assert_eq!(
+        replayed.last(),
+        Some(&texts[0]),
+        "replay's user_message is the live one, verbatim"
+    );
+
+    handle.close_commands();
+    while handle.next_event().await.is_some() {}
+
+    // History records the expansion exactly once: the discarded draft
+    // was never logged, the re-send's expansion is the only one.
+    let branch = file_branch(&store, &log_path.display().to_string());
+    let user_entries: Vec<String> = branch
+        .iter()
+        .filter_map(|entry| match &entry.kind {
+            crate::EntryKind::UserMessage { message } => Some(crate::session::user_text(message)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        user_entries.len(),
+        2,
+        "the aborted run's opener and the re-sent draft: {user_entries:?}"
+    );
+    assert_eq!(
+        user_entries
+            .iter()
+            .map(|text| text.matches("COMMIT-BODY-MARKER").count())
+            .sum::<usize>(),
+        1,
+        "the expansion landed in history exactly once: {user_entries:?}"
+    );
+    let _ = std::fs::remove_dir_all(&cwd);
+}
+
 /// A mid-roundtrip checkout target resolves forward (the 2026-09-26
 /// ruling, replacing the old loud refusal): checking out to the tool
 /// turn's assistant entry — the announced turn id, mid-batch by
@@ -3991,4 +4698,797 @@ async fn a_midroundtrip_checkout_resolves_forward_to_the_batches_last_result() {
         .filter(|frame| matches!(&frame.event, SessionEvent::TurnCommitted { .. }))
         .count();
     assert_eq!(done_turns, 1, "only the tool turn precedes the landing");
+}
+
+/// A session built selection-less (`None` — the zero-config boot
+/// shape) over the given config, with the registry's default factory
+/// (real builds — an unusable provider fails at run open, the honest
+/// shape).
+fn selectionless_session(store: SessionStore, config: &str) -> crate::Session {
+    crate::SessionBuilder::new(
+        store,
+        std::sync::Arc::new(
+            tabit_config::TabitConfig::from_toml_str(
+                config,
+                std::path::Path::new("providers.toml"),
+            )
+            .expect("config"),
+        ),
+        std::sync::Arc::new(tabit_config::AuthConfig::default()),
+        None,
+    )
+    .expect("builder")
+    .create("C:/w")
+    .expect("session")
+}
+
+#[tokio::test]
+async fn a_selection_less_boot_announces_null_and_fails_runs_at_open() {
+    // The zero-config boot (the first-run ruling reversal): nothing
+    // usable → the session opens selection-less. `session_opened`
+    // carries `model: null`, the teaching note rides the startup
+    // notes as `error { kind: model }`, no `model_changed` is ever
+    // announced (not ahead of a replay pass either), and the first
+    // message's run fails at open with `kind: "model"`.
+    let store = temp_store("endpoint-selectionless");
+    let session = selectionless_session(store.clone(), "");
+    let mut handle = SessionHost::spawn(
+        session,
+        vec!["no usable model at this backend — create ~/.tabit/providers.toml".to_string()],
+        plain_wiring(&store),
+        plain_data(),
+    );
+    let id = boot_id(&handle);
+    assert_eq!(handle.info().model, None, "selection-less at attach");
+
+    handle.message(&id, "hi");
+    // A replay request proves the pass announces no register either.
+    handle.replay(&id);
+    let frames = drain(&mut handle).await;
+
+    match frames.first().map(|f| &f.event) {
+        Some(SessionEvent::SessionOpened { model, .. }) => {
+            assert_eq!(*model, None, "the null selection crosses")
+        }
+        other => panic!("session_opened first, got {other:?}"),
+    }
+    match frames.get(1).map(|f| &f.event) {
+        Some(SessionEvent::Error { kind, message, .. }) => {
+            assert_eq!(kind, tabit_protocol::ErrorKind::MODEL);
+            assert!(message.contains("no usable model"), "{message}");
+        }
+        other => panic!("the teaching note follows session_opened, got {other:?}"),
+    }
+    assert!(
+        !frames
+            .iter()
+            .any(|f| matches!(f.event, SessionEvent::ModelChanged { .. })),
+        "a selection-less session never announces model_changed"
+    );
+    assert!(
+        frames
+            .iter()
+            .any(|f| matches!(f.event, SessionEvent::ReplayBegin { .. })),
+        "the pass still served"
+    );
+    let (kind, message) = frames
+        .iter()
+        .find_map(|f| match &f.event {
+            SessionEvent::RunFailed { kind, message, .. } => Some((kind.clone(), message.clone())),
+            _ => None,
+        })
+        .expect("the first message's run fails");
+    assert_eq!(kind, tabit_protocol::RunFailedKind::MODEL);
+    assert!(message.contains("no model selected"), "{message}");
+    // The no-config half of the teaching split (FRONTEND.md §3.1):
+    // `login` has nothing to validate against — the fix is the config
+    // file and a restart.
+    assert!(
+        message.contains("providers.toml") && message.contains("restart"),
+        "the failure teaches: {message}"
+    );
+    std::fs::remove_dir_all(store.dir()).ok();
+}
+
+#[tokio::test]
+async fn a_model_command_lands_the_first_selection_on_a_selection_less_session() {
+    // The provider is configured but unusable (no key, not declared
+    // keyless): the `model` command validates existence only — the
+    // register lands and `model_changed` announces; the session is
+    // no longer selection-less. The run then fails at open on the
+    // build failure (the missing key), still `kind: "model"`.
+    let store = temp_store("endpoint-lands");
+    let session = selectionless_session(
+        store.clone(),
+        r#"
+[providers.locked]
+base_url = "http://127.0.0.1:1/v1"
+api = "openai-completions"
+
+[[providers.locked.models]]
+id = "m"
+"#,
+    );
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store), plain_data());
+    let id = boot_id(&handle);
+
+    handle.model(&id, ModelSelection::new("locked", "m"));
+    let changed = until_event(&mut handle, |event| {
+        matches!(event, SessionEvent::ModelChanged { .. })
+    })
+    .await;
+    assert!(
+        matches!(&changed.event, SessionEvent::ModelChanged { provider, model, .. } if provider == "locked" && model == "m"),
+        "the first selection announces: {:?}",
+        changed.event
+    );
+
+    // An unknown ref still errors at receive and moves nothing.
+    handle.model(&id, ModelSelection::new("ghost", "m"));
+    handle.message(&id, "hi");
+    let frames = drain(&mut handle).await;
+    assert!(
+        frames.iter().any(|f| matches!(&f.event,
+            SessionEvent::Error { kind, message, .. }
+                if kind == tabit_protocol::ErrorKind::MODEL && message.contains("ghost"))),
+        "the unknown ref is the immediate model error"
+    );
+    let failure = frames
+        .iter()
+        .find_map(|f| match &f.event {
+            SessionEvent::RunFailed { kind, message, .. } => Some((kind.clone(), message.clone())),
+            _ => None,
+        })
+        .expect("the run fails at open");
+    assert_eq!(failure.0, tabit_protocol::RunFailedKind::MODEL);
+    assert!(
+        failure.1.contains("requires a key"),
+        "the build failure, not a selection-less one: {}",
+        failure.1
+    );
+    std::fs::remove_dir_all(store.dir()).ok();
+}
+
+// --- login/logout: the built-in auth commands and the world refresh ---
+
+/// The login/logout test world: `local` (keyless) plus `locked` (no
+/// key, not keyless — the login widget's target) over an auth file in
+/// the test's temp dir. The boot session is scripted (a CUSTOM
+/// factory — the world refresh skips those; the world-swap semantics
+/// are pinned at session/registry level in `tests.rs`), so these
+/// tests cover command/announcement semantics only.
+fn auth_world(auth_path: &std::path::Path) -> SessionHostData {
+    let registry = crate::ModelRegistry::new(
+        std::sync::Arc::new(
+            tabit_config::TabitConfig::from_toml_str(
+                r#"
+[providers.local]
+base_url = "http://127.0.0.1:1234/v1"
+api = "openai-completions"
+keyless = true
+
+[[providers.local.models]]
+id = "m"
+
+[providers.locked]
+base_url = "https://locked.example/v1"
+api = "openai-completions"
+
+[[providers.locked.models]]
+id = "l1"
+"#,
+                std::path::Path::new("providers.toml"),
+            )
+            .expect("config"),
+        ),
+        std::sync::Arc::new(tabit_config::AuthConfig::default()),
+    );
+    SessionHostData {
+        world: crate::registry::current_world(registry),
+        auth_path: Some(auth_path.to_path_buf()),
+        ..plain_data()
+    }
+}
+
+/// The catalog announcements among `frames`: models catalogs as
+/// usable ids, provider catalogs as (id, auth) pairs — the pair is
+/// one re-announcement act, so the two vectors walk in lockstep.
+type CatalogPair = (
+    Vec<Vec<String>>,
+    Vec<Vec<(String, tabit_protocol::ProviderAuth)>>,
+);
+
+fn catalogs(frames: &[EventFrame]) -> CatalogPair {
+    let models = frames
+        .iter()
+        .filter_map(|frame| match &frame.event {
+            SessionEvent::ModelsAvailable { providers } => {
+                assert_eq!(frame.stream, None, "backend-level: no stream stamp");
+                Some(providers.iter().map(|p| p.id.clone()).collect())
+            }
+            _ => None,
+        })
+        .collect();
+    let providers = frames
+        .iter()
+        .filter_map(|frame| match &frame.event {
+            SessionEvent::ProvidersAvailable { providers } => {
+                assert_eq!(frame.stream, None, "backend-level: no stream stamp");
+                Some(providers.iter().map(|p| (p.id.clone(), p.auth)).collect())
+            }
+            _ => None,
+        })
+        .collect();
+    (models, providers)
+}
+
+#[tokio::test]
+async fn login_stores_the_key_and_re_announces_the_catalog() {
+    let store = temp_store("endpoint-login");
+    let auth_path = store.dir().join("auth.toml");
+    let session = Factory::new(vec![text_turn("hi")])
+        .into_builder(store.clone())
+        .create("C:/w")
+        .expect("session");
+    let mut handle = SessionHost::spawn(
+        session,
+        Vec::new(),
+        plain_wiring(&store),
+        auth_world(&auth_path),
+    );
+    let id = boot_id(&handle);
+
+    handle.command_link().send(SessionCommand::Login {
+        provider: "locked".to_string(),
+        api_key: tabit_protocol::ApiKey("sk-secret-000".to_string()),
+    });
+    // A message afterwards, so the run's frames trail the ack.
+    handle.message(&id, "go");
+    let frames = drain(&mut handle).await;
+
+    // The boot's announcements, then the login's re-announcement (the
+    // ack — one act, both frames, last-wins fold): `locked` joins the
+    // usable catalog, and its provider row flips `none` to `stored`.
+    let (models, providers) = catalogs(&frames);
+    assert_eq!(
+        models,
+        vec![
+            vec!["local".to_string()],
+            vec!["local".to_string(), "locked".to_string()],
+        ],
+        "login re-announces with the provider usable"
+    );
+    use tabit_protocol::ProviderAuth;
+    let rows = |locked: ProviderAuth| {
+        vec![
+            ("local".to_string(), ProviderAuth::Keyless),
+            ("locked".to_string(), locked),
+        ]
+    };
+    assert_eq!(
+        providers,
+        vec![rows(ProviderAuth::None), rows(ProviderAuth::Stored)],
+        "the login/logout view re-announces in the same act"
+    );
+    // The key landed in the auth file.
+    let auth = tabit_config::AuthConfig::load(&auth_path).expect("the auth file exists");
+    assert_eq!(auth.api_key("locked"), Some("sk-secret-000"));
+    // No auth-kind error anywhere.
+    assert!(
+        !frames.iter().any(
+            |frame| matches!(&frame.event, SessionEvent::Error { kind, .. } if kind == "auth")
+        ),
+        "no auth error"
+    );
+    // The redaction pin: the key crossed the wire once and landed in
+    // auth.toml — NO frame carries it (the sweep serializes every
+    // frame exactly as the edge would).
+    for frame in &frames {
+        let line = tabit_protocol::to_wire_line(frame);
+        assert!(
+            !line.contains("sk-secret-000"),
+            "the key never enters a frame: {line}"
+        );
+    }
+    std::fs::remove_dir_all(store.dir()).ok();
+}
+
+#[tokio::test]
+async fn login_to_an_unknown_provider_errors_auth_and_changes_nothing() {
+    let store = temp_store("endpoint-login-unknown");
+    let auth_path = store.dir().join("auth.toml");
+    let session = Factory::new(vec![text_turn("hi")])
+        .into_builder(store.clone())
+        .create("C:/w")
+        .expect("session");
+    let mut handle = SessionHost::spawn(
+        session,
+        Vec::new(),
+        plain_wiring(&store),
+        auth_world(&auth_path),
+    );
+
+    handle.command_link().send(SessionCommand::Login {
+        provider: "nope".to_string(),
+        api_key: tabit_protocol::ApiKey("sk-secret-000".to_string()),
+    });
+    let frames = drain(&mut handle).await;
+
+    let errors: Vec<&str> = frames
+        .iter()
+        .filter_map(|frame| match &frame.event {
+            SessionEvent::Error { kind, message, .. } if kind == "auth" => Some(message.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(errors.len(), 1, "one auth-kind error");
+    assert!(errors[0].contains("nope"), "the message names it");
+    // The error is backend-level (unstamped), no re-announcement
+    // follows a failed login, and nothing was written.
+    let auth_error = frames
+        .iter()
+        .find(|frame| matches!(&frame.event, SessionEvent::Error { kind, .. } if kind == "auth"))
+        .expect("the auth error");
+    assert_eq!(auth_error.stream, None, "backend-level");
+    let (models, providers) = catalogs(&frames);
+    assert_eq!(
+        models.len(),
+        1,
+        "only the boot's announcement — a failed login does not re-announce"
+    );
+    assert_eq!(providers.len(), 1, "the boot's provider catalog only");
+    assert!(!auth_path.exists(), "nothing was written");
+    std::fs::remove_dir_all(store.dir()).ok();
+}
+
+#[tokio::test]
+async fn logout_drops_the_provider_to_none_and_is_idempotent() {
+    let store = temp_store("endpoint-logout");
+    let auth_path = store.dir().join("auth.toml");
+    let session = Factory::new(vec![text_turn("hi")])
+        .into_builder(store.clone())
+        .create("C:/w")
+        .expect("session");
+    let mut handle = SessionHost::spawn(
+        session,
+        Vec::new(),
+        plain_wiring(&store),
+        auth_world(&auth_path),
+    );
+    let link = handle.command_link();
+
+    link.send(SessionCommand::Login {
+        provider: "locked".to_string(),
+        api_key: tabit_protocol::ApiKey("sk-secret-000".to_string()),
+    });
+    link.send(SessionCommand::Logout {
+        provider: "locked".to_string(),
+    });
+    // The idempotent no-op: an absent key still re-announces, never errors.
+    link.send(SessionCommand::Logout {
+        provider: "locked".to_string(),
+    });
+    let frames = drain(&mut handle).await;
+
+    let (models, providers) = catalogs(&frames);
+    assert_eq!(
+        models,
+        vec![
+            vec!["local".to_string()],
+            vec!["local".to_string(), "locked".to_string()],
+            vec!["local".to_string()],
+            vec!["local".to_string()],
+        ],
+        "login, then logout, then the idempotent logout — each acked by the catalog"
+    );
+    use tabit_protocol::ProviderAuth;
+    let rows = |locked: ProviderAuth| {
+        vec![
+            ("local".to_string(), ProviderAuth::Keyless),
+            ("locked".to_string(), locked),
+        ]
+    };
+    assert_eq!(
+        providers,
+        vec![
+            rows(ProviderAuth::None),
+            rows(ProviderAuth::Stored),
+            rows(ProviderAuth::None),
+            rows(ProviderAuth::None),
+        ],
+        "the provider row flips with each world refresh"
+    );
+    assert!(
+        !frames.iter().any(
+            |frame| matches!(&frame.event, SessionEvent::Error { kind, .. } if kind == "auth")
+        ),
+        "no auth error — logout is total"
+    );
+    let auth = tabit_config::AuthConfig::load(&auth_path).expect("the auth file exists");
+    assert_eq!(auth.api_key("locked"), None, "the key is gone");
+    std::fs::remove_dir_all(store.dir()).ok();
+}
+
+#[tokio::test]
+async fn an_in_flight_run_finishes_on_its_bound_agent_across_a_logout() {
+    // The refresh walks resident workers while a run is in flight:
+    // the run bound its agent at open, so it finishes untouched (the
+    // re-announcement lands mid-run on the same stream), and only the
+    // NEXT run open would feel the new world.
+    let store = temp_store("endpoint-logout-inflight");
+    let auth_path = store.dir().join("auth.toml");
+    std::fs::create_dir_all(store.dir()).expect("the test dir");
+    std::fs::write(&auth_path, "[providers.p]\napi_key = \"sk-x\"\n").expect("seed auth");
+    let session = Factory::new(vec![
+        tool_turn("t1", "slow"),
+        text_turn("finished regardless"),
+    ])
+    .into_builder(store.clone())
+    .dynamic_tool(slow_tool())
+    .create("C:/w")
+    .expect("session");
+    let world = crate::registry::current_world(crate::ModelRegistry::new(
+        crate::tests::test_config(),
+        std::sync::Arc::new(tabit_config::AuthConfig::load(&auth_path).expect("auth")),
+    ));
+    let mut handle = SessionHost::spawn(
+        session,
+        Vec::new(),
+        plain_wiring(&store),
+        SessionHostData {
+            world,
+            auth_path: Some(auth_path.clone()),
+            ..plain_data()
+        },
+    );
+    let id = boot_id(&handle);
+
+    handle.message(&id, "run the tool");
+    let mut logged_out = false;
+    let mut frames = Vec::new();
+    while let Some(frame) = handle.next_event().await {
+        if !logged_out && matches!(frame.event, SessionEvent::ToolCall { .. }) {
+            logged_out = true;
+            handle.command_link().send(SessionCommand::Logout {
+                provider: "p".to_string(),
+            });
+        }
+        if terminal(&frame.event) {
+            handle.close_commands();
+        }
+        frames.push(frame);
+    }
+    assert!(logged_out, "the logout landed mid-run");
+    assert_eq!(
+        finished_outputs(&frames),
+        vec!["finished regardless"],
+        "the in-flight run finished on the agent it bound at open"
+    );
+    // The refresh's ack arrived on the stream mid-run (after the
+    // tool call whose sighting triggered the logout).
+    let tool_call_at = frames
+        .iter()
+        .position(|f| matches!(&f.event, SessionEvent::ToolCall { .. }))
+        .expect("the tool call");
+    let reannounced_at = frames
+        .iter()
+        .rposition(|f| matches!(&f.event, SessionEvent::ModelsAvailable { .. }))
+        .expect("the re-announcement");
+    assert!(
+        reannounced_at > tool_call_at,
+        "the re-announcement landed mid-run"
+    );
+    std::fs::remove_dir_all(store.dir()).ok();
+}
+
+#[tokio::test]
+async fn a_login_before_attach_parks_and_serves_at_attach() {
+    // The prepared-supervisor law holds for the auth pair too: a login
+    // arriving before the boot's data exists parks on the door and
+    // drains at attach — the write lands and the re-announcement
+    // follows the boot's own catalog.
+    let store = temp_store("endpoint-login-parked");
+    let auth_path = store.dir().join("auth.toml");
+    let session = Factory::new(vec![text_turn("hi")])
+        .into_builder(store.clone())
+        .create("C:/w")
+        .expect("session");
+    let wiring = plain_wiring(&store);
+    let node = wiring.node.clone();
+    let frontend = crate::endpoint::mount_frontend(&node);
+    let mount = SessionHost::mount(wiring, frontend);
+
+    // The early arrival: no session exists yet, the door is unarmed.
+    let arrival = crate::Channel::local("early", |_| {}, |_| {});
+    node.intake(
+        &arrival,
+        tabit_wire::node::Inbound::Command(SessionCommand::Login {
+            provider: "locked".to_string(),
+            api_key: tabit_protocol::ApiKey("sk-parked".to_string()),
+        }),
+    );
+    assert!(
+        !auth_path.exists(),
+        "parked — nothing served before the attach"
+    );
+
+    let mut handle = mount.attach(session, Vec::new(), auth_world(&auth_path));
+    let frames = drain(&mut handle).await;
+    let (models, providers) = catalogs(&frames);
+    assert_eq!(
+        models,
+        vec![
+            vec!["local".to_string()],
+            vec!["local".to_string(), "locked".to_string()],
+        ],
+        "the parked login drains at attach: the boot's catalog, then its re-announcement"
+    );
+    assert_eq!(
+        providers.len(),
+        2,
+        "the provider catalog rides the same act"
+    );
+    let auth = tabit_config::AuthConfig::load(&auth_path).expect("the auth file exists");
+    assert_eq!(auth.api_key("locked"), Some("sk-parked"));
+    std::fs::remove_dir_all(store.dir()).ok();
+}
+
+#[tokio::test]
+async fn a_login_without_a_resolvable_auth_path_errors_auth() {
+    // No $TABIT_AUTH, no home — the write has nowhere to land: a
+    // graceful, named auth error, nothing written, no re-announcement.
+    let store = temp_store("endpoint-login-nopath");
+    let session = Factory::new(vec![text_turn("hi")])
+        .into_builder(store.clone())
+        .create("C:/w")
+        .expect("session");
+    // The world knows the provider (test_config's `p`); only the path
+    // is missing.
+    let data = SessionHostData {
+        world: crate::registry::current_world(crate::ModelRegistry::new(
+            crate::tests::test_config(),
+            crate::tests::test_auth(),
+        )),
+        auth_path: None,
+        ..plain_data()
+    };
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store), data);
+    handle.command_link().send(SessionCommand::Login {
+        provider: "p".to_string(),
+        api_key: tabit_protocol::ApiKey("sk-x".to_string()),
+    });
+    let frames = drain(&mut handle).await;
+    let errors: Vec<&str> = frames
+        .iter()
+        .filter_map(|frame| match &frame.event {
+            SessionEvent::Error { kind, message, .. } if kind == "auth" => Some(message.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(errors.len(), 1, "one auth-kind error");
+    assert!(
+        errors[0].contains("cannot resolve the auth file path"),
+        "{}",
+        errors[0]
+    );
+    assert_eq!(
+        catalogs(&frames).0.len(),
+        1,
+        "a failed login does not re-announce"
+    );
+    std::fs::remove_dir_all(store.dir()).ok();
+}
+
+#[tokio::test]
+async fn a_logout_leaves_an_env_keyed_provider_usable() {
+    // The re-announcement reflects reality (FRONTEND.md §5): logout
+    // removes the auth.toml entry, not the environment — a provider
+    // whose `api_key_env` still supplies a key keeps its catalog row.
+    let store = temp_store("endpoint-logout-env");
+    let auth_path = store.dir().join("auth.toml");
+    // A unique variable no other test reads (the only in-process env
+    // reader is this provider's `resolve_api_key`).
+    #[allow(unsafe_code, clippy::missing_safety_doc)]
+    unsafe {
+        std::env::set_var("TABIT_TEST_ENVFRONT_KEY", "sk-env");
+    }
+    let registry = crate::ModelRegistry::new(
+        std::sync::Arc::new(
+            tabit_config::TabitConfig::from_toml_str(
+                r#"
+[providers.envfront]
+base_url = "https://envfront.example/v1"
+api = "openai-completions"
+api_key_env = "TABIT_TEST_ENVFRONT_KEY"
+
+[[providers.envfront.models]]
+id = "m"
+"#,
+                std::path::Path::new("providers.toml"),
+            )
+            .expect("config"),
+        ),
+        std::sync::Arc::new(tabit_config::AuthConfig::default()),
+    );
+    let session = Factory::new(vec![text_turn("hi")])
+        .into_builder(store.clone())
+        .create("C:/w")
+        .expect("session");
+    let mut handle = SessionHost::spawn(
+        session,
+        Vec::new(),
+        plain_wiring(&store),
+        SessionHostData {
+            world: crate::registry::current_world(registry),
+            auth_path: Some(auth_path.clone()),
+            ..plain_data()
+        },
+    );
+    handle.command_link().send(SessionCommand::Logout {
+        provider: "envfront".to_string(),
+    });
+    let frames = drain(&mut handle).await;
+    let (models, providers) = catalogs(&frames);
+    assert_eq!(
+        models,
+        vec![vec!["envfront".to_string()], vec!["envfront".to_string()],],
+        "usable before and after: the env var still supplies the key"
+    );
+    assert_eq!(
+        providers,
+        vec![
+            vec![("envfront".to_string(), tabit_protocol::ProviderAuth::Env)],
+            vec![("envfront".to_string(), tabit_protocol::ProviderAuth::Env)],
+        ],
+        "env survives logout unchanged — the app cannot unset it"
+    );
+    assert!(
+        !frames.iter().any(
+            |frame| matches!(&frame.event, SessionEvent::Error { kind, .. } if kind == "auth")
+        ),
+        "logout is total"
+    );
+    std::fs::remove_dir_all(store.dir()).ok();
+}
+
+#[tokio::test]
+async fn login_with_an_empty_key_errors_auth_and_writes_nothing() {
+    // An empty/whitespace key is a typo, not a credential: storing it
+    // would flip the provider usable and meet the user as a 401
+    // (`kind: provider`, off the teaching path). The door rejects it
+    // as `kind: auth` — no write, no re-announcement.
+    let store = temp_store("endpoint-login-empty");
+    let auth_path = store.dir().join("auth.toml");
+    let session = Factory::new(vec![text_turn("hi")])
+        .into_builder(store.clone())
+        .create("C:/w")
+        .expect("session");
+    let mut handle = SessionHost::spawn(
+        session,
+        Vec::new(),
+        plain_wiring(&store),
+        auth_world(&auth_path),
+    );
+
+    handle.command_link().send(SessionCommand::Login {
+        provider: "locked".to_string(),
+        api_key: tabit_protocol::ApiKey("   ".to_string()),
+    });
+    let frames = drain(&mut handle).await;
+
+    let errors: Vec<&str> = frames
+        .iter()
+        .filter_map(|frame| match &frame.event {
+            SessionEvent::Error { kind, message, .. } if kind == "auth" => Some(message.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(errors.len(), 1, "one auth-kind error");
+    assert!(errors[0].contains("empty api_key"), "{}", errors[0]);
+    assert!(
+        errors[0].contains("locked"),
+        "the message names the provider"
+    );
+    assert_eq!(
+        catalogs(&frames).0.len(),
+        1,
+        "a rejected login does not re-announce"
+    );
+    assert!(!auth_path.exists(), "nothing was written");
+    std::fs::remove_dir_all(store.dir()).ok();
+}
+
+#[tokio::test]
+async fn a_login_mid_build_reaches_the_new_session_via_the_generation_recheck() {
+    // The new_session/world-refresh race: the create closure reads
+    // the world cell, and a login landing between that read and the
+    // worker insert walks the resident workers without the new
+    // session. The generation bracket catches the bump and applies
+    // the refresh to the just-built session directly. The login
+    // crosses the by-type door from INSIDE the build — the
+    // deterministic mid-build landing (handlers run synchronously on
+    // the caller's task, so the intake below IS the interleaving).
+    let store = temp_store("endpoint-new-session-race");
+    let auth_path = store.dir().join("auth.toml");
+    let session = Factory::new(vec![text_turn("boot")])
+        .into_builder(store.clone())
+        .create("C:/w")
+        .expect("session");
+    let data = auth_world(&auth_path);
+    let wiring = plain_wiring(&store);
+    let node = wiring.node.clone();
+    // The factory the build installs — world-tracked provenance, so a
+    // refresh reaching the session swaps it (a custom factory would
+    // survive; that provenance is pinned elsewhere).
+    let built_factory =
+        std::sync::Arc::new(std::sync::Mutex::new(None::<crate::session::ModelFactory>));
+    let data = SessionHostData {
+        create: std::sync::Arc::new({
+            let world = data.world.clone();
+            let node = node.clone();
+            let built_factory = built_factory.clone();
+            let create_store = store.clone();
+            move || {
+                // Read the world at call time, as the real builders do.
+                let registry = lock(&world).registry();
+                let factory = registry.factory();
+                *built_factory.lock().unwrap() = Some(factory.clone());
+                let built = Factory::new(vec![text_turn("new")])
+                    .into_builder(create_store.clone())
+                    .world_factory(factory)
+                    .create("C:/w")
+                    .map(|session| (session, Vec::new()))
+                    .map_err(|error| error.to_string());
+                // The login lands mid-build — after this session's
+                // world read, before its worker insert.
+                let arrival = crate::Channel::local("co-frontend", |_| {}, |_| {});
+                node.intake(
+                    &arrival,
+                    tabit_wire::node::Inbound::Command(SessionCommand::Login {
+                        provider: "locked".to_string(),
+                        api_key: tabit_protocol::ApiKey("sk-mid-build".to_string()),
+                    }),
+                );
+                built
+            }
+        }),
+        ..data
+    };
+    let mut handle = SessionHost::spawn(session, Vec::new(), wiring, data);
+    let boot = boot_id(&handle);
+    let link = handle.command_link();
+
+    link.send(SessionCommand::NewSession);
+    let frame = until_event(
+        &mut handle,
+        |event| matches!(event, SessionEvent::SessionOpened { id, .. } if id != &boot),
+    )
+    .await;
+    let created = match frame.event {
+        SessionEvent::SessionOpened { id, .. } => id,
+        other => panic!("expected session_opened, got {other:?}"),
+    };
+
+    // The login landed (its write is synchronous with the intake).
+    let auth = tabit_config::AuthConfig::load(&auth_path).expect("the auth file exists");
+    assert_eq!(auth.api_key("locked"), Some("sk-mid-build"));
+    // The refresh reached the just-built session: its world factory is
+    // no longer the one the build recorded. Without the generation
+    // re-check the refresh's worker walk misses this session (it was
+    // not yet registered) and the factory stays the stale one.
+    let worker = lock(&handle.workers)
+        .get(&created)
+        .cloned()
+        .expect("the new session's worker");
+    let current = lock(&worker.world).factory.clone();
+    let built = built_factory
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("the build recorded its factory");
+    assert!(
+        !std::sync::Arc::ptr_eq(&current, &built),
+        "the mid-build login's refresh reached the new session"
+    );
+    std::fs::remove_dir_all(store.dir()).ok();
 }

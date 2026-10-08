@@ -9,18 +9,18 @@ pi's minimal set. For later review and ruling; nothing here is approved work.
 
 ## Tier 1 — real gaps in pi's minimal set
 
-1. ~~**Images across the wire.**~~ **Landed 2026-09, by a better
+1. ~~**Images across the wire.**~~ **Landed 2026-10, by a better
    route than this gap assumed.** Everything below the protocol already
    worked (`UserContent::Image`, provider serialization, `read`'s image
    arm). The resolution: user-attach images ride **inline
    `<attachment path="..."/>` tags** in the text-only wire, expanded at
-   the session's message door (tags stay as anchors; labeled image parts
-   append in tag order; the log records the expanded bytes; no protocol
-   bump). Oversized images downscale through the shared
-   image-preparation pipeline (`tabit-providers::image`, per-model
-   `image_limits` in providers.toml) — which `read`'s image arm also
-   rides. Remaining sub-items: none blocking. (pi's per-model resize
-   metadata exists here as the config knob.)
+   the session's message door (tags stay as anchors; basename label +
+   image parts append in tag order; the log records the expanded bytes;
+   no protocol bump). Oversized images downscale at the door under one
+   conservative global cap (1568px long edge, 5 MB post-encode) — no
+   per-model config. Remaining sub-item: `read`'s image arm still
+   rejects over-cap images with guidance rather than downscaling (v1's
+   deliberate deferral; revisit only if it bites in practice).
 2. **OAuth credential flows.** pi ships OAuth + PKCE/device-code for
    anthropic, github-copilot, openai-codex, openrouter, xai, etc., with a
    credential store and per-request token refresh. tabit is API keys only

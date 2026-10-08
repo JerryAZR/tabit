@@ -30,10 +30,11 @@ async fn main() -> Result<(), tabit_session::SessionError> {
     )?);
     let auth = Arc::new(AuthConfig::default());
     let store = SessionStore::project_default();
-    let mut session = SessionBuilder::new(store, config, auth, ModelSelection::new("p", "m"))?
-        // Ephemeral: in memory only — nothing touches disk. Swap for
-        // `.create(cwd)` to leave a resumable session file behind.
-        .ephemeral(".")?;
+    let mut session =
+        SessionBuilder::new(store, config, auth, Some(ModelSelection::new("p", "m")))?
+            // Ephemeral: in memory only — nothing touches disk. Swap for
+            // `.create(cwd)` to leave a resumable session file behind.
+            .ephemeral(".")?;
     // The whole outer loop — every turn, every tool roundtrip —
     // awaited in one call; `run.output` is the final answer.
     let run = session.prompt("explain what you can do, briefly").await;

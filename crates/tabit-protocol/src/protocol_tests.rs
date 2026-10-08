@@ -51,6 +51,13 @@ fn commands_round_trip_with_snake_case_tags() {
             model: "m".to_string(),
             thinking_level: Some("high".to_string()),
         },
+        SessionCommand::Login {
+            provider: "anthropic".to_string(),
+            api_key: ApiKey("sk-ant-test".to_string()),
+        },
+        SessionCommand::Logout {
+            provider: "anthropic".to_string(),
+        },
     ];
     for command in &commands {
         assert_eq!(&round_trip(command), command);
@@ -511,10 +518,39 @@ fn every_command_tag_agrees_with_the_wire() {
             session: "s".to_string(),
             directives: None,
         }),
+        tag_of(crate::SessionCommand::Login {
+            provider: "p".to_string(),
+            api_key: crate::ApiKey("k".to_string()),
+        }),
+        tag_of(crate::SessionCommand::Logout {
+            provider: "p".to_string(),
+        }),
     ];
-    // Nine commands, nine distinct tags.
+    // Eleven commands, eleven distinct tags.
     let mut seen = every.to_vec();
     seen.sort_unstable();
     seen.dedup();
     assert_eq!(seen.len(), every.len(), "every command tag is distinct");
+}
+
+#[test]
+fn the_login_key_is_plain_on_the_wire_and_redacted_in_debug() {
+    // The redaction ruling: the key crosses the wire once (a plain
+    // string — a hand-rolled frontend writes it) and lands only in
+    // auth.toml; Debug — the shape any frame trace would print —
+    // never carries it.
+    let command = SessionCommand::Login {
+        provider: "anthropic".to_string(),
+        api_key: ApiKey("sk-ant-SECRET".to_string()),
+    };
+    assert_eq!(
+        serde_json::to_string(&command).expect("serialize"),
+        r#"{"type":"login","provider":"anthropic","api_key":"sk-ant-SECRET"}"#
+    );
+    let debug = format!("{command:?}");
+    assert!(
+        !debug.contains("sk-ant-SECRET"),
+        "Debug redacts the key: {debug}"
+    );
+    assert!(debug.contains("redacted"), "{debug}");
 }

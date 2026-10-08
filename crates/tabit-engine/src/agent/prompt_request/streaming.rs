@@ -153,8 +153,11 @@ pub enum MultiTurnStreamItem {
     /// already announced whole. Consumers announce each pair as a user
     /// message.
     Steer {
-        /// The drained messages as `(entry id, text)` pairs, drain order.
-        batch: Vec<(String, String)>,
+        /// The drained messages as `(entry id, message)` pairs, drain
+        /// order. The message travels whole — how a user message
+        /// renders as wire text is the consumer's fold (the session's
+        /// `user_text`), not the engine's.
+        batch: Vec<(String, Message)>,
     },
 }
 
@@ -294,6 +297,13 @@ impl StreamingPromptRequest {
     /// [`AgentRunner::turn_id_source`](crate::agent::runner::AgentRunner::turn_id_source).
     pub fn turn_id_source(mut self, source: crate::agent::runner::TurnIdSource) -> Self {
         self.runner = self.runner.turn_id_source(source);
+        self
+    }
+
+    /// Attach the run's turn-cost channel — see
+    /// [`AgentRunner::turn_cost_slot`](crate::agent::runner::AgentRunner::turn_cost_slot).
+    pub fn turn_cost_slot(mut self, slot: crate::agent::runner::TurnCostSlot) -> Self {
+        self.runner = self.runner.turn_cost_slot(slot);
         self
     }
 

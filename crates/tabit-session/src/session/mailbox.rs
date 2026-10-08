@@ -2,20 +2,12 @@
 //! enters, the handles frontends hold, and the engine's steering view.
 
 use super::Session;
-use super::wire::user_text;
+use super::wire::authored_text;
 use crate::lock::lock;
 use crate::notice::{NoticeSink, NoticeSlot};
 use tabit_engine::completion::Message;
 use tabit_protocol::SessionEvent;
 use tokio_util::sync::CancellationToken;
-
-/// The attachment door's mounted state: the session cwd and the live
-/// limits resolver (the active model's image limits, read at push so a
-/// mid-session model switch takes effect immediately).
-pub(crate) struct AttachmentDoor {
-    pub(crate) cwd: std::path::PathBuf,
-    pub(crate) limits: std::sync::Arc<dyn Fn() -> tabit_providers::image::Limits + Send + Sync>,
-}
 
 /// A queued user message with its born-early entry id:
 /// minted at accept, announced by `message_queued` when a run is live,
@@ -30,8 +22,12 @@ pub(crate) struct QueuedMessage {
 }
 
 impl QueuedMessage {
-    pub(crate) fn text(&self) -> String {
-        user_text(&self.message)
+    /// The authored text (part[0], tags intact — never the door's
+    /// expansion): what `message_queued` and `messages_discarded`
+    /// hand back. The salvaged draft carries no expansion, so
+    /// re-sending re-expands exactly once.
+    pub(crate) fn authored(&self) -> String {
+        authored_text(&self.message)
     }
 }
 
@@ -64,11 +60,6 @@ pub(crate) struct Mailbox {
     /// append their bodies here, at the one door every user message
     /// enters). Absent = no expansion, plain queuing.
     expander: std::sync::Arc<std::sync::OnceLock<std::sync::Arc<crate::skills::Skills>>>,
-    /// The attachment door (attachments.rs): the session cwd and the
-    /// live limits resolver (the active model's image limits, read at
-    /// push so a mid-session model switch takes effect immediately).
-    /// Attached at assembly; absent = no expansion (tests, bare drives).
-    attachments: std::sync::Arc<std::sync::OnceLock<AttachmentDoor>>,
     /// Wakes the resident worker when work arrives. One permit covers any
     /// number of pushes; the queue itself is the source of truth — the
     /// signal exists only so an empty queue can be waited on.
@@ -89,16 +80,6 @@ impl Mailbox {
         let _ = self.expander.set(skills);
     }
 
-    /// Attach the attachment door (the assembly): the session cwd and
-    /// the live limits resolver.
-    pub(crate) fn attach_attachments(
-        &self,
-        cwd: std::path::PathBuf,
-        limits: std::sync::Arc<dyn Fn() -> tabit_providers::image::Limits + Send + Sync>,
-    ) {
-        let _ = self.attachments.set(AttachmentDoor { cwd, limits });
-    }
-
     /// A pump began: submissions from here until [`Self::run_ended`] are
     /// acknowledged with `message_queued`.
     pub(crate) fn run_started(&self) {
@@ -111,45 +92,23 @@ impl Mailbox {
     }
 
     pub(crate) fn push(&self, message: Message) {
-        // Receive-time expansion (FRONTEND.md's tags): expand before the
-        // id is minted, so the queued acknowledgment, the steers, the
-        // events, and the log all carry the one expanded message — what
-        // the model actually sees is what replay shows. Skills first
-        // (text grows text); attachments last (text grows parts). The
-        // attachment scan reads the user's own words — a skill body
-        // documenting the tag must not attach itself. A message without
-        // resolvable tags passes through untouched (the expansion is the
-        // identity for it).
-        let user_typed = user_text(&message);
+        // Receive-time expansion (FRONTEND.md's tags), before the id is
+        // minted, so the steers, the events, and the log all carry the
+        // one expanded message — what the model actually sees is what
+        // replay shows. One door pass, the ruling's composition: skill
+        // invocation first (text parts appended after the authored
+        // text — the first-part law: expansion only appends, part[0]
+        // IS the authored text), then attachment parts over the
+        // expanded message (attachments.rs — pure file IO, no wiring).
+        // A message without resolvable tags passes through untouched
+        // (each expansion is the identity for it). The queued
+        // acknowledgment hands back the AUTHORED text (part[0], tags
+        // intact) — never the expansion.
         let message = match self.expander.get() {
-            Some(skills) => {
-                let text = user_text(&message);
-                let expanded = crate::skills::expand_invocations(&text, skills);
-                if expanded != text {
-                    Message::user(expanded)
-                } else {
-                    message
-                }
-            }
+            Some(skills) => crate::skills::expand_invocations(message, skills),
             None => message,
         };
-        let message = match self.attachments.get() {
-            Some(door) => {
-                let text = user_text(&message);
-                match crate::attachments::expand_attachments(
-                    &user_typed,
-                    &text,
-                    &door.cwd,
-                    &(door.limits)(),
-                ) {
-                    Some(parts) => Message::User {
-                        content: parts.into_content(),
-                    },
-                    None => message,
-                }
-            }
-            None => message,
-        };
+        let message = crate::attachments::expand_attachments(message);
         let queued = QueuedMessage {
             id: crate::ids::new_entry_id(),
             message,
@@ -161,7 +120,7 @@ impl Mailbox {
         // next prompt with `user_message` as its only acknowledgment.
         let live = self.live.load(std::sync::atomic::Ordering::Acquire);
         if live {
-            self.notice_queued(queued.id.clone(), queued.text());
+            self.notice_queued(queued.id.clone(), queued.authored());
         }
         lock(&self.queue).push_back(queued);
         self.work.notify_one();
@@ -169,6 +128,7 @@ impl Mailbox {
 
     /// Tell the frontend a live-run submission waits. A dead or absent
     /// channel is a no-op (the frontend is gone, or there never was one).
+    /// `text` is the authored text (part[0], tags intact).
     fn notice_queued(&self, id: String, text: String) {
         if let Some(sink) = self.notices.get() {
             sink.emit(SessionEvent::MessageQueued { id, text });
@@ -211,7 +171,9 @@ impl Mailbox {
     /// `messages_discarded` immediately, through the same notice
     /// channel `message_queued` rides (the abort site and the checkout
     /// handler both — one emitter, one timing; a dead or absent channel
-    /// is a no-op, the frontend is gone or there never was one).
+    /// is a no-op, the frontend is gone or there never was one). The
+    /// pairs carry the AUTHORED text (part[0], tags intact — the
+    /// salvaged draft holds no expansion; re-sending re-expands fresh).
     pub(crate) fn clear_noticing(&self) {
         let cleared = self.clear();
         if cleared.is_empty() {
@@ -222,7 +184,7 @@ impl Mailbox {
                 messages: cleared
                     .into_iter()
                     .map(|queued| tabit_protocol::DiscardedMessage {
-                        text: queued.text(),
+                        text: queued.authored(),
                         id: queued.id,
                     })
                     .collect(),

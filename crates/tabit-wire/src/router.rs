@@ -98,7 +98,10 @@ impl Routed for SessionCommand {
             | SessionCommand::Model { session, .. }
             | SessionCommand::Compact { session, .. } => Some(session),
             SessionCommand::InteractionResponse { session, .. } => session.as_deref(),
-            SessionCommand::NewSession | SessionCommand::OpenSession { .. } => None,
+            SessionCommand::NewSession
+            | SessionCommand::OpenSession { .. }
+            | SessionCommand::Login { .. }
+            | SessionCommand::Logout { .. } => None,
         }
     }
     fn ask(&self) -> Option<(&str, &serde_json::Value)> {

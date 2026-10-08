@@ -16,8 +16,10 @@ path = "src/lib.rs"
 doctest = true
 
 [dependencies]
+base64 = { workspace = true }
 futures = { workspace = true }
 humantime = { workspace = true }
+image = { workspace = true }
 tabit-engine = { path = "../tabit-engine", version = "0.1.0", default-features = false }
 tabit-providers = { path = "../tabit-providers", version = "0.1.0", default-features = false }
 tabit-derive = { path = "../tabit-derive", version = "0.1.0" }
@@ -40,5 +42,3 @@ tokio-util = { version = "0.7", default-features = false }
 [dev-dependencies]
 tabit-engine = { path = "../tabit-engine", version = "0.1.0", default-features = false, features = ["test-utils"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
-image = { workspace = true }
-tempfile = "3"

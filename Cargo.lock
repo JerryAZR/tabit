@@ -2968,6 +2968,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "toml",
+ "toml_edit",
  "url",
 ]
 
@@ -3137,7 +3138,6 @@ dependencies = [
  "futures-timer",
  "http 1.5.0",
  "httpdate",
- "image",
  "indexmap",
  "mime",
  "mime_guess",
@@ -3196,6 +3196,7 @@ dependencies = [
 name = "tabit-session"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "futures",
  "http 1.5.0",
  "humantime",
@@ -3211,7 +3212,6 @@ dependencies = [
  "tabit-protocol",
  "tabit-providers",
  "tabit-wire",
- "tempfile",
  "thiserror",
  "tokio",
  "tokio-util",
@@ -3225,7 +3225,6 @@ version = "0.1.0"
 dependencies = [
  "base64",
  "futures",
- "image",
  "process-wrap",
  "serde",
  "serde_json",
@@ -3517,6 +3516,7 @@ dependencies = [
  "indexmap",
  "toml_datetime",
  "toml_parser",
+ "toml_writer",
  "winnow",
 ]
 

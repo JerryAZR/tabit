@@ -786,7 +786,15 @@ the json startup-failure pair — a broken `TABIT_CONFIG` carries
 the first-run guide (report line first, the error event, the
 stderr echo, exit 1) while an unreadable `--session` carries the
 plain `could not start the session` reason and NOT the guide —
-the other standing deferral, closed.
+the other standing deferral, closed. The first-run ruling
+reversal's shapes ride the same e2e (2026-10): the zero-config
+JSON boot (null `session_opened.model`, empty `models_available`,
+the teaching note, the run-open `run_failed { kind: "model" }`,
+exit 0 on stdin close), the explicit `--model` pair (a
+known-but-unusable ref boots and fails at run open; an unknown
+ref still rejects startup), the set-but-missing `$TABIT_CONFIG`
+stay-loud pin, and print mode's no-selection run failure
+(stderr teaching, exit 1).
 
 **Justified (standing classes, renumbered to the split):** main.rs
 0% attributed — `run`/`main`/the failure reporters execute only in
@@ -1664,3 +1672,34 @@ freshly landed code (line re-measurement at the next llvm-cov pass):
   atomicity forbids on every path except the detached-abort window —
   where the settle fold's own cancel arm closes the child; the
   skipped close is the no-op its comment claims.
+
+## Attachments (2026-10, the image-content round)
+
+The attachments feature — `attachments.rs` (the door expansion: tag
+scan, sniff + decode, the downscale), the mailbox composition, and the
+engine's `Steer` item carrying whole messages — landed with its
+behavior net in place, per the standing practice for freshly landed
+code (line re-measurement at the next llvm-cov pass):
+
+- `expand_attachments`: unit-pinned — the append shape (text verbatim,
+  basename label, image part, tag order), the pass-throughs (missing
+  file, non-image by sniff despite the extension, image-by-sniff
+  despite the extension, corrupt bytes under valid magic), the
+  downscale (pixel cap → thumbnail + JPEG, byte cap → quality ladder
+  without a resize, under-cap → byte-identical pass-through), the
+  non-tag forms, non-user messages.
+- The mailbox door and the wire-stays-text ruling: endpoint-pinned —
+  the `user_message` event is text-only (tag anchor + label), the
+  log's entry and the model's request carry the parts, and the
+  skill+attachment composition order (skills first).
+- The log: a multi-part `user_message` entry round-trips verbatim
+  (entry_tests), and `fold_branch` carries the parts into the
+  compaction input (fold_tests).
+- **Justified, not exercised**: the quality ladder's exhaustion arm
+  (every rung over the byte cap — a ≤1568px image whose q40 JPEG
+  still exceeds 5 MB is an adversarial-noise construction no real
+  fixture produces) and the encoder-error arm (an image the decoder
+  accepted that the JPEG encoder rejects — the flatten-to-RGB makes
+  the color-type mismatch unrepresentable). Both degrade to the
+  pass-through warn, the external-error path the suite pins
+  elsewhere.

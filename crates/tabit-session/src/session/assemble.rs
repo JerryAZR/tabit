@@ -19,23 +19,52 @@ impl Session {
     /// selection-is-truth rule ([`Session::set_model`] is the write
     /// half). Any future writer that swaps `selection` (config reload,
     /// say) cannot leave a stale agent serving requests, because the
-    /// one reader derives rather than trusts.
-    pub(super) fn ensure_agent(&mut self) -> Result<(), SessionError> {
-        let selection = self.selection();
-        if self.agent_built_for == selection {
-            return Ok(());
+    /// one reader derives rather than trusts. Returns the agent and
+    /// the selection it is built for — the run's snapshot pair. A
+    /// selection-less session (`None` — the zero-config boot) cannot
+    /// open a run at all: the teaching failure, carried as
+    /// `run_failed { kind: model }` by the caller.
+    pub(super) fn ensure_agent(&mut self) -> Result<(Arc<Agent>, ModelSelection), SessionError> {
+        let Some(selection) = self.selection() else {
+            // The teaching failure — carried as `run_failed { kind:
+            // model }` by the caller. It branches on the same
+            // predicate as the boot's note (`providers_available`,
+            // FRONTEND.md §3.2): no providers at all means `login`
+            // has nothing to validate against — write providers.toml
+            // and restart; `auth: "none"` entries — `login` fixes it
+            // in-app, then `model` lands the selection.
+            let message = if crate::lock::lock(&self.world).config.providers.is_empty() {
+                "no model selected — this backend has no providers.toml at all (the normal \
+                 fresh-install state); create ~/.tabit/providers.toml and restart the backend"
+                    .to_string()
+            } else {
+                "no model selected — every configured provider lacks a key; add one with the \
+                 `login` command (no restart), then switch with the `model` command"
+                    .to_string()
+            };
+            return Err(SessionError::Config { message });
+        };
+        // The pair is written together, so a matching stamp means the
+        // agent stands. The guard is held across the (sync) build: a
+        // refresh racing in between clears the cache, and the next
+        // open rebuilds — no stale build survives a refresh.
+        let mut world = crate::lock::lock(&self.world);
+        if let Some((agent, built_for)) = &world.agent
+            && *built_for == selection
+        {
+            return Ok((agent.clone(), selection));
         }
-        self.agent = Arc::new(build_agent(
-            &self.model_factory,
-            &self.config,
+        let agent = Arc::new(build_agent(
+            &world.factory,
+            &world.config,
             &selection,
             &self.id,
             self.preamble.as_deref(),
             &self.tools,
             None,
         )?);
-        self.agent_built_for = selection;
-        Ok(())
+        world.agent = Some((agent.clone(), selection.clone()));
+        Ok((agent, selection))
     }
 
     pub(super) fn assemble(
@@ -57,39 +86,29 @@ impl Session {
                     .to_string(),
             });
         }
-        // The register cell first: the context manager's cost stamp
-        // (the invoice ruling) resolves through it at every commit.
         let selection_cell = Arc::new(Mutex::new(builder.selection.clone()));
-        let conversation_cell: Arc<std::sync::RwLock<ContextManager>> =
-            Arc::new(std::sync::RwLock::new(ContextManager::empty(
-                buffer.clone(),
-                super::selection::cost_resolver(builder.config.clone(), selection_cell.clone()),
-            )));
+        let conversation_cell: Arc<std::sync::RwLock<ContextManager>> = Arc::new(
+            std::sync::RwLock::new(ContextManager::empty(buffer.clone())),
+        );
         let shared_conversation = SharedConversation {
             conversation: conversation_cell.clone(),
         };
-        // The opening agent is derived from the resolved selection before
-        // the struct exists (the placeholder this replaces existed only
-        // to satisfy the field initializer).
-        let agent = Arc::new(build_agent(
-            &builder.model_factory,
-            &builder.config,
-            &builder.selection,
-            &id,
-            builder.preamble.as_deref(),
-            &builder.tools,
-            None,
-        )?);
+        // No opening agent: the cache is lazy (the selection-is-truth
+        // rule derives it at run open) — a selection-less session has
+        // none to build, and a selection that cannot construct in this
+        // environment must not kill the boot: its failure is the
+        // run-open `run_failed { kind: model }`.
         let session = Self {
-            config: builder.config,
+            world: super::world::SessionWorld::new(
+                builder.config,
+                builder.model_factory,
+                builder.factory_custom,
+            ),
             selection: selection_cell,
             preamble: builder.preamble,
             tools: builder.tools,
             max_turns: builder.max_turns,
-            model_factory: builder.model_factory,
             run_hooks: builder.run_hooks,
-            agent,
-            agent_built_for: builder.selection,
             conversation: conversation_cell,
             buffer,
             shared_conversation,
@@ -120,20 +139,6 @@ impl Session {
         if let Some(skills) = &session.skills {
             session.mailbox.attach_expander(skills.clone());
         }
-        // The attachment door mounts the same way — the limits resolve
-        // live off the selection cell, so a mid-session model switch
-        // takes effect at the next message.
-        {
-            let config = session.config.clone();
-            let selection = session.selection.clone();
-            session.mailbox.attach_attachments(
-                session.cwd.clone(),
-                Arc::new(move || {
-                    let selection = crate::lock::lock(&selection).clone();
-                    super::selection::image_limits(&config, &selection)
-                }),
-            );
-        }
         Ok(session)
     }
 }
@@ -141,8 +146,8 @@ impl Session {
 /// Build the agent a selection resolves to. Everything except the
 /// selection is fixed at assembly (factory, config, preamble, tools),
 /// so this is a pure function of its arguments — the derivation the
-/// cache check in [`Session::ensure_agent`] and the one-shot build in
-/// [`Session::assemble`] share.
+/// cache check in [`Session::ensure_agent`] and the one-shot
+/// `model_prompt` build in `services.rs` share.
 pub(crate) fn build_agent(
     model_factory: &ModelFactory,
     config: &TabitConfig,

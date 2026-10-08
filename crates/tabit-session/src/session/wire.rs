@@ -3,8 +3,16 @@
 //! this one home — one translation, one truth.
 
 use tabit_engine::completion::Message;
+use tabit_providers::message::UserContent;
 
-/// The text of a user message (joined text parts).
+/// The text-part separator: parts carry no join punctuation (the
+/// first-part law — expansion appends parts, never edits them), so
+/// the fold owns the one separator every joined rendering shares.
+const TEXT_PART_SEPARATOR: &str = "\n\n";
+
+/// The text of a user message: every text part, in order, joined by
+/// [`TEXT_PART_SEPARATOR`] — the one joined rendering (events, the
+/// subagent task text, the door's tag scans).
 pub(crate) fn user_text(message: &Message) -> String {
     let Message::User { content } = message else {
         return String::new();
@@ -12,10 +20,48 @@ pub(crate) fn user_text(message: &Message) -> String {
     content
         .iter()
         .filter_map(|part| match part {
-            tabit_providers::message::UserContent::Text(text) => Some(text.text.as_str()),
+            UserContent::Text(text) => Some(text.text.as_str()),
             _ => None,
         })
-        .collect()
+        .collect::<Vec<_>>()
+        .join(TEXT_PART_SEPARATOR)
+}
+
+/// The AUTHORED text of a user message: its first text part, tags
+/// intact — what the user typed, before the door's expansions
+/// appended parts. The first-part law makes this structural:
+/// expansion only ever appends, so part[0] IS the authored text.
+/// `message_queued` and `messages_discarded` hand this back — the
+/// salvaged draft carries no expansion, so re-sending re-expands
+/// exactly once.
+#[allow(clippy::panic, clippy::expect_used)] // sanctioned crash: the door admits text-only user messages (the wire's `message` command is text-only)
+pub(crate) fn authored_text(message: &Message) -> String {
+    let Message::User { content } = message else {
+        panic!("authored_text: a queued message is always a user message");
+    };
+    content
+        .iter()
+        .find_map(|part| match part {
+            UserContent::Text(text) => Some(text.text.clone()),
+            _ => None,
+        })
+        .expect("authored_text: the door's one-text-part guarantee")
+}
+
+/// The one `user_message` event assembly: the message's joined text
+/// (the wire fold — every text part, the door's expansion included)
+/// under its entry id. Emission stays at the three sites (run.rs's
+/// failed-open drain and Steer arm, replay.rs's projection) —
+/// custody and stream ordering are load-bearing there; the assembly
+/// is one concern and lives here.
+pub(crate) fn user_message_event(
+    entry_id: String,
+    message: &Message,
+) -> tabit_protocol::SessionEvent {
+    tabit_protocol::SessionEvent::UserMessage {
+        text: user_text(message),
+        entry_id,
+    }
 }
 
 /// The text of a tool result — exactly what the model saw of it (text
@@ -93,15 +139,54 @@ mod tests {
             ),
         };
         assert!(user_text(&assistant).is_empty());
-        // Non-text parts contribute nothing; text parts join.
+        // Non-text parts contribute nothing; text parts join with
+        // the fold-owned separator — parts carry no join punctuation.
         let message = Message::User {
             content: tabit_providers::OneOrMany::many(vec![
                 tabit_providers::message::UserContent::image_base64("aGk=", None, None),
-                tabit_providers::message::UserContent::text("the text"),
+                tabit_providers::message::UserContent::text("first"),
+                tabit_providers::message::UserContent::text("second"),
+            ])
+            .expect("three parts"),
+        };
+        assert_eq!(user_text(&message), "first\n\nsecond");
+    }
+
+    #[test]
+    fn authored_text_is_the_first_text_part_tags_intact() {
+        // The door's shape: the authored text (tags intact) plus the
+        // expansion's appended parts — authored reads part[0] only.
+        let message = Message::User {
+            content: tabit_providers::OneOrMany::many(vec![
+                tabit_providers::message::UserContent::text(
+                    "do <skill name=\"x\"/> <attachment path=\"/p.png\"/>",
+                ),
+                tabit_providers::message::UserContent::text("the skill block"),
+                tabit_providers::message::UserContent::text("p.png"),
+            ])
+            .expect("three parts"),
+        };
+        assert_eq!(
+            authored_text(&message),
+            "do <skill name=\"x\"/> <attachment path=\"/p.png\"/>",
+            "the authored text, tags intact — no expansion"
+        );
+    }
+
+    #[test]
+    fn user_message_event_assembles_the_joined_text_under_the_id() {
+        let message = Message::User {
+            content: tabit_providers::OneOrMany::many(vec![
+                tabit_providers::message::UserContent::text("authored"),
+                tabit_providers::message::UserContent::text("appended"),
             ])
             .expect("two parts"),
         };
-        assert_eq!(user_text(&message), "the text");
+        let event = user_message_event("entry-1".to_string(), &message);
+        assert!(
+            matches!(event, tabit_protocol::SessionEvent::UserMessage { text, entry_id }
+                if text == "authored\n\nappended" && entry_id == "entry-1")
+        );
     }
 
     #[test]

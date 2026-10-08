@@ -68,12 +68,19 @@ pub(crate) fn resolve_facts(selection: &ModelSelection, config: &TabitConfig) ->
     ModelFacts {
         context_window: model.context_window,
         name: model.name.clone(),
-        cost: model.cost.map(|cost| tabit_protocol::Cost {
-            input: cost.input,
-            output: cost.output,
-            cache_read: cost.cache_read,
-            cache_write: cost.cache_write,
-        }),
+        cost: model.cost.map(wire_cost),
+    }
+}
+
+/// The wire mirror of a config rate card — the one conversion site
+/// (the register announcement's facts and the boot catalog's
+/// `models_available` fold share it).
+pub(crate) fn wire_cost(cost: tabit_config::Cost) -> tabit_protocol::Cost {
+    tabit_protocol::Cost {
+        input: cost.input,
+        output: cost.output,
+        cache_read: cost.cache_read,
+        cache_write: cost.cache_write,
     }
 }
 
@@ -95,7 +102,8 @@ pub(crate) fn cost_of(
 
 /// The dollars one completion cost, from the rates in effect — the
 /// invoice ruling (owner 2026-09): spend already happened, so the
-/// number is stamped at commit and never recomputed at read; a later
+/// number is computed once at the spend point and recorded verbatim
+/// (ledger, event, durable entry), never recomputed at read; a later
 /// rate cut does not refund it. `None` when the provider reported
 /// nothing (zeros are the not-reported sentinel) or the model carries
 /// no rate card.

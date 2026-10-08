@@ -71,6 +71,40 @@ fn node_kinds_round_trip() {
     }
 }
 
+/// A `user_message` entry carrying an attachment expansion — text
+/// (the tag the anchor), the basename label, the image part —
+/// serializes and parses back verbatim (the attachments ruling: inline
+/// base64 rides the existing `Message` schema; old logs simply never
+/// contain parts).
+#[test]
+fn a_multi_part_user_message_round_trips_verbatim() {
+    use tabit_providers::message::{ImageMediaType, UserContent};
+    let kind = EntryKind::UserMessage {
+        message: Message::User {
+            content: OneOrMany::many(vec![
+                UserContent::text("look <attachment path=\"/tmp/shot.png\"/> at this"),
+                UserContent::text("\n\nshot.png"),
+                UserContent::image_base64("aGVsbG8=", Some(ImageMediaType::PNG), None),
+            ])
+            .expect("three parts"),
+        },
+    };
+    let entry = SessionEntry::new(
+        Some("parent".to_string()),
+        "2026-10-01T00:00:00Z".into(),
+        kind,
+    );
+    let line = serde_json::to_string(&entry).expect("entry serializes");
+    let back: FileRecord = serde_json::from_str(&line).expect("record parses back");
+    let FileRecord::Node(back_entry) = back else {
+        panic!("a node stays a node: {line}");
+    };
+    // Line-for-line (the flatten normalization makes a None/{} struct
+    // compare lie — the byte-stable line is the honest check).
+    let back_line = serde_json::to_string(&back_entry).expect("back serializes");
+    assert_eq!(back_line, line, "verbatim — image parts included");
+}
+
 #[test]
 fn side_kinds_round_trip_without_ids_or_parents() {
     let kinds = vec![

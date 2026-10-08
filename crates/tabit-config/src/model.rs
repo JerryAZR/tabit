@@ -83,10 +83,6 @@ pub struct Model {
     /// and overflow recovery.
     #[serde(default)]
     pub context_window: Option<u64>,
-    /// Image preparation limits for this model. Absent: the pipeline's
-    /// defaults (a provider-safe 3 MiB byte cap, no long-edge ceiling).
-    #[serde(default)]
-    pub image_limits: Option<ImageLimits>,
     /// The maximum number of output tokens, if known. The framework's
     /// anthropic engine applies its own default when this is absent.
     #[serde(default)]
@@ -109,21 +105,6 @@ pub struct Model {
     /// provider's headers).
     #[serde(default)]
     pub headers: Option<BTreeMap<String, String>>,
-}
-
-/// Per-model image preparation limits (the image pipeline's input —
-/// tabit-providers' `image` module). Both fields default to the
-/// pipeline's own defaults when absent.
-#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ImageLimits {
-    /// The largest accepted image payload, raw bytes.
-    #[serde(default)]
-    pub max_bytes: Option<usize>,
-    /// A long-edge pixel ceiling (token economy, not safety): images over
-    /// it are downscaled even when their bytes fit.
-    #[serde(default)]
-    pub max_long_edge: Option<u32>,
 }
 
 fn default_input() -> Vec<InputModality> {

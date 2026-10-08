@@ -13,18 +13,21 @@ use tokio_util::sync::CancellationToken;
 
 impl Session {
     /// The pre-request leaf for one run — attached to the engine
-    /// request at open (see [`super::run`]'s `open_run`). The engine
-    /// awaits it blindly between DECIDE and PREPARE.
+    /// request at open (see [`super::run`]'s `open_run`), snapshotting
+    /// the ensured agent and its selection. The engine awaits it
+    /// blindly between DECIDE and PREPARE.
     pub(crate) fn pre_request_door(
         &self,
         run_token: &CancellationToken,
+        agent: Arc<tabit_engine::agent::Agent>,
+        selection: tabit_protocol::ModelSelection,
     ) -> Arc<dyn PreRequestSource> {
         Arc::new(box_module::PreRequestDoor {
             cell: self.conversation.clone(),
             state: self.compaction.clone(),
-            agent: self.agent.clone(),
-            config: self.config.clone(),
-            selection: self.selection(),
+            agent,
+            config: self.world_config(),
+            selection,
             token: run_token.clone(),
             notice: self.event_tap.get().cloned(),
             ledger: self.ledger.clone(),
@@ -78,13 +81,18 @@ impl Session {
         };
         // The agent freshness check: the beat doors serve whatever
         // selection is current, and a stale agent cannot serve a
-        // request (the same point-of-use rule as run open).
-        if let Err(error) = self.ensure_agent() {
-            return Outcome::Failed {
-                message: error.to_string(),
-                passes: 0,
-            };
-        }
+        // request (the same point-of-use rule as run open). A
+        // selection-less session cannot compact (summarizing is a
+        // model call) — the same check's teaching failure.
+        let (agent, selection) = match self.ensure_agent() {
+            Ok(pair) => pair,
+            Err(error) => {
+                return Outcome::Failed {
+                    message: error.to_string(),
+                    passes: 0,
+                };
+            }
+        };
         let notice = self.event_tap.get().cloned();
         let mut emit = move |event: tabit_protocol::SessionEvent| {
             if let Some(notice) = &notice {
@@ -95,10 +103,10 @@ impl Session {
             door,
             &self.conversation,
             &self.compaction,
-            &self.agent,
+            &agent,
             &token,
-            &self.config,
-            &self.selection(),
+            &self.world_config(),
+            &selection,
             &self.ledger,
             mailbox_empty,
             &mut emit,

@@ -786,6 +786,43 @@ impl<C: Routed> Node<C> {
         self.asks.retract_owner(owner, reason);
     }
 
+    /// A spawned lane died — the child-death announcement (v23) and
+    /// the sweep, one act. Every stream the lane taught gets its
+    /// synthesized `session_closed` — the cascade ruling: process
+    /// death is subtree death (tree-kill is the substrate), so the
+    /// lane's whole learned set closes with it, descendants
+    /// included. Each close fans exactly like an arrival from the
+    /// lane (the Remote door, the dead lane skipped), crossing
+    /// upstream indistinguishably — and LAST: the lane's
+    /// registrations, routes, and asks sweep first (their settles
+    /// announce), so the closes are the final word on every dying
+    /// stream. Exactly one close per stream: the learned entries
+    /// drain with the synthesis, so a repeated retraction announces
+    /// nothing. The caller is the lane's reader at the pipe's EOF —
+    /// the only site where "last frame on the stream" can be true.
+    pub fn retract_lane(&self, lane: &Channel, reason: &str) {
+        let mut stamps = Vec::new();
+        lock(&self.learned).retain(|stamp, channel| {
+            if channel.owner() == lane.owner() {
+                stamps.push(stamp.clone());
+                false
+            } else {
+                true
+            }
+        });
+        self.retract(lane.owner(), reason);
+        for stamp in stamps {
+            let frame = EventFrame {
+                stream: Some(StreamId::new(stamp.clone())),
+                origin: None,
+                ttl: Some(HOP_BUDGET),
+                event: SessionEvent::SessionClosed { id: stamp },
+            };
+            self.events
+                .dispatch_skipping(&frame, &[lane.id()], Locality::Remote);
+        }
+    }
+
     /// The run-terminal sweep: the questions die with their run, the
     /// owner's routes and subscriptions outlive it (the participant
     /// and its run are different deaths).

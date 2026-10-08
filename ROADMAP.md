@@ -38,7 +38,10 @@ The foundation is shipped and hardened. In build order, all closed:
   no model catalog, ever.
 - **Session layer** (`tabit-session`, `tabit-log`): the durable
   tree-format session log (format v5), write-behind persistence,
-  rewind/branch, model registry + keyless providers, session-level
+  rewind/branch, model registry + keyless providers, built-in
+  `login`/`logout` over the world refresh (protocol v21 — the
+  surgical auth.toml write, the current-world cell, every open
+  session's next run open on the new world), session-level
   skills (protocol v20), the system-prompt builder, compaction +
   overflow recovery (the record below).
 - **Coding tools** (`tabit-tools`): read/write/edit/bash per the
@@ -56,7 +59,7 @@ The foundation is shipped and hardened. In build order, all closed:
   the host, the SDK, install/management — the checklist is complete;
   EXTENSIONS.md is the contract and the record.
 - **The wire** (`tabit-protocol`, `tabit-wire`, the session edge):
-  protocol v20, the node runtime (locality routing, asks, the report
+  protocol v21, the node runtime (locality routing, asks, the report
   model), the json stdio edge.
 - **Prompt caching** (shipped 2026-08): all-1h Anthropic, session-id
   cache keys for OpenAI Responses, subagents keyed separately — the
@@ -150,21 +153,62 @@ engine's own fact. When the discussion returns: rule abort's discard
 record (or `aborted { usage }`) versus unbilled-by-decision, and have
 the engine stamp the attempt's usage on the discard item directly.
 
+Residual from the 2026-10 billing-architecture change (the `TurnCost`
+closure seam deleted; cost is computed once at the spend point and
+rides the log entries as plain data): in the mid-run-switch window a
+`model` command lands at receive, so its `model_change` record
+precedes the in-flight run's committing turns in the file. Live,
+every sink bills the run's bound selection correctly (one computed
+value to the ledger, the `completion_call` event, and the durable
+entry); on REPLAY/reload the parser attributes those windowed turns
+to the NEW model — the dollars are the recorded ones (replay never
+recomputes), only the per-model attribution shifts. The full fix is
+turn entries carrying their producing selection — a format-versioned
+log decision, parked here.
+
 ### Config / registry follow-ups
 
 - **Dynamic model listing — deferred** (2026-09): `/v1/models`
   returns ids only, not useful enough to ship. Recorded direction:
   the provider catalog (curated per-model metadata) could ship as an
-  extension instead of core machinery. When reload lands,
-  discovery/catalog merge must be one callable step over
-  `(config, auth)`, not a re-run of the initialization flow.
+  extension instead of core machinery.
+- **Config reload — the `reload` command** (2026-10): an additive
+  first cut — re-read config/auth, new keys and providers appear, the
+  model catalog re-announces (`models_available`, FRONTEND.md §6).
+  Its mechanism shipped with `login`/`logout` (2026-10, protocol v21):
+  the current-world cell plus the per-session world refresh is exactly
+  the path `reload` reuses — what remains is re-reading the
+  providers.toml layers and the command itself. One dormant
+  assumption closes with it: `run.rs`'s `turn_cost` reads the rate
+  card LIVE from the world config — safe today because login/logout
+  swap auth only (the config Arc is shared), but a reload swaps the
+  config mid-run, so it must snapshot the config into the run's bound
+  pair (or re-derive the bound-at-open invoice invariant) when it
+  lands. The general
+  semantics — vanished providers, stale session registers, the
+  skills/gate reload scope — stay parked until the command lands.
+- **The models.dev catalog extension** (2026-10, recorded): an
+  extension shipping an auto-updating providers fragment (the
+  models.dev catalog), versioned separately from tabit itself — the
+  zero-config story's other half: on a bare install it gives
+  `login` its providers to scan, so first run is "install the
+  catalog extension, paste a key" with no hand-written
+  providers.toml.
 - Per-model `headers` stay unwired (needs a client-caching decision);
   `context_window` is wired (compaction); display names /
   `reasoning` wait on a model-picker UI (with the frontend).
-- Frontend-dependent model deferrals: the models-list command and the
+- Frontend-dependent model deferrals: the catalog half landed
+  (v21's `models_available` boot announcement); still parked: the
   real picker, the global implicit preference (a `~/.tabit/`
   last-selected file — a registry rung below `default_model`), and
   the "selection didn't land" picker signal.
+
+### Docs and comments sweep
+
+Scheduled, unscheduled date: one pass over stale comments and docs —
+they accrete (e.g. `assemble.rs`'s "handshake ack" phrasing surviving
+the v19 report model, caught in review 2026-10). Sweep when the next
+cross-cutting change touches many files anyway, not as its own event.
 
 ### ACP
 
@@ -200,6 +244,191 @@ through a few patch rounds. That is the re-evaluation trigger.
   `CompletionError`.
 - A modeled breakpoint/TTL caching policy (all-1h today; a contained
   edit when a felt need exists) and the completions-gateway cache key.
+- **Log compression** (owner direction 2026-10): long content —
+  inline images (see the attachments design record), expanded skill
+  bodies — will grow session files fast. Two shapes floated:
+  per-entry compression of long content vs. whole-file gzip (gzip
+  streams append and read back fine; the open questions are the
+  write-behind append path, the parser's byte sensitivity, and
+  checkout/replay indexing). Unscheduled; the trigger is real log
+  bloat once attachments land.
+
+- **Session titles** (design sketch, awaiting frontend demand):
+  an append-only side record in the session log — last-wins, the
+  header stays write-once — behind a log-format minor bump; the wire
+  surface is a `title` field on `session_opened` and the
+  `sessions_available` catalog plus a `rename` command and a
+  rename event (one protocol bump for the set). `autotitle-ext`
+  already demonstrates the generation side over `model_prompt`.
+
+## Design record: attachments (image content in user messages)
+
+The design for user-attached images, recorded before implementation
+(the original ruling predates any repo record — it lived in a session
+log on another host; this section is the record now). Owner rulings
+2026-10, superseding the TUI v0's text-reference expansion proposal
+(the frontend proposes; the backend owns the contract — the TUI's
+paste → temp file → tag insertion rides either way). **Landed
+2026-10** as specified (tabit-session's `attachments.rs`, the mailbox
+door, FRONTEND.md's §5); the one fork the implementation surfaced:
+the engine's steer announcement carried pre-rendered text through the
+providers' strict single-text `user_text()`, which silently dropped
+multi-part messages from the `user_message` events — the `Steer` item
+now carries the messages and the session's own text fold renders
+them.
+
+### The rulings
+
+1. **Tags stay as-is in the user message text.** `<attachment
+   path="…"/>` is the anchor — the skill-tag rule (`<skill
+   name="…"/>`), unchanged.
+2. **Expansion appends, per tag and in tag order: the file name +
+   the image as a base64 content part.** The model reads the message
+   in full (tags included) and correlates parts to tags by name. The
+   expanded user message is one multi-part `Message`:
+   `[text(original, tags intact), text(label naming the file),
+   image(base64), …]`.
+3. **The backend downscales at expansion** — before anything is
+   stored or sent — so the server never rejects a big image and the
+   durable record holds what the model saw (the faithful-copy
+   doctrine).
+4. **The first-part law: expansion only appends parts; it never
+   touches the first part** (2026-10, closing the flaw the
+   string-based skill expansion admitted — it folded the skill body
+   INTO the authored text, destroying the authored form). A message
+   enters the door as exactly one text part — the wire's `message {
+   session, text }` command is text-only, a structural guarantee —
+   so part[0] IS the authored text: skill blocks land as their own
+   text parts (the `user_text` fold owns the join separator; parts
+   carry no join punctuation), and `message_queued` /
+   `messages_discarded` hand back part[0]. Double-expansion on a
+   salvaged re-send is then impossible: the draft contains no
+   expansion, so re-sending re-expands exactly once.
+
+### The mechanics (verified against the tree 2026-10)
+
+- **Expansion point: the mailbox door** (`session/mailbox.rs`'s
+  `push`, receive time, before the id is minted) — the same funnel
+  and pass-through rules as the skill tag: an unresolvable tag (file
+  missing/unreadable/not a decodable image — type is *sniffed*, never
+  extension-trusted) is left as-is with a warn; the message still
+  enters. Skill and attachment expansions compose in one door pass:
+  skills first (skill blocks as their own text parts, after the
+  authored text — the first-part law), then attachment parts over
+  the expanded message.
+- **The wire never changes.** `message { session, text }` stays
+  text-only; frontends send tags as plain text. `user_message`
+  events stay text — the tag is the frontend-visible anchor; image
+  bytes never cross the wire. No protocol version moves for this.
+- **The log stores the image inline (ruling (a), the original
+  ruling).** `user_message` entries carry the expanded multi-part
+  `Message`; the log's `Message` is the providers' `Message`
+  (`tabit-log/src/entry.rs`), which already (de)serializes image
+  parts — inline base64 rides the existing schema; no blob
+  side-files, no reference integrity, history self-contained (paste
+  temp files may die after the door read). A format-version note
+  lands with the implementation (old logs simply never contain
+  parts). Size growth is real; the answer is the compression topic
+  (below), not blobs.
+- **Model-facing history**: the context manager's tree holds the
+  `Message` verbatim, so image parts ride every later turn and every
+  replay. (Implementation verifies the history view passes user
+  messages through without text-joining.)
+- **Downscaling**: once, at expansion. One conservative global cap —
+  a documented constant, not per-provider config (rule 1): proposed
+  long edge ≤ 1568px and ≤ 5MB post-encode (JPEG quality ladder when
+  over). `image` crate, battle-tested.
+- **Models that don't take images**: the announced `input`
+  modalities (`models_available`, v21) let the frontend warn before
+  sending; backend-side, request-construction failure on unsupported
+  content is already a graceful terminal (ENGINE.md's taxonomy), the
+  history carries forward, and a model switch repairs. No new refusal
+  path.
+- **Scope: raster images only** (png/jpeg/gif/webp). Other file types
+  pass through untouched; documents/PDFs are a later item (the
+  provider layer already models document parts).
+
+### Corners settled at review (owner rulings 2026-10)
+
+- The label text is the **basename** (the tag anchors the full path
+  in the message text; the temp-file path is noise to the model).
+- The downscale numbers (1568px / 5MB) are internal constants,
+  tunable at will — the proposed values are the defaults.
+- **Images ride compaction**: the summarization request sees what
+  the model saw.
+- Draft salvage of a queued-but-discarded message is frontend-side
+  text (the wire never held parts) — no impact.
+
+**B4 (parked): expansion is CPU/IO work on the command path.**
+Attachment expansion — the file read, the decode, the downscale —
+runs at receive, in the mailbox door, on the session's command
+path. Paste sizes keep this modest today (a screenshot decodes in
+milliseconds); if it ever shows, the parked options are
+`spawn_blocking`ing the expansion or a byte cap before decode (an
+over-cap file passes through like any unresolvable tag).
+
+### The capability question (settled 2026-10): no gate — the server
+### is the authority
+
+Owner ruling: **send images unconditionally**; never consult the
+declared `input` modalities to admit or refuse a run. Provider
+stacks know their own capability better than user config does —
+vision preprocessing/OCR upstream of text-only models makes pastes
+"just work" (the Claude Code behavior), and the declared default
+(text-only) would mostly fire as false refusals on undeclared but
+capable models. A server that truly cannot carry the content says so
+with a request error — the existing graceful terminal
+(`run_failed { kind: "provider" }`, ENGINE.md's taxonomy); history
+carries forward and a model switch or `checkout` repairs. Accepted
+residual: a fringe server could silently drop image parts and answer
+blind — undetectable from our side, the server's defect, and no
+config-keyed gate would have caught it either. `input` modalities
+stay advisory picker-display data (`models_available`), never a
+gate. The summarization call is equally ungated — a provider that
+rejects images fails the compaction pass through the same graceful
+path (`compaction_failed`), never a special case.
+
+## Design record: session_closed (the wire-level child-death
+## announcement)
+
+Landed 2026-10 (protocol v23; FRONTEND.md §6 carries the wire
+facts). The rulings:
+
+1. **One field, no reason.** `session_closed { id }`, stamped with
+   the closing session's id, the LAST frame on that stream: *this
+   session will never emit again; discard of frontend state is
+   safe.*
+2. **The vouch asymmetry.** Birth is self-announced
+   (`session_opened` crosses `--parent` at the source); death is
+   vouched by the spawner-side wire. A child never announces its own
+   death — a crash path cannot — and one synthesis point (the lane's
+   retraction at the pipe's EOF, in tabit-wire's client) cannot
+   duplicate.
+3. **Synthesis is wire-level mechanism, not policy**: the lane
+   machinery itself, so the subagent bridge and the extension SDK's
+   owned children both get it from the one mount.
+4. **Ordering falls out of the pump**: the close synthesizes only
+   after the child's stdout reaches EOF, so it is genuinely the
+   stream's last frame. The reaper's exit observation sweeps only
+   the lane's asks (a pipe-holding descendant can outlive the
+   process; stranded cards cannot wait for that EOF) and never
+   synthesizes — the graceful EOF and the reaper cannot
+   double-announce, and the enumeration the cascade reads (the
+   learning table's per-lane stamps) survives until the pump drains
+   it.
+5. **The cascade is backend-synthesized** (the owner's "either seems
+   fine, just make sure it's clear in the contract" — backend
+   chosen): process death is subtree death (tree-kill is the
+   substrate), so a retracting lane closes every stamp learned
+   through it, and the synthesized frames fan and relay exactly like
+   child-arrived frames — they cross upstream indistinguishably.
+   Contract line: a frontend discards exactly the sessions it
+   receives closes for; no tree inference required.
+6. **Parked children emit nothing**: run completion is not death
+   (the subagent pool parks completed children for `followup`);
+   closes fire only on actual process exit. User-facing sessions
+   never get one — their death is the process's own, and the pipe
+   close is the signal (FRONTEND.md §3).
 
 ## Design record: compaction (final form)
 

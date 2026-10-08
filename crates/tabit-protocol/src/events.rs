@@ -5,7 +5,7 @@
 //! ships in this workspace, so an added variant is a coordinated change,
 //! not a compatibility hazard.
 
-use crate::model::ModelSelection;
+use crate::model::{AvailableProvider, ModelSelection};
 use crate::usage::Usage;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -26,7 +26,9 @@ pub enum SessionEvent {
     },
     /// A user message was accepted and recorded.
     UserMessage {
-        /// The message text.
+        /// The message text — the wire fold: every text part joined,
+        /// the door's expansion (skill bodies, attachment labels)
+        /// included.
         text: String,
         /// The message's durable entry id — the id `message_queued`
         /// announced at submit (born early: minted at accept, carried into
@@ -43,13 +45,17 @@ pub enum SessionEvent {
     MessageQueued {
         /// The message's entry id, minted at accept.
         id: String,
-        /// The message text.
+        /// The AUTHORED text — the message's first part, tags intact,
+        /// never the door's expansion (skill bodies, attachment
+        /// labels): the first-part law keeps part[0] what the user
+        /// typed, so a salvaged draft re-sent re-expands fresh.
         text: String,
     },
     /// Queued messages were discarded (a mailbox clear: abort, checkout,
     /// the prompt barrier). The pairs hand back what the user authored —
-    /// ids included, so pending displays resolve by id; the messages were
-    /// never part of the conversation and are not persisted.
+    /// the first part, tags intact, never the expansion — ids included,
+    /// so pending displays resolve by id; the messages were never part
+    /// of the conversation and are not persisted.
     MessagesDiscarded {
         /// The discarded messages.
         messages: Vec<DiscardedMessage>,
@@ -297,6 +303,42 @@ pub enum SessionEvent {
         /// (EXTENSIONS.md's naming ruling).
         conflicts: Vec<ExtensionConflict>,
     },
+    /// The usable model catalog, announced once at startup right
+    /// after `extensions_available` (v21): every usable provider
+    /// (key resolvable via auth.toml/`api_key_env`, or declared
+    /// `keyless = true`) with its models. **Unstamped,
+    /// backend-level** — one backend process has one model
+    /// registry. Unlike the skills/extension catalogs it is
+    /// **unconditional**: emitted even when empty, so the frame's
+    /// absence means "protocol older than v21", never "no models";
+    /// `providers: []` is the legal "no usable models at this
+    /// backend" state. Pure picker data (v22: the login/logout
+    /// view's data moved to `providers_available`; the v21
+    /// `missing_keys` half is gone). Re-announced when the world
+    /// changes — a `login`/`logout` landed (the re-announcement,
+    /// paired with `providers_available`'s in one act, is the
+    /// command's ack), config reload when it lands; a
+    /// re-announcement replaces the catalog wholesale — last-wins
+    /// fold.
+    ModelsAvailable {
+        /// Every usable provider, in alphabetical id order; models
+        /// in config-file order.
+        providers: Vec<AvailableProvider>,
+    },
+    /// The provider catalog, announced once at startup right after
+    /// `models_available` (v22): EVERY configured provider, usable
+    /// or not, with its winning key source — the login/logout
+    /// view's data. **Unstamped, backend-level**, and
+    /// **unconditional** like its picker sibling (one version
+    /// later): absence of the frame means "protocol older than
+    /// v22", never "no providers"; `providers: []` is the legal
+    /// no-config state. Re-announced together with
+    /// `models_available` on every world change — one act, both
+    /// frames, last-wins fold.
+    ProvidersAvailable {
+        /// Every configured provider, in alphabetical id order.
+        providers: Vec<crate::model::ProviderStatus>,
+    },
     /// A session became visible in this backend: the boot session
     /// (emitted at spawn, ahead of the catalog and any replay), a
     /// `new_session` (a fresh session, `resumed: false`), or an
@@ -317,8 +359,13 @@ pub enum SessionEvent {
         /// session's is the backend's cwd; a subagent child's is its
         /// own spawn cwd.
         cwd: String,
-        /// The session's active selection.
-        model: ModelSelection,
+        /// The session's active selection. **Nullable (v21,
+        /// amended)**: `null` — serialized present, never skipped —
+        /// means the session has no selection (nothing usable at
+        /// this backend — the zero-config boot); the first `model`
+        /// command lands one, and until then no `model_changed` is
+        /// announced and runs fail at open.
+        model: Option<ModelSelection>,
         /// Whether the session continues an existing chain.
         resumed: bool,
         /// The parent session's id when this session is a subagent
@@ -338,8 +385,36 @@ pub enum SessionEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         parent_call: Option<String>,
     },
-    /// The active model changed (a `ModelChange` log entry replayed, or
-    /// — from slice 3 — a `model` command applied).
+    /// A child session's stream ended permanently (v23): **this
+    /// session will never emit again — discarding its frontend state
+    /// is safe.** The LAST frame on the session's stream, and
+    /// exactly one per session: synthesized by the spawner-side wire
+    /// when the child's pipe reaches EOF (never by the session
+    /// itself — birth is self-announced, `session_opened` crossing
+    /// its lineage at the source; death is vouched by the
+    /// spawner-side wire, because a crash path cannot announce
+    /// itself and one synthesis point cannot duplicate). The cascade
+    /// is the backend's: process death is subtree death (tree-kill
+    /// is the substrate), so a dying child closes every session
+    /// whose frames crossed its lane, descendants included — a
+    /// frontend discards exactly the sessions it receives closes
+    /// for, with no tree inference. **Children only**: a user-facing
+    /// session never gets one (its death is the backend process's
+    /// own — the pipe closing is the signal), and run completion is
+    /// NOT death — a completed subagent parked for `followup` emits
+    /// nothing until its process actually exits. Never replayed: a
+    /// resumed session is a live session again.
+    SessionClosed {
+        /// The closing session's id — the same id the frame's stream
+        /// stamp carries.
+        id: String,
+    },
+    /// The active model changed: a `model` command applied (a state
+    /// write at receive), or the register announcement leading a
+    /// replay pass — the session's current selection, announced live,
+    /// never reconstructed from history. Never emitted for a session
+    /// with no selection (the zero-config boot announces
+    /// `session_opened.model: null` instead, v21 amended).
     ModelChanged {
         /// Provider id from tabit config.
         provider: String,
@@ -642,6 +717,17 @@ impl SessionEvent {
         }
     }
 
+    /// An `auth`-kind error: a `login`/`logout` failed — the provider
+    /// is unknown to config, or the auth file could not be written.
+    /// Unstamped, backend-level (the failure belongs to no session).
+    pub fn error_auth(message: impl Into<String>) -> Self {
+        Self::Error {
+            kind: ErrorKind::AUTH.to_string(),
+            message: message.into(),
+            pending: None,
+        }
+    }
+
     /// The register announcement: a `model_changed` carrying a
     /// selection and its resolved facts — at every receive-time write
     /// (the `model` command's own outcome) and before every replay
@@ -675,6 +761,9 @@ impl ErrorKind {
     pub const SESSION: &'static str = "session";
     /// A `checkout` command targeted a missing entry or not a cut point.
     pub const CHECKOUT: &'static str = "checkout";
+    /// A `login`/`logout` command failed (an unknown provider, an
+    /// unwritable auth file).
+    pub const AUTH: &'static str = "auth";
     /// Persistence degraded: this many records are pending on disk.
     pub const PERSIST_DEGRADED: &'static str = "persist_degraded";
     /// Persistence recovered: pending records reached the disk.
@@ -742,7 +831,10 @@ impl SessionEvent {
             SessionEvent::SessionsAvailable { .. } => tags::SESSIONS_AVAILABLE,
             SessionEvent::SkillsAvailable { .. } => tags::SKILLS_AVAILABLE,
             SessionEvent::ExtensionsAvailable { .. } => tags::EXTENSIONS_AVAILABLE,
+            SessionEvent::ModelsAvailable { .. } => tags::MODELS_AVAILABLE,
+            SessionEvent::ProvidersAvailable { .. } => tags::PROVIDERS_AVAILABLE,
             SessionEvent::SessionOpened { .. } => tags::SESSION_OPENED,
+            SessionEvent::SessionClosed { .. } => tags::SESSION_CLOSED,
             SessionEvent::ModelChanged { .. } => tags::MODEL_CHANGED,
             SessionEvent::NativeItem { .. } => tags::NATIVE_ITEM,
             SessionEvent::InteractionRequest { .. } => tags::INTERACTION_REQUEST,
@@ -788,7 +880,10 @@ pub mod tags {
     pub const SESSIONS_AVAILABLE: &str = "sessions_available";
     pub const SKILLS_AVAILABLE: &str = "skills_available";
     pub const EXTENSIONS_AVAILABLE: &str = "extensions_available";
+    pub const MODELS_AVAILABLE: &str = "models_available";
+    pub const PROVIDERS_AVAILABLE: &str = "providers_available";
     pub const SESSION_OPENED: &str = "session_opened";
+    pub const SESSION_CLOSED: &str = "session_closed";
     pub const MODEL_CHANGED: &str = "model_changed";
     pub const NATIVE_ITEM: &str = "native_item";
     pub const INTERACTION_REQUEST: &str = "interaction_request";
@@ -824,7 +919,10 @@ pub mod tags {
         SESSIONS_AVAILABLE,
         SKILLS_AVAILABLE,
         EXTENSIONS_AVAILABLE,
+        MODELS_AVAILABLE,
+        PROVIDERS_AVAILABLE,
         SESSION_OPENED,
+        SESSION_CLOSED,
         MODEL_CHANGED,
         NATIVE_ITEM,
         INTERACTION_REQUEST,

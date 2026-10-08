@@ -210,8 +210,9 @@ fn cell_fold_final(
     message: Message,
     id: String,
     usage: tabit_providers::completion::Usage,
+    cost: Option<f64>,
 ) {
-    tabit_log::lock::write(cell).fold_turn_with_id(message, id, usage);
+    tabit_log::lock::write(cell).fold_turn_with_id(message, id, usage, cost);
 }
 
 fn cell_fold_roundtrip(
@@ -219,8 +220,23 @@ fn cell_fold_roundtrip(
     batch: Vec<Message>,
     usage: tabit_providers::completion::Usage,
     result_ids: Vec<String>,
+    cost: Option<f64>,
 ) {
-    tabit_log::lock::write(cell).fold_all_with_ids(batch, usage, result_ids);
+    tabit_log::lock::write(cell).fold_all_with_ids(batch, usage, result_ids, cost);
+}
+
+/// The committing turn's computed dollars, taken from the run's cost
+/// channel (`None` when the run's owner attached none — the engine
+/// never computes cost). The owner wrote the value when the turn's
+/// spend was reported (its `CompletionCall` item): the drive stream's
+/// pull ordering guarantees the consumer processed that item before
+/// this commit resumes, and a discarded attempt's write is overwritten
+/// by the settled attempt's before any commit reads the slot.
+fn cell_turn_cost(runner: &AgentRunner) -> Option<f64> {
+    runner
+        .turn_cost
+        .as_ref()
+        .and_then(|slot| tabit_log::lock::lock(slot).take())
 }
 
 /// The run: one coroutine over the conversation. See the module docs
@@ -300,17 +316,7 @@ where
                 // the batch is still queued (discarded with notice) or
                 // already announced whole.
                 cell_fold_steers(conversation, &steers);
-                let batch = steers
-                    .iter()
-                    .filter_map(|(id, message)| {
-                        message
-                            .user_text()
-                            .map(|text| (id.clone(), text.to_string()))
-                    })
-                    .collect::<Vec<_>>();
-                if !batch.is_empty() {
-                    yield Ok(DriveItem::Item(MultiTurnStreamItem::Steer { batch }));
-                }
+                yield Ok(DriveItem::Item(MultiTurnStreamItem::Steer { batch: steers }));
                 // A steering user is their own circuit breaker.
                 defect_streak = 0;
                 provider_streak = 0;
@@ -559,6 +565,7 @@ where
                         },
                         turn_id.clone(),
                         turn.usage,
+                        cell_turn_cost(&runner),
                     );
                 }
                 yield Ok(DriveItem::Item(MultiTurnStreamItem::TurnCommitted {
@@ -691,6 +698,7 @@ where
                 ],
                 turn.usage,
                 result_ids,
+                cell_turn_cost(&runner),
             );
             yield Ok(DriveItem::Item(MultiTurnStreamItem::TurnCommitted {
                 id: turn_id,

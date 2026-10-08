@@ -68,21 +68,6 @@ pub struct ContextManager {
     tree: SessionTree,
     /// The shared write buffer: commits queue here, the session drains.
     buffer: SharedBuffer,
-    /// The dollars of a completion, stamped at commit (the invoice
-    /// ruling): this crate is engine-free and config-free, so the
-    /// session injects the arithmetic — rates in effect × the
-    /// provider's report. [`TurnCost::uncosted`] for contexts with no
-    /// billing story (seeds, tests).
-    turn_cost: TurnCost,
-}
-
-/// The injected cost resolver: usage → dollars-at-call-time, or `None`
-/// when nothing is stated (no provider report, no configured rates).
-pub type TurnCost = std::sync::Arc<dyn Fn(&Usage) -> Option<f64> + Send + Sync>;
-
-/// The no-billing resolver: every turn uncosted.
-pub fn uncosted() -> TurnCost {
-    std::sync::Arc::new(|_| None)
 }
 
 impl std::fmt::Debug for ContextManager {
@@ -96,22 +81,17 @@ impl std::fmt::Debug for ContextManager {
 impl ContextManager {
     /// A fresh conversation over a shared buffer. The writer's `create`
     /// pre-queues the header; nothing is written until a drain.
-    pub fn empty(buffer: SharedBuffer, turn_cost: TurnCost) -> Self {
+    pub fn empty(buffer: SharedBuffer) -> Self {
         Self {
             tree: SessionTree::empty(),
             buffer,
-            turn_cost,
         }
     }
 
     /// Reload: born from a parsed file's tree, with a buffer positioned
     /// at the file's end. The only way existing state enters.
-    pub fn from_tree(tree: SessionTree, buffer: SharedBuffer, turn_cost: TurnCost) -> Self {
-        Self {
-            tree,
-            buffer,
-            turn_cost,
-        }
+    pub fn from_tree(tree: SessionTree, buffer: SharedBuffer) -> Self {
+        Self { tree, buffer }
     }
 
     /// Seed a standalone (in-memory) conversation from an existing
@@ -121,10 +101,9 @@ impl ContextManager {
     /// one roundtrip. Nothing persists (a [`NullBuffer`] underneath).
     #[allow(clippy::panic)] // sanctioned crash: an invalid seed, failed loud (AGENTS.md doctrine)
     pub fn seeded(messages: Vec<Message>) -> Self {
-        let mut seeded = Self::empty(
-            std::sync::Arc::new(std::sync::Mutex::new(crate::writer::NullBuffer)),
-            uncosted(),
-        );
+        let mut seeded = Self::empty(std::sync::Arc::new(std::sync::Mutex::new(
+            crate::writer::NullBuffer,
+        )));
         let mut batch: Vec<Message> = Vec::new();
         for message in messages {
             let opens_roundtrip = matches!(&message, Message::Assistant { content, .. }
@@ -200,7 +179,7 @@ impl ContextManager {
     /// calls commit only through [`fold_all`](Self::fold_all), never
     /// without their results.
     pub fn fold(&mut self, message: Message) {
-        self.fold_entry(message, None, None);
+        self.fold_entry(message, None, None, None);
     }
 
     /// Fold a user message under its born-early id (its `message_queued`
@@ -216,15 +195,23 @@ impl ContextManager {
                  fold_turn_with_id — its reported usage rides the commit"
             );
         }
-        self.fold_entry(message, None, Some(id));
+        self.fold_entry(message, None, Some(id), None);
     }
 
     /// Commit a settled, tool-free assistant turn under its announced
-    /// turn id, with the usage the provider reported for it — the
-    /// measurement rides the entry (the compaction trigger reads it
-    /// back; reloaded stats count it). The engine's FINAL fold.
-    pub fn fold_turn_with_id(&mut self, message: Message, id: String, usage: Usage) {
-        self.fold_entry(message, Some(usage), Some(id));
+    /// turn id, with the usage the provider reported for it and the
+    /// dollars the spend point computed for it — both ride the entry
+    /// as plain data (this crate never computes cost; the compaction
+    /// trigger reads the usage back; reloaded stats count both). The
+    /// engine's FINAL fold.
+    pub fn fold_turn_with_id(
+        &mut self,
+        message: Message,
+        id: String,
+        usage: Usage,
+        cost: Option<f64>,
+    ) {
+        self.fold_entry(message, Some(usage), Some(id), cost);
     }
 
     /// The committing turn's measured context growth (owner ruling
@@ -279,7 +266,13 @@ impl ContextManager {
     }
 
     #[allow(clippy::panic)] // sanctioned crash: an engine wiring bug, failed loud (AGENTS.md doctrine)
-    fn fold_entry(&mut self, message: Message, usage: Option<Usage>, id: Option<String>) {
+    fn fold_entry(
+        &mut self,
+        message: Message,
+        usage: Option<Usage>,
+        id: Option<String>,
+        cost: Option<f64>,
+    ) {
         let kind = match message {
             Message::User { .. } => EntryKind::UserMessage { message },
             Message::Assistant { id, content } => {
@@ -294,12 +287,13 @@ impl ContextManager {
                 }
                 EntryKind::AssistantMessage {
                     message: Message::Assistant { id, content },
-                    // `None` only on the seed path — no server measured
-                    // a seeded turn, and zeros are the type's
-                    // not-reported sentinel.
+                    // `None` usage only on the seed path — no server
+                    // measured a seeded turn, and zeros are the type's
+                    // not-reported sentinel; seeds are uncosted for
+                    // the same reason (the callers pass `cost: None`).
                     usage: usage.unwrap_or_default(),
                     delta_tokens: self.turn_delta(usage.as_ref()),
-                    cost: usage.as_ref().and_then(|u| (self.turn_cost)(u)),
+                    cost,
                 }
             }
             // A System message carries verbatim as its own message
@@ -316,7 +310,9 @@ impl ContextManager {
     }
 
     /// As [`fold_all`](Self::fold_all), but the committed entries carry
-    /// the provider-reported usage of the batch's assistant turn, and
+    /// the provider-reported usage of the batch's assistant turn and
+    /// the dollars the spend point computed for it (plain data — this
+    /// crate never computes cost), and
     /// the result entries reuse their born-early ids (minted at
     /// settlement, announced by the result events) — live and replay
     /// name the same nodes. `result_ids` pairs 1:1 with the batch's
@@ -326,8 +322,9 @@ impl ContextManager {
         batch: Vec<Message>,
         usage: Usage,
         result_ids: Vec<String>,
+        cost: Option<f64>,
     ) {
-        self.fold_all_entry(batch, usage, result_ids);
+        self.fold_all_entry(batch, usage, result_ids, cost);
     }
 
     /// The roundtrip commit for a seeded history (or a test double) —
@@ -339,11 +336,17 @@ impl ContextManager {
     /// grow, all-or-none — tool calls enter the context only with
     /// their results, or never.
     pub fn fold_all(&mut self, batch: Vec<Message>) {
-        self.fold_all_entry(batch, Usage::new(), Vec::new());
+        self.fold_all_entry(batch, Usage::new(), Vec::new(), None);
     }
 
     #[allow(clippy::panic)] // sanctioned crash: an engine wiring bug, failed loud (AGENTS.md doctrine)
-    fn fold_all_entry(&mut self, batch: Vec<Message>, usage: Usage, result_ids: Vec<String>) {
+    fn fold_all_entry(
+        &mut self,
+        batch: Vec<Message>,
+        usage: Usage,
+        result_ids: Vec<String>,
+        cost: Option<f64>,
+    ) {
         let mut messages = batch.into_iter();
         let assistant = match messages.next() {
             Some(message @ Message::Assistant { .. }) => message,
@@ -399,7 +402,7 @@ impl ContextManager {
             EntryKind::AssistantMessage {
                 message: assistant,
                 delta_tokens: self.turn_delta(Some(&usage)),
-                cost: (self.turn_cost)(&usage),
+                cost,
                 usage,
             },
             assistant_id,
@@ -477,12 +480,16 @@ impl ContextManager {
     /// in. The cut child must sit on the active branch (the box
     /// selected it there). The regime's base (`tokens_after`) is the
     /// box's suffix-delta arithmetic, persisted here once — every
-    /// later read is a field access. Like every commit: the record
+    /// later read is a field access. The pass's `usage` and its
+    /// `cost` ride as plain data — the session computed the dollars
+    /// at the spend point; this crate records, never computes. Like
+    /// every commit: the record
     /// enqueues into the buffer as one batch and the tree grows in
     /// the same operation. Validation failures are internal wiring
     /// bugs (the box checks cut viability before committing) and
     /// fail loud.
     #[allow(clippy::panic)] // sanctioned crash: an engine wiring bug, failed loud (AGENTS.md doctrine)
+    #[allow(clippy::too_many_arguments)] // one pass's facts, all named
     pub fn commit_compaction(
         &mut self,
         id: String,
@@ -491,7 +498,8 @@ impl ContextManager {
         tokens_before: u64,
         tokens_after: u64,
         usage: Usage,
-    ) -> Option<f64> {
+        cost: Option<f64>,
+    ) {
         let on_branch = self
             .tree
             .path_to_head()
@@ -503,7 +511,6 @@ impl ContextManager {
                  active branch — the compaction box selected a stale cut"
             );
         }
-        let stamped = (self.turn_cost)(&usage);
         let entry = SessionEntry::with_id(
             id,
             self.tree.head().map(str::to_string),
@@ -513,7 +520,7 @@ impl ContextManager {
                 cut_child,
                 tokens_before,
                 tokens_after,
-                cost: stamped,
+                cost,
                 usage,
             },
         );
@@ -523,7 +530,6 @@ impl ContextManager {
         // compaction node, exactly the walked order.
         let _ = lock::lock(&self.buffer).enqueue(&[FileRecord::Node(entry.clone())]);
         self.tree.append(entry);
-        stamped
     }
 
     /// The unified commit: chain the entries under the head, enqueue
