@@ -52,7 +52,9 @@ The unified diff of the applied edit batch, plus per-edit outcomes.
 - `outcomes[i].applied` is per edit in the order the call listed them
   — a partial application (some `false`) means the rest are reported
   by index: the model fixes and resends only the failed ones, and a
-  renderer marks exactly those.
+  renderer marks exactly those. A rejected outcome also carries
+  `reason` (the same string `content` reports for that edit; absent
+  when applied).
 
 ### `bash`
 
@@ -66,14 +68,16 @@ run has none.
   "total_lines": 5403,
   "omitted_lines": 5203,
   "total_bytes": 190112,
-  "spill_path": "C:\\Users\\…\\AppData\\Local\\Temp\\tabit-bash-out-…"
+  "spill_path": "C:\\Users\\…\\AppData\\Local\\Temp\\tabit-bash-…"
 }
 ```
 
-`content` carries the visible head; `spill_path` names the temp file
+`content` carries both ends of the output (the middle is omitted);
+`spill_path` names the temp file
 holding the full output — link or open it, the frontend reads the file
-itself. A failed command has **no** cargo: the exit code rides
-`status: { "failed": { "exit_code": n } }` and the prose (already in
+itself. A failed command has **no** cargo: the exit code rides the
+internally-tagged status (`{"status":"failed","exit_code":n}`) and the
+prose (already in
 `content`) names it; signal kills have no code at all.
 
 ### `subagent`
@@ -82,11 +86,15 @@ The child-session facts of one delegation, on the completed arm.
 
 ```json
 {
+  "id": "ferret",
   "child_id": "0192uuidv7child",
   "outcome": "completed"
 }
 ```
 
+- `id` is the parked child's **friendly id** — the `followup` tool's
+  address — when the completed child stayed parked for follow-ups,
+  `null` when it was not parked.
 - `child_id` is the child's **session id** — the same value that
   stamps the child's whole event stream and that its `session_opened`
   announce carries as `id`. The result is the post-hoc half of the
@@ -114,14 +122,14 @@ not exist):
 - `native:select_one` — given multiple choices, select exactly one,
   with optional free text. Request `{ title, body, options: [{ label,
   description? }], free_text }`, answer `{ selected: [label], text? }`.
-  **The permission gate's allow/always/deny card is this template
-  with its own labels.**
+  **The permission gate's Allow/Block card is this template with its
+  own labels (plus free text — the block reason).**
 - `native:select_any` — given multiple choices, select zero or more,
   with optional free text. Request `{ title, body, options: [{ label,
   description? }], free_text }`, answer `{ selected: [label, ...],
   text? }` (0..n). With zero options given this is the free-text ask
   (the deleted `ask_user` tool was this template's reference consumer;
-  the permission gate and extension tools use it the same way).
+  extensions ask through the same templates).
 
 Both share the one `SelectAnswer` shape: `selected` echoes the chosen
 labels (exactly one for `select_one`), `text` carries the free-text

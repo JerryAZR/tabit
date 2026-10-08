@@ -13,7 +13,7 @@
 //!
 //! - `native:select_one` — given multiple choices, select exactly one,
 //!   with optional free text. The permission gate's
-//!   allow/always/deny card is this template with its own option
+//!   Allow/Block card is this template with its own option
 //!   labels (what used to be `native:confirm`).
 //! - `native:select_any` — given multiple choices, select zero or
 //!   more, with optional free text. With zero options given this is

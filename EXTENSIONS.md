@@ -75,9 +75,11 @@ fn main() {
 
 Bodies are futures (asks await natively; `ctx.cancelled()` polls the
 leash — "Tool cancellation crosses the pipe" below). The SDK bins
-are the full worked set: `echo` (tools + asks + watches),
-`autotitle` (model_prompt), `lmstudio` (a provider relay),
-`child-ext` (owned subagent children).
+are the full worked set: `echo-ext` (tools + asks + watches),
+`shadow-ext` (shadows a core tool — the `replaces_core` report),
+the `clash-a-ext`/`clash-b-ext` pair (the newcomer-refused
+conflict), `autotitle-ext` (model_prompt), `lmstudio-ext` (a
+provider relay), `child-ext` (owned subagent children).
 
 **From scratch (any language).** The pipe is JSONL on your stdio and
 six laws:
@@ -90,11 +92,13 @@ six laws:
 2. The host answers with `host_facts` (`core_path`, `cwd`); there is
    no other handshake.
 3. The frontend grammar rides the pipe flat ("The wire" below):
-   tool calls arrive as commands, your events and asks cross as
+   tool calls ride the tool lane, your events and asks cross as
    stamped frames, hook consults and results ride the hook lane.
 4. **Ignore nothing.** An unparseable line, a well-formed frame of a
-   type the host does not know, or a result answering the wrong
-   correlation is a contract break — death with the snippet. If you
+   type the host does not know, or a result answering the wrong KIND
+   of correlation (a hook result on a tool-call id or vice versa) is
+   a contract break — death with the snippet. An answer for an
+   unknown or already-settled id is the race's tolerated drop. If you
    need new extension→host vocabulary, the protocol version bumps
    and older hosts refuse you at the report (the one-directional
    compatibility law below).
@@ -237,7 +241,7 @@ Ruled over the SDK discussion: the extension pipe carries the
 the extension's own lanes — no wrapper frames, no second grammar.
 Dispatch on the inbound side is a parse cascade: the extension lanes
 (`report`, `tool_result`, `hook_result`, `service_request`) first, then
-any session command, then any session event; a line parseable as
+any session event, then any session command; a line parseable as
 none of the three is the contract break it always was (death with
 the snippet). The two tag namespaces are disjoint and stay so.
 
@@ -492,10 +496,13 @@ policy (pi's rule):
   core tool nor refuses a live peer. And when an extension that
   shadowed a built-in tool dies (its process; the core keeps
   running), **the core tool is restored, with an explicit warning** —
-  at boot by the assembly's liveness gate; mid-run by re-deriving the
-  effective toolset when the next run opens (the same
-  freshness-and-rebuild seam a model switch rides), the designed
-  slice the death event feeds.
+  at boot by the assembly's liveness gate. The mid-run half —
+  re-deriving the effective toolset when the next run opens (the
+  same freshness-and-rebuild seam a model switch rides), the slice
+  the death event feeds — is **ruled but not yet implemented**:
+  until it lands, a mid-process shadow death leaves the proxy
+  answering "not running" and the core tool unmounted until the
+  next backend start.
 
 Sibling domains carry their own rules: skills merge last-wins-with-
 warn per the discovery ladder; providers are
@@ -598,8 +605,9 @@ settled 2026-09, shipped as `crates/tabit-ext-install`)
   (orphan sweep) are deferred follow-ups over the same facts.
   Orphaned dependencies stay mounted until then.
 - No settings **writer**: disabling stays a hand-edit of
-  `settings.toml`; tabit writes nothing under `~/.tabit` except the
-  extensions root itself.
+  `settings.toml`; the settings/install layer writes nothing under
+  `~/.tabit` except the extensions root itself (the `login`/`logout`
+  auth.toml write is the session host's, FRONTEND.md §5).
 - Pickup at the **next backend start** — no mid-run loading (the
   prompt byte-stability law; installing is the user's reload/cache
   decision). Same UX as pi's reload.
@@ -715,8 +723,8 @@ Implications:
 - An extension that implements a hook, or ships a tool, requests
   interaction through the same channels the core uses — no new
   plumbing, no second popup system. The wire shape
-  (`interaction_request { id, title, body, options, free_text }` /
-  `interaction_response { id, option?, text? }`) is generic on
+  (`interaction_request { id, ui_type, payload }` /
+  `interaction_response { id, payload }`) is generic on
   purpose: reuse it; do not invent new popup frames.
 - **The extension pipe's lift (task 2) mirrored the engine's
   capability verbatim** — `interaction_request { call_id, id, ui_type,
@@ -817,15 +825,15 @@ policy (the dev-time permission gate today) is **assembly-mounted**:
 `SessionBuilder::hooks(HookStack)` (`crates/tabit-session/src/
 session/builder.rs`) — the binary registers closure hooks
 (`HookStack::hook(spec, on::tool_call(...))` is the pre-call gate
-point; `on::tool_call` is the closure surface's one event point
-today, the post-result point having no closure registration yet),
-and the policy's state (session-scoped grants) is captured in the
+point; the closure surface carries the post-result point too —
+`on::tool_result`, which the extension world's hook lane registers
+through), and the policy's state (session-scoped grants) is captured in the
 closure at mount. The gate asks through the hook context's
 interaction capability (`ctx.interaction()` — the same typed
 capability tool bodies read). The core mounts whatever arrives
-without naming a type. Deleting or replacing the dev-time gate is
-deleting `permission.rs` and the one assembly mount
-(`crates/tabit/src/main.rs`) — the same door any policy enters.
+without naming a type. Deleting or replacing the built-in gate is
+deleting the `tabit-gate` mount in `crates/tabit-app`'s assembly —
+the same door any policy enters.
 
 Implications:
 

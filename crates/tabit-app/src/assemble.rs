@@ -619,7 +619,7 @@ pub(crate) fn extension_skills_catalog(
 /// fails loudly (a terminal user asked explicitly); JSON mode starts
 /// fresh — the pinned startup contract: the chat UI is unconditional,
 /// and an empty store (a brand-new project) is not an error. The
-/// handshake's `resumed: false` tells the frontend what happened.
+/// `session_opened`'s `resumed: false` tells the frontend what happened.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum ContinueMiss {
     Fail,
@@ -672,8 +672,8 @@ pub fn assemble(
         .default_selection(explicit, resumed)
         .map_err(|e| e.to_string())?;
     // Startup degradations are data (ruled: external errors ride the
-    // channel): the worker emits them as `error { kind: model }` frames —
-    // the first frames after the handshake ack. `selection` may be
+    // channel): the host emits them as `error { kind: model }` frames —
+    // after the report and the session's own `session_opened`. `selection` may be
     // `None` (nothing usable at this backend): the session opens
     // selection-less and the note above teaches the fix.
     let session = assemble_session(

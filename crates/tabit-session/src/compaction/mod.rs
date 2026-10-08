@@ -261,8 +261,9 @@ pub(crate) async fn run(
     let mut passes: u32 = 0;
     // Bounded retries of a tool-call-violating response (owner ruling:
     // throw the response away and resend — never synthesize an in-band
-    // error result; each discard closes its bracket as failed so the
-    // frontend drops that attempt's deltas).
+    // error result; each discard emits `compaction_retried` so the
+    // frontend drops that attempt's deltas; the bracket closes failed
+    // only when the cap runs out).
     let mut violation_retries: u32 = 0;
     loop {
         let history = read(cell).history();
@@ -365,7 +366,7 @@ pub(crate) async fn run(
             // A violating response is discarded and the request resent
             // (bounded): sampling variance usually corrects a one-off
             // tool call; a model that insists fails the pass. The
-            // The discarded attempt's deltas drop; the invocation
+            // discarded attempt's deltas drop; the invocation
             // continues (turn_retried's sibling).
             PassOutcome::Violated => {
                 emit(SessionEvent::CompactionRetried);

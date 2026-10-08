@@ -154,8 +154,9 @@ command path that serves this (owner-ruled through design review):
 - **Replay is a read that rides the beat only for emission
   coherence:** its pass shares the session's event stream with the
   run's frames, unmergeable without a per-session sequence number.
-  The stage-4 seq primitive lifts it into a wait-free read— served
-  at receive from a published chain snapshot, like any other read.
+  A per-session sequence primitive would lift it into a wait-free
+  read — served at receive from a published chain snapshot, like any
+  other read (parked, not built).
 Reads never hold writes: messages keep flowing while a pass is
 parked.
 
@@ -192,11 +193,12 @@ engine has zero compaction knowledge.
   compaction-aware. The intercept lives in the run epilogue: a
   failure classified as overflow routes to the box **with the window
   the error itself reports** (the wall teaches the window) before
-  the terminal event; a repaired context sets a continue intent and
+  the terminal event; **`run_failed` lands either way** — the retry is
+  visible, not hidden. A repaired context then sets a continue intent and
   the pump re-runs over it (the failed turn folded nothing — the
   conversation still ends at the pre-failure roundtrip, so the retry
   is the same turn); an unrepairable one (cannot shrink, the empty
-  prefix) emits `run_failed` with the overflow message.
+  prefix) stops at the failure.
 
 ## Layer 2 — the inner loop (one run's coroutine)
 
@@ -358,7 +360,7 @@ notice channel, which the run's death cannot drop.
 |---|---|---|
 | model-side defect | tool-call arguments that cannot be parsed | discarded as a local; `ModelTurnRetried`; bounded streak; steers reset it |
 | model-side mistake | a tool name not in the registry | admission scan: an in-band synthetic result tells the model; never stops the run |
-| retryable provider/transport | rate-limit, transient connection failures, timeouts | drained, then bounded retry through the normal loop |
+| retryable provider/transport | rate-limit (429-shaped) | drained, then bounded retry through the normal loop. Transient connection failures and timeouts retry **below** the loop, at the transport layer (before body bytes are consumed); what reaches the loop beyond rate limits is terminal |
 | terminal provider | auth failure, permanent quota, context overflow | drained, then exit-Failed — history (with steers) carries forward. Context overflow is the one recoverable terminal (ruled 2026-09): the session's epilogue intercept routes it to the compaction box before `run_failed` lands — see the compaction doors |
 | internal (ours) | our own invariants | **panic and hard stop** — a development bug; the process dies loud. Not a loop path and not a terminal: there is nothing graceful to do with ourselves |
 | request construction | a provider cannot carry the content (e.g. a video attachment on Anthropic) | surfaced as a **terminal** error through the drain — implementation judgment: it can stem from *user content* (external input), so it fails gracefully rather than panicking |
@@ -378,7 +380,8 @@ malformed-call defect, the finish reason). Consumers outside the loop
 classification is never rebuilt at a consumption site. The loop keeps
 its generator-shaped driving (items yield mid-consumption through
 `async_stream`); both drivers feed the one assembler and settle into
-the one type, so each question has one answer. Retry budgets are small named constants.
+the one type, so each question has one answer. Retry budgets are one small
+named constant (the defect and provider streaks share the cap).
 Streaks are run locals: fresh at every run entry (every run is an
 attended start — a message or an explicit continue signal); if
 continue is ever driven *automatically*, that driver needs its own
@@ -439,10 +442,10 @@ a gap to patch around. Today:
 | the compaction box | the box itself, during its awaited execution (the pre-request door, the beat doors) — a named third writer of the tree, time-exclusive with the loop and the beat by construction (whoever awaited it is suspended) | everything else reads the cell as always |
 
 **The probe's read is tree-truth.** The probe's `contains` names
-committed nodes only: a checkout target must be a committed,
-roundtrip-closed node (flag 23's rule), so an id that is announced
-but not yet folded (a queued message, an in-flight turn) is not a
-valid target — and that is correct: you can only rewind to a
+committed nodes only: a checkout target must be a committed node, so
+an id that is announced but not yet folded (a queued message, an
+in-flight turn) is not a valid target — and that is correct: you can
+only rewind to a
 committed checkpoint. The read is race-free by the `RwLock`
 discipline (the loop's folds grow the tree in one synchronous
 write-hold; a probe reads through `read()`, so it can never observe
@@ -491,10 +494,11 @@ Recorded where the code had to pick; revisit on review:
   configuration error; the at-least-one-turn invariant makes "a run
   that cannot run" unrepresentable, so `max_turns(0)` is not a run
   shape.
-- **Provider-error identity survives the exit**: the loop stores the
+- **Provider-error identity survives the terminal exit**: the loop stores the
   classified error, but the exit restores the original
   `Completion`-shaped error, so consumers keep matching the
-  provider's own error type.
+  provider's own error type. (The retries-exhausted exit is the one
+  exception: it yields the generic streak error.)
 - **A steer arriving during the final turn** exits the run (`Done`) —
   the steer opens the next run at the work signal (ruled 2026-08: one
   less thing to check, identical behavior).
@@ -576,7 +580,7 @@ each; **nothing may kill a batch**:
 
 | need | mechanism | semantics |
 |---|---|---|
-| stop now | **abort** (the token leaf) | preempts at any await; `run_aborted`; queue discarded; unanswered calls get synthesized interrupted results. Callable by the user, frontends, and any hook constructed with the leaf. |
+| stop now | **abort** (the token leaf) | preempts at any await; `run_aborted`; queue discarded; the interrupted roundtrip folds nothing — unanswered calls never land, so there is nothing dangling to repair. Callable by the user, frontends, and any hook constructed with the leaf. |
 | don't continue after this batch | **post-tool `Stop` → the `terminating` flag** | no effect on the current batch — unstarted chains still run; the flag is fed only after `fold_all` commits, so the tool phase is flag-blind by construction. The loop top exits `run_failed(stopped)` and **discards the pending queue with notice** (the stop-semantics ruling, below). |
 | don't run this call | **`Skip`** | in-band synthetic result; the model is told; siblings unaffected. |
 
@@ -677,8 +681,10 @@ to a node; the branch ending there must be roundtrip-closed (a user
 message, a call-free assistant turn, or the last result of a complete
 batch). A target inside an open roundtrip — an assistant whose calls
 were never answered on that branch, a batch's interior result —
-panics ("revisit later"; owner ruling, flag 23). `rewind(n)` targets
-user messages and is unaffected.
+**resolves forward** to the first closed position (the batch's last
+tool result), and the session reports the resolved landing (owner
+ruling 2026-09-26; the old shape was a loud refusal). `rewind(n)`
+targets user messages and is unaffected.
 
 ## Turn-level stop semantics (ruled 2026-08; implemented by the loop)
 

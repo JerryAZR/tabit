@@ -161,8 +161,9 @@ pub fn serve_json_stdio(
     });
     let mounted = mount_world(launchable, &runtime);
     // Assemble failures (a session unreadable, an explicit `--model`
-    // naming a ref config does not know) reject the handshake with
-    // the plain reason — not the config setup guide, which would be
+    // naming a ref config does not know) fail the startup with
+    // the plain reason (the report, an unstamped `error`, exit 1) —
+    // not the config setup guide, which would be
     // advice for a problem the user does not have. A `--continue`
     // that finds no sessions is absorbed into a fresh start (the
     // pinned startup contract; `session_opened`'s `resumed: false`

@@ -36,13 +36,17 @@ the wire shapes the work produced live in FRONTEND.md §6's
   unmeasured context (no turn ever reported) skips loudly, the
   unknown-window skip's sibling.
 - **The request**: appended to the real conversation — same preamble,
-  same toolset (prefix-cache identity), no tools offered, the
-  instruction riding in the user message; **rejects every tool call**
+  same toolset (prefix-cache identity: the tools ARE offered, that is
+  what makes the prefix cache-identical), the instruction riding in
+  the user message; **rejects every tool call**
   — a violating response is discarded and the request resent, bounded
-  by the retry cap, each discard closing as `compaction_failed`.
+  by the retry cap, each discard announced as `compaction_retried`
+  (`compaction_failed` only when the cap is exhausted).
 - **Cut selection**: the latest valid boundary satisfying sent-prefix
   < 75% of the window ∧ tail ≥ `KEEP_TAIL`; blocks are post-text
-  boundaries (after assistants without tool calls). Rejection or a
+  boundaries (after assistants without tool calls, or after a
+  compaction node — pass N+1 may cut right after pass N's node).
+  Rejection or a
   length-capped summary moves the cut one block up and retries.
   Multi-pass is just another regular compaction (pass N+1's history
   already carries pass N's summary); tail overshoot is normal when
@@ -50,7 +54,9 @@ the wire shapes the work produced live in FRONTEND.md §6's
 - **Outcome**: `Compacted` (happened ∧ fits), `NothingToCompact`
   (benign), `Oversized { reason, passes, tokens_after }` (not good to
   continue — the guard, the pass cap, or infeasibility), `Failed`,
-  `Cancelled`. The intercept parks a retry only on `Compacted`.
+  `Cancelled`, `Skipped` (benign — an unknown or below-envelope
+  window, an unmeasured context, or conditions not met). The
+  intercept parks a retry only on `Compacted`.
 - **The envelope**: windows below **64K** skip loudly; unknown windows
   skip the thresholds while overflow recovery still works — the wall
   teaches the window from the typed transport error, learned for the

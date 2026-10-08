@@ -51,8 +51,7 @@ pub enum SessionEvent {
         /// typed, so a salvaged draft re-sent re-expands fresh.
         text: String,
     },
-    /// Queued messages were discarded (a mailbox clear: abort, checkout,
-    /// the prompt barrier). The pairs hand back what the user authored —
+    /// Queued messages were discarded (a mailbox clear: abort, checkout). The pairs hand back what the user authored —
     /// the first part, tags intact, never the expansion — ids included,
     /// so pending displays resolve by id; the messages were never part
     /// of the conversation and are not persisted.
