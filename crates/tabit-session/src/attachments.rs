@@ -13,7 +13,11 @@
 //! decodable in-scope image — pass through untouched with a warn (the
 //! skill rule: the message is never rejected). Raster scope only:
 //! PNG/JPEG/GIF/WebP, SNIFFED from the bytes and verified by decode —
-//! the extension is never trusted.
+//! the extension is never trusted. The scan reads the authored first
+//! part only (owner ruling): every door expansion scans what the user
+//! typed, so expansion order affects only the appended parts'
+//! ordering, never what gets expanded — a skill body documenting the
+//! tag does not attach itself.
 //!
 //! Downscaling happens here, once, before anything is stored or sent
 //! (the faithful-copy doctrine: the durable record holds what the model
@@ -51,15 +55,19 @@ const JPEG_QUALITY_LADDER: [u8; 4] = [85, 70, 55, 40];
 
 /// Expand a message's attachment tags: the message verbatim — original
 /// parts first, tags intact in the text — then, per resolvable tag in
-/// order of appearance, the basename label and the image part. A
-/// message without tags, or whose tags all pass through, returns
-/// unchanged.
+/// order of appearance, the basename label and the image part. The
+/// scan reads the AUTHORED first part only (owner ruling): every door
+/// expansion scans the same input — what the user typed — so expansion
+/// order affects only the appended parts' ordering, never what gets
+/// expanded (an appended skill body documenting the tag must not
+/// attach itself). A message without tags, or whose tags all pass
+/// through, returns unchanged.
 #[allow(clippy::unreachable)] // sanctioned crash: the re-match's else arm is dead by the check above
 pub(crate) fn expand_attachments(message: Message) -> Message {
     let Message::User { .. } = &message else {
         return message;
     };
-    let text = crate::session::user_text(&message);
+    let text = crate::session::authored_text(&message);
     if !text.contains(TAG_OPEN) {
         return message;
     }
