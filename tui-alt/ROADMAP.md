@@ -149,10 +149,18 @@ full no-effect-↓ semantics await a pi-tui public accessor.
 
 ## 6. Merge-back hygiene (at the end)
 
-- `scripts/build-release.ts` is bun-shaped (`bun build --compile`) —
-  decide the Node-era release shape (SEA vs. shipping `.ts` under type
-  stripping).
-- ROADMAP.md on main still says "omp fork of pi-tui under Bun …
-  Bun-compiled exe" — amend with the stock-pi-tui-on-Node pivot.
+- ~~`scripts/build-release.ts` is bun-shaped~~ — **resolved 2026-10**:
+  the Node-era release shape is `scripts/pack.ts`. The app ships as a
+  single-file esbuild bundle (plain JS, fast startup — Node refuses
+  type-stripping under `node_modules`, so `.ts` sources can't ship) as
+  **`tabit-agent`** on npm (bin `tabit`); the core rides in per-platform
+  optional-dependency packages (`tabit-agent-<platform>`, esbuild
+  pattern, no postinstall, exact-versioned — the lockstep). One version
+  line for the bundle: TUI and core changes bump it alike. Matrix:
+  win-x64 + linux-x64 first (the owner-testable pair), darwin-arm64
+  after a mac test, the rest deferred. SEA standalone exes and
+  self-update machinery are deliberate deferrals.
+- ~~ROADMAP.md on main still says "omp fork of pi-tui under Bun …~~
+  ~~Bun-compiled exe"~~ — amended in the same pass.
 - The merge-back itself: this worktree's branch lands as `tui/` on
   `master`.

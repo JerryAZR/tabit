@@ -1,16 +1,20 @@
 {
 	"type": "module",
-	"name": "tabit-tui-alt",
+	"name": "tabit-agent",
 	"version": "0.1.0",
-	"description": "Tabit's alt-screen terminal frontend: a full-screen TUI over `tabit-core --json`",
+	"description": "tabit: the alt-screen terminal frontend for the tabit agent stack — bundles the lockstepped tabit-core backend via platform packages",
 	"license": "MIT",
 	"main": "./src/cli.ts",
 	"bin": {
-		"tabit-tui": "./src/cli.ts"
+		"tabit": "./src/cli.ts"
 	},
 	"engines": {
 		"node": ">=24.2"
 	},
+	"files": [
+		"src",
+		"!src/mock-backend.ts"
+	],
 	"scripts": {
 		"check": "tsc --noEmit",
 		"test": "node --test test/*.test.ts"
@@ -21,6 +25,7 @@
 	},
 	"devDependencies": {
 		"@types/node": "^24.0.0",
+		"esbuild": "^0.28.2",
 		"typescript": "7.0.2"
 	}
 }

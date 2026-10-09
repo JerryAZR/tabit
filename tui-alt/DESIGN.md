@@ -232,25 +232,32 @@ TOML is the config format — humans edit it. The TUI owns
 TUI-untouched); `[keys]` carries keybinding overrides first, later
 sections take future TUI settings (exit-print behavior, …).
 
-## Release shape (assembled by `scripts/build-release.ts`)
+## Release shape (assembled by `scripts/pack.ts`)
 
-The M0 human pass runs the shipped artifact, not the dev shim. The script
-assembles the per-platform package into `dist/pkg/` exactly as the ruling
-describes: the **Bun-compiled standalone TUI exe** (runtime embedded) next
-to the **cargo release core**, with the npm bin shim — then `npm pack` +
-`npm i -g <tarball>` install it as a real copy (junction/link installs are
-not the test surface). The resolution ladder's first file rung is the
-executable's own directory, so the installed pair is found with zero
-configuration; `--print-backend` proves it headless. The two dev rungs
-(repo cargo builds) and the mock rung remain dev-only — the mock is absent
-from compiled builds by construction and fails loudly if asked for.
+The publishable family (owner ruling 2026-10): **`tabit-agent` on npm** —
+the app as a **single-file esbuild bundle** (`bin/tabit.js`; plain JS for
+startup speed, the sources live on GitHub) with bin `tabit` — shipping
+`.ts` sources is impossible by Node policy (type-stripping is refused
+under `node_modules`). pi-tui stays an external dependency: its napi
+clipboard prebuilds load by path from its own package. The core rides in
+one os/cpu-gated platform package per matrix entry
+(`tabit-agent-win32-x64`, `tabit-agent-linux-x64`; darwin-arm64 joins
+after a mac test), each carrying the cargo release binary. The meta's
+`optionalDependencies` pin the platform packages at the same version,
+injected at pack time so the dev checkout never resolves unpublished
+names: **one version line for the bundle**, bumped by TUI and core
+changes alike — the strict protocol handshake made atomic at the
+registry. The resolution ladder finds the installed core through node
+resolution (the platform-package rung); `--print-backend` proves the
+installed artifact headless. The dev rungs (repo cargo builds) and the
+mock stay dev-only — the bundle simply doesn't contain the mock, and
+asking for it fails loud.
 
-Publish-time-only (graduation work): the registry, the meta package's
-optionalDependencies gating, the cross-target matrix, and signing. One
-known watch-item for the M0 pass: stock pi-tui's optional native helpers
-(Windows VT input, clipboard) must be verified inside the compiled exe —
-they degrade gracefully, but if Shift+Enter or clipboard paste misbehaves,
-that fallback is the suspect.
+Publish-time-only (graduation work): the registry itself, the CI
+cross-build matrix, provenance, the `tabit-agent` name claim. crates.io
+stays the backend-only channel (`cargo install tabit-core` — the PATH
+rung marries it to any TUI install; the report's version check fails
+loud on skew).
 
 ## Deliberate defaults (until overruled)
 

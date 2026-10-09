@@ -19,28 +19,35 @@ import { AltRoot } from "./root.ts";
 import { log } from "./log.ts";
 
 /**
- * Backend resolution — the zero-tuning ladder (the GUI's `backend.rs`
- * shape): `--mock[=scenario]` (dev-only) → `-c`/`--continue` → `--bin
- * <path>` → `TABIT_CORE_BIN` → the executable's own directory (the **packaged
- * sibling** — how the shipped platform package resolves) → this repo's
- * cargo outputs (dev) → `tabit-core` on PATH.
+ * Backend resolution — the zero-tuning ladder: `--mock[=scenario]`
+ * (dev-only) → `--bin <path>` → `TABIT_CORE_BIN` → the installed
+ * **platform package** (`tabit-agent-<platform>-<arch>` — the npm
+ * optionalDependencies/esbuild pattern, the published app's core) → the
+ * **entry's own sibling** (the release-archive layout: `tabit-core`
+ * rides next to `cli.ts`) → this repo's cargo outputs (dev) →
+ * `tabit-core` on PATH (a `cargo install`).
  *
  * Launch semantics (owner rule): no args starts a **new** session;
  * continuation is explicit via `-c`/`--continue`, which resumes the
  * project's newest session. A failed spawn is an ungraceful exit report,
  * never a hang (the spike's entry-point lesson).
  */
-export function resolveBackendCommand(
-	argv: string[],
-	exists: (path: string) => boolean = existsSync,
-	execDir: string = dirname(process.execPath),
-): { bin: string; args?: string[] } {
+export interface ResolveDeps {
+	exists?: (path: string) => boolean;
+	/** Resolve an installed platform package's directory (undefined when
+	 *  not installed) — injectable; the real one rides import.meta. */
+	resolvePackage?: (name: string) => string | undefined;
+}
+
+export function resolveBackendCommand(argv: string[], deps: ResolveDeps = {}): { bin: string; args?: string[] } {
+	const exists = deps.exists ?? existsSync;
+	const resolvePackage = deps.resolvePackage ?? defaultResolvePackage;
 	const mock = argv.find(a => a === "--mock" || a.startsWith("--mock="));
 	if (mock !== undefined) {
 		const scenario = mock.startsWith("--mock=") ? mock.slice("--mock=".length) : "basic";
 		const mockPath = sourceFile("./mock-backend.ts");
 		if (mockPath === undefined || !existsSync(mockPath)) {
-			throw new Error("--mock is only available in a source checkout, not in a compiled build");
+			throw new Error("--mock is only available in a source checkout (the published package excludes the mock)");
 		}
 		return { bin: process.execPath, args: [mockPath, "--scenario", scenario] };
 	}
@@ -54,8 +61,14 @@ export function resolveBackendCommand(
 	const envBin = process.env.TABIT_CORE_BIN;
 	if (envBin !== undefined && envBin !== "") return { bin: envBin, args: base };
 	const exe = process.platform === "win32" ? "tabit-core.exe" : "tabit-core";
+	// The published app: the lockstepped platform package carries the core.
+	const pkgDir = resolvePackage(`tabit-agent-${process.platform}-${process.arch}`);
+	if (pkgDir !== undefined) {
+		const candidate = join(pkgDir, exe);
+		if (exists(candidate)) return { bin: candidate, args: base };
+	}
 	const candidates = [
-		join(execDir, exe), // the packaged sibling: the core rides next to the TUI exe
+		sourceFile(`./${exe}`), // the release archive: the core next to this entry
 		sourceFile(`../../target-test/debug/${exe}`), // dev: the gate's build
 		sourceFile(`../../target/debug/${exe}`), // dev: a plain cargo build
 	];
@@ -65,10 +78,20 @@ export function resolveBackendCommand(
 	return { bin: "tabit-core", args: base };
 }
 
+/** The npm rung's resolver: an installed platform package's directory,
+ *  found through node resolution from this module (hoisted or nested —
+ *  both resolve). Undefined when the package isn't installed. */
+function defaultResolvePackage(name: string): string | undefined {
+	try {
+		return dirname(fileURLToPath(import.meta.resolve(`${name}/package.json`)));
+	} catch {
+		return undefined;
+	}
+}
+
 /**
- * Resolve a path against this source file; undefined outside a source
- * checkout (a compiled exe has no source tree behind it, and its
- * `import.meta.url` points into the bundler's virtual root).
+ * Resolve a path against this source file; undefined when the module URL
+ *  isn't a file (a bundled/embedded runtime has no source tree behind it).
  */
 function sourceFile(rel: string): string | undefined {
 	try {
@@ -81,7 +104,7 @@ function sourceFile(rel: string): string | undefined {
 async function main(): Promise<void> {
 	const argv = process.argv.slice(2);
 	if (argv.includes("--version")) {
-		process.stdout.write(`tabit-tui ${pkg.version} (protocol v${PROTOCOL_VERSION})\n`);
+		process.stdout.write(`tabit-agent ${pkg.version} (protocol v${PROTOCOL_VERSION})\n`);
 		return;
 	}
 
@@ -101,7 +124,7 @@ async function main(): Promise<void> {
 	if (process.stdout.isTTY !== true) {
 		// The engine takes the terminal raw; running headless would hang on
 		// its own stdin. Fail loud, never hang (the spike's entry rule).
-		process.stderr.write("tabit-tui needs a real terminal (TTY); run it inside a terminal emulator\n");
+		process.stderr.write("tabit needs a real terminal (TTY); run it inside a terminal emulator\n");
 		process.exit(1);
 	}
 	log(`starting backend: ${resolved.bin} ${(resolved.args ?? ["--json", "--continue"]).join(" ")}`);
