@@ -4,6 +4,11 @@
 	"version": "0.1.0",
 	"description": "tabit: the alt-screen terminal frontend for the tabit agent stack — bundles the lockstepped tabit-core backend via platform packages",
 	"license": "MIT",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/JerryAZR/tabit.git",
+		"directory": "tui-alt"
+	},
 	"main": "./src/cli.ts",
 	"bin": {
 		"tabit": "./src/cli.ts"

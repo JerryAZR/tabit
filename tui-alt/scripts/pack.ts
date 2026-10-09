@@ -131,6 +131,9 @@ await build({
 	target: "node24",
 	external: ["@earendil-works/pi-tui"],
 });
+// The package page's face and the license: both ride every tarball.
+cpSync(join(pkgRoot, "README.md"), join(metaDir, "README.md"));
+cpSync(join(repoRoot, "LICENSE"), join(metaDir, "LICENSE"));
 writeFileSync(
 	join(metaDir, "package.json"),
 	`${JSON.stringify(
@@ -163,6 +166,7 @@ for (const platform of toPack) {
 	const dir = join(staging, `tabit-agent-${platform}`);
 	mkdirSync(dir, { recursive: true });
 	cpSync(core, join(dir, exe));
+	cpSync(join(repoRoot, "LICENSE"), join(dir, "LICENSE"));
 	writeFileSync(
 		join(dir, "package.json"),
 		`${JSON.stringify(
@@ -185,4 +189,10 @@ for (const dir of [metaDir, ...[...toPack].map(p => join(staging, `tabit-agent-$
 }
 
 console.log(`\npacked tabit-agent@${version} + [${[...toPack].join(", ")}] into ${dist}`);
-console.log(`install locally: npm i -g ${join(dist, `tabit-agent-${version}.tgz`)}`);
+// The local install IS the published install — npm publish only uploads
+// these same tarballs. Listing the platform tarballs explicitly lets npm
+// satisfy the optional dependencies offline (they 404 on the registry
+// until published; an unpublished optional dep is skipped, and the core
+// would be silently missing). Reinstalling the same version over itself
+// is fine — iterate without version bumps.
+console.log(`install locally: npm i -g ${["tabit-agent", ...[...toPack].map(p => `tabit-agent-${p}`)].map(n => join(dist, `${n}-${version}.tgz`)).join(" ")}`);

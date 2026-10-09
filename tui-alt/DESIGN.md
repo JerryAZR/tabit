@@ -259,6 +259,15 @@ stays the backend-only channel (`cargo install tabit-core` — the PATH
 rung marries it to any TUI install; the report's version check fails
 loud on skew).
 
+**The local install IS the published install**: `npm publish` only
+uploads the tarballs `npm pack` already produced, so `npm i -g
+dist/tabit-agent-*.tgz dist/tabit-agent-win32-x64-*.tgz` exercises the
+exact registry path (the explicit platform tarball satisfies the
+optional dependency offline — unpublished, it would 404 and be silently
+skipped, leaving the core missing). Reinstalling the same version over
+itself works — iterate on bugfixes without version bumps; publish once
+the artifact passes the human pass.
+
 ## Deliberate defaults (until overruled)
 
 - **Launch semantics (owner rule)**: no args starts a **new** session;

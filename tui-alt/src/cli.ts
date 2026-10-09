@@ -103,6 +103,20 @@ function sourceFile(rel: string): string | undefined {
 
 async function main(): Promise<void> {
 	const argv = process.argv.slice(2);
+	if (argv.includes("--help")) {
+		process.stdout.write(
+			"usage: tabit [-c|--continue] [--bin <path>] [--version] [--print-backend]\n" +
+				"\n" +
+				"  no args            start a new session\n" +
+				"  -c, --continue     resume the project's newest session\n" +
+				"  --bin <path>       use this tabit-core binary\n" +
+				"  --version          print the version and protocol\n" +
+				"  --print-backend    print the resolved backend command and exit\n" +
+				"\n" +
+				"docs: https://github.com/JerryAZR/tabit\n",
+		);
+		return;
+	}
 	if (argv.includes("--version")) {
 		process.stdout.write(`tabit-agent ${pkg.version} (protocol v${PROTOCOL_VERSION})\n`);
 		return;
