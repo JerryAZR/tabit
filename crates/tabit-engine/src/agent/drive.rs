@@ -245,6 +245,10 @@ fn cell_turn_cost(runner: &AgentRunner) -> Option<f64> {
 /// (a standalone run seeds a write-less twin), each fold a brief
 /// synchronous `write()` hold, no await under a guard.
 #[allow(clippy::too_many_lines)]
+// Sanctioned crashes below (AGENTS.md doctrine): the phase-source
+// contracts are internal invariants — a violation is our bug, and the
+// run dies loud rather than continuing broken.
+#[allow(clippy::unreachable, clippy::expect_used)]
 pub(crate) fn drive_agent<'a, S>(
     runner: AgentRunner,
     mut source: S,
@@ -466,16 +470,17 @@ where
                 source.run_model_turn(&mut ledger, prepared, chat_span);
             let mut completed: Option<Box<ModelTurn>> = None;
             let mut turn_error = None;
-            let mut turn_protocol_fault: Option<&'static str> = None;
             while let Some(item) = turn_stream.next().await {
                 match item {
                     Ok(PhaseEvent::Item(item)) => yield Ok(DriveItem::Item(item)),
                     Ok(PhaseEvent::ModelTurn(turn)) => completed = Some(turn),
                     Ok(PhaseEvent::ToolResults { .. }) => {
-                        // A model turn never settles with tool results.
-                        turn_protocol_fault =
-                            Some("model turn settled with tool results");
-                        break;
+                        // Sanctioned crash: the model-turn source
+                        // yields Item/ModelTurn/Err only — a tool
+                        // settle here means the phase plumbing broke.
+                        unreachable!(
+                            "a model-turn phase stream never settles with tool results"
+                        );
                     }
                     Err(err) => {
                         turn_error = Some(err);
@@ -484,13 +489,6 @@ where
                 }
             }
             drop(turn_stream);
-            if let Some(fault) = turn_protocol_fault {
-                store_error_usage(&runner, &ledger);
-                yield Err(StreamingError::Completion(
-                    CompletionError::ResponseError(fault.to_string()),
-                ));
-                break 'outer;
-            }
             if let Some(err) = turn_error {
                 // Classify; the loop routes through the convergence (the
                 // drain rides along, the decision rules).
@@ -525,16 +523,11 @@ where
                 }
                 continue 'outer;
             }
-            let turn = match completed {
-                Some(turn) => turn,
-                None => {
-                    store_error_usage(&runner, &ledger);
-                    yield Err(StreamingError::Completion(CompletionError::ResponseError(
-                        "model turn ended without settling a turn".to_string(),
-                    )));
-                    break 'outer;
-                }
-            };
+            // Sanctioned crash: the source ends every stream with its
+            // settle or an error — a silent end means it broke that
+            // contract.
+            let turn = completed
+                .expect("the model-turn source settles or errors — a silent end is its bug");
 
             // ── SETTLE ──────────────────────────────────────────────
             // A completed turn resets the failure streaks (a committed
@@ -602,13 +595,13 @@ where
                 source.run_tool_calls(&runner, &hook_ctx, calls, tool_snapshot);
             let mut settled: Option<SettledBatch> = None;
             let mut tool_error = None;
-            let mut tool_protocol_fault: Option<&'static str> = None;
             while let Some(item) = tool_stream.next().await {
                 match item {
                     Ok(PhaseEvent::Item(item)) => yield Ok(DriveItem::Item(item)),
                     Ok(PhaseEvent::ModelTurn(_)) => {
-                        tool_protocol_fault = Some("tool batch settled with a model turn");
-                        break;
+                        // Sanctioned crash: the tool-phase source
+                        // yields Item/ToolResults/Err only.
+                        unreachable!("a tool-phase stream never settles with a model turn");
                     }
                     Ok(PhaseEvent::ToolResults { results, stop }) => {
                         settled = Some((results, stop));
@@ -620,13 +613,6 @@ where
                 }
             }
             drop(tool_stream);
-            if let Some(fault) = tool_protocol_fault {
-                store_error_usage(&runner, &ledger);
-                yield Err(StreamingError::Completion(
-                    CompletionError::ResponseError(fault.to_string()),
-                ));
-                break 'outer;
-            }
             if let Some(err) = tool_error {
                 match classify_turn_failure(&err) {
                     TurnFailure::Defect(_reason) => {
@@ -647,16 +633,12 @@ where
                 }
                 continue 'outer;
             }
-            let (results, batch_stop) = match settled {
-                Some(settled) => settled,
-                None => {
-                    store_error_usage(&runner, &ledger);
-                    yield Err(StreamingError::Completion(CompletionError::ResponseError(
-                        "tool batch ended without settling results".to_string(),
-                    )));
-                    break 'outer;
-                }
-            };
+            // Sanctioned crash: settlement is unconditional — every
+            // chain returns an outcome, so the tool-phase stream ends
+            // with its settle or an error, never silently.
+            let (results, batch_stop) = settled.expect(
+                "the tool phase settles or errors — a silent end is the source's bug",
+            );
 
             // The roundtrip commits whole: the assistant and its complete
             // batch, verified and enqueued as one unit (ENGINE.md, the
@@ -664,19 +646,12 @@ where
             // entry id; the results fold under their born-early ids —
             // one fold, the durable commit, through the cell's one
             // write hold.
-            let results_content = match OneOrMany::from_iter_optional(
+            // Sanctioned crash: the tool phase runs only on a
+            // non-empty batch, and settlement fills every slot.
+            let results_content = OneOrMany::from_iter_optional(
                 results.iter().map(|(_, content)| content.clone()),
-            ) {
-                Some(content) => content,
-                None => {
-                    store_error_usage(&runner, &ledger);
-                    yield Err(StreamingError::Completion(CompletionError::ResponseError(
-                        "internal invariant violated: a tools turn settled with no results"
-                            .to_string(),
-                    )));
-                    break 'outer;
-                }
-            };
+            )
+            .expect("a tools turn settles with every call's result");
             // Sanctioned crash: PREPARE always announces before MODEL
             // (the bracket contract), so SETTLE always has the id
             // (AGENTS.md doctrine).
@@ -739,6 +714,10 @@ where
 /// but the collect behavior is identical, so `run()` and `stream()`
 /// return the same terminal reason. `chain_tool_span` lets the blocking
 /// surface chain spans into its linear `follows_from` sequence.
+// Sanctioned crash below (AGENTS.md doctrine): settlement is
+// unconditional — an empty slot is our wiring bug, and the run dies
+// loud rather than settling short.
+#[allow(clippy::panic)]
 pub(crate) fn drive_tool_calls<'a, F>(
     runner: &'a AgentRunner,
     hook_ctx: &'a HookContext,
@@ -941,12 +920,7 @@ where
             let CollectedToolResult { content, internal_call_id, surface, entry_id } = match slot {
                 Some(collected_result) => collected_result,
                 None => {
-                    yield Err(StreamingError::Prompt(Box::new(PromptError::CompletionError(
-                        CompletionError::ResponseError(
-                            "tool execution finished without producing every result".to_string(),
-                        ),
-                    ))));
-                    return;
+                    panic!("tool execution finished without producing every result");
                 }
             };
             if forward_items {
