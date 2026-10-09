@@ -164,7 +164,23 @@ fn read_loop<R: BufRead>(
             continue;
         }
         match serde_json::from_str::<SessionCommand>(frame) {
-            Ok(command) => dispatch(command),
+            Ok(command) => {
+                // An empty message is a protocol error, never a run
+                // (FRONTEND.md §3.4) — validated at the door, the
+                // connection stays open.
+                if let SessionCommand::Message { text, .. } = &command
+                    && text.trim().is_empty()
+                {
+                    control(
+                        &out,
+                        ServerControlFrame::ProtocolError {
+                            message: "message text is empty".to_string(),
+                        },
+                    );
+                    continue;
+                }
+                dispatch(command)
+            }
             Err(error) => {
                 control(
                     &out,
@@ -890,6 +906,43 @@ id = "m"
                 })
             )),
             "the boot's session_opened arrives too: {frames:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_empty_message_text_is_a_protocol_error_not_a_run() {
+        // FRONTEND.md §3.4: empty or whitespace-only message text is
+        // a protocol error; the connection stays open and no run
+        // starts.
+        let (code, lines) = bridge_live(
+            "empty-message",
+            |session| {
+                vec![
+                    message_line(session, ""),
+                    message_line(session, "   "),
+                    message_line(session, "still alive"),
+                ]
+            },
+            vec![script("ok")],
+            |lines| lines.iter().any(|l| l.contains("run_finished")),
+        )
+        .await;
+        assert_eq!(code, 0);
+        let protocol_errors: Vec<&String> = lines
+            .iter()
+            .filter(|l| l.contains("protocol_error"))
+            .collect();
+        assert_eq!(protocol_errors.len(), 2, "{lines:?}");
+        assert!(
+            protocol_errors.iter().all(|l| l.contains("empty")),
+            "{protocol_errors:?}"
+        );
+        // Exactly one run happened — the live message's — and the
+        // connection survived the errors.
+        assert_eq!(
+            lines.iter().filter(|l| l.contains("turn_started")).count(),
+            1,
+            "{lines:?}"
         );
     }
 
