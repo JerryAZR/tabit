@@ -125,7 +125,8 @@ pub(crate) enum Outcome {
     /// No feasible cut exists: nothing worth folding (a history
     /// shorter than the kept-tail budget). Compaction did not happen
     /// — good to continue as-is. The manual door reports this
-    /// benignly; it is not a failure.
+    /// benignly (a `compaction_failed` whose message says so — the
+    /// family's only terminal frame); it is not a failure.
     NothingToCompact,
     /// Compaction happened (the passes named landed), but the context
     /// is **still over the urgent bound** — not good to continue
@@ -270,8 +271,9 @@ pub(crate) async fn run(
         let tail_sums = delta_suffix_sums(&history);
         let Some(boundary) = select_cut(&history, &tail_sums, tokens_now, window) else {
             // Nothing worth folding is benign for every door — the
-            // manual command reports it as a friendly note, the
-            // automatic doors are silent about it. After committed
+            // manual command reports it (a `compaction_failed` whose
+            // message says so), the automatic doors are silent about
+            // it. After committed
             // passes there is simply nothing more feasible — which
             // (unreachable by construction: the view always re-offers
             // the previous compaction as a feasible boundary) would

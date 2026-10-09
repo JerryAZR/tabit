@@ -3813,6 +3813,78 @@ async fn the_compact_command_forces_the_box_on_an_idle_session() {
 }
 
 #[tokio::test]
+async fn the_compact_command_answers_nothing_to_compact() {
+    // The manual door is a command — total (FRONTEND.md §5): the
+    // benign decline answers too. A history shorter than the
+    // retained-tail budget gets a `compaction_failed` saying so, and
+    // no bracket ever begins.
+    let store = temp_store("compaction-manual-benign");
+    let session = Factory::new(vec![text_turn_reported("hi", 100, 20)])
+        .into_builder_with_config(
+            store.clone(),
+            windowed_config(100_000_000),
+            ModelSelection::new("p", "m"),
+        )
+        .create("C:/w")
+        .expect("session");
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store), plain_data());
+    let id = boot_id(&handle);
+    handle.message(&id, "go");
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    handle.command_link().send(SessionCommand::Compact {
+        session: id.clone(),
+        directives: None,
+    });
+    let frames = drain(&mut handle).await;
+
+    assert!(
+        !frames
+            .iter()
+            .any(|frame| matches!(frame.event, SessionEvent::CompactionBegin)),
+        "no bracket begins for the benign decline"
+    );
+    assert!(
+        frames.iter().any(|frame| matches!(
+            &frame.event,
+            SessionEvent::CompactionFailed { message } if message.contains("nothing to compact")
+        )),
+        "the benign decline answers"
+    );
+    std::fs::remove_dir_all(store.dir()).ok();
+}
+
+#[tokio::test]
+async fn the_compact_command_answers_on_a_selection_less_session() {
+    // Totality's second arm: compacting needs a model; a
+    // selection-less session's refusal answers instead of vanishing.
+    let store = temp_store("compaction-manual-selectionless");
+    let session = selectionless_session(store.clone(), "");
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store), plain_data());
+    let id = boot_id(&handle);
+    handle.command_link().send(SessionCommand::Compact {
+        session: id.clone(),
+        directives: None,
+    });
+    let frames = drain(&mut handle).await;
+
+    assert!(
+        !frames
+            .iter()
+            .any(|frame| matches!(frame.event, SessionEvent::CompactionBegin)),
+        "no bracket begins without a model"
+    );
+    assert!(
+        frames.iter().any(|frame| matches!(
+            &frame.event,
+            SessionEvent::CompactionFailed { message } if message.contains("no model selected")
+        )),
+        "the refusal answers: {:?}",
+        frames.iter().map(|f| &f.event).collect::<Vec<_>>()
+    );
+    std::fs::remove_dir_all(store.dir()).ok();
+}
+
+#[tokio::test]
 async fn an_overflow_failure_is_intercepted_compacted_and_the_run_retried() {
     let store = temp_store("compaction-overflow-repair");
     // Two big rounds build a compactable history; the third run's

@@ -8,6 +8,7 @@ use super::Session;
 use crate::compaction::{self as box_module, Door, Outcome};
 use std::sync::Arc;
 use tabit_engine::agent::PreRequestSource;
+use tabit_protocol::SessionEvent;
 use tabit_providers::completion::ContextOverflow;
 use tokio_util::sync::CancellationToken;
 
@@ -46,9 +47,17 @@ impl Session {
     /// The manual door (the `compact` command, parked and served at
     /// the beat): forced; the short-history skip is its only guard.
     /// `directives` is the invocation's free-text summarizer guidance
-    /// (v16).
+    /// (v16). The command is total (FRONTEND.md §5): the benign
+    /// decline answers too — `compaction_failed` is the family's only
+    /// terminal frame, the message carries the benignness.
     pub async fn compact_manual(&mut self, directives: Option<String>) {
-        self.run_box(Door::Manual { directives }, true).await;
+        let outcome = self.run_box(Door::Manual { directives }, true).await;
+        if matches!(outcome, Outcome::NothingToCompact) {
+            self.emit_note(SessionEvent::CompactionFailed {
+                message: "nothing to compact — the history is shorter than the retained tail"
+                    .to_string(),
+            });
+        }
     }
 
     /// The overflow intercept (the run epilogue): forced, with the
@@ -69,6 +78,14 @@ impl Session {
         )
     }
 
+    /// Emit one event through the event tap; a dead tap (no host
+    /// attached) drops the frame.
+    fn emit_note(&self, event: SessionEvent) {
+        if let Some(notice) = self.event_tap.get() {
+            notice.emit(event);
+        }
+    }
+
     /// One box invocation over the session's state, under a fresh
     /// token in the abort slot, emitting through the event tap. A
     /// dead tap (no host attached) drops the bracket — the compaction
@@ -83,14 +100,21 @@ impl Session {
         // selection is current, and a stale agent cannot serve a
         // request (the same point-of-use rule as run open). A
         // selection-less session cannot compact (summarizing is a
-        // model call) — the same check's teaching failure.
+        // model call) — the same check's teaching failure. The
+        // manual door is a command — total — so its refusal answers
+        // (the automatic doors stay silent: a selection-less beat
+        // would nag every beat).
+        let manual = matches!(door, Door::Manual { .. });
         let (agent, selection) = match self.ensure_agent() {
             Ok(pair) => pair,
             Err(error) => {
-                return Outcome::Failed {
-                    message: error.to_string(),
-                    passes: 0,
-                };
+                let message = error.to_string();
+                if manual {
+                    self.emit_note(SessionEvent::CompactionFailed {
+                        message: message.clone(),
+                    });
+                }
+                return Outcome::Failed { message, passes: 0 };
             }
         };
         let notice = self.event_tap.get().cloned();
