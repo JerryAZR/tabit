@@ -726,3 +726,57 @@ fn print_mode_without_a_selection_fails_the_run_and_teaches() {
     let _ = std::fs::remove_dir_all(&dir);
     let _ = std::fs::remove_dir_all(&home);
 }
+
+#[test]
+fn the_debug_log_switch_writes_the_trace() {
+    // TABIT_DEBUG_LOG: an explicit path receives the trace; the `1`
+    // form lands next to the session logs under the cwd.
+    let (_server, config) = staged_provider("debug-log", "the traced answer");
+    let dir = config.parent().expect("config dir").to_path_buf();
+    let empty_root = dir.join("no-extensions");
+    std::fs::create_dir_all(&empty_root).expect("empty extension root");
+
+    let run = |debug_value: &std::path::Path| {
+        Command::new(env!("CARGO_BIN_EXE_tabit-core"))
+            .args([
+                "--extensions",
+                empty_root.to_str().expect("utf-8"),
+                "-p",
+                "say the thing",
+            ])
+            .current_dir(&dir)
+            .env("TABIT_CONFIG", &config)
+            .env("TABIT_DEBUG_LOG", debug_value)
+            .output()
+            .expect("spawn tabit-core")
+    };
+
+    let explicit = dir.join("trace-explicit.log");
+    let output = run(&explicit);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let log = std::fs::read_to_string(&explicit).expect("the explicit debug log exists");
+    // The model exchange and the run lifecycle are in the trace.
+    for marker in [
+        "wire::model",
+        "provider request",
+        "sse event",
+        "run: open",
+        "mailbox: message queued",
+    ] {
+        assert!(log.contains(marker), "missing `{marker}` in the trace");
+    }
+
+    let output = run(std::path::Path::new("1"));
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let beside = dir.join(".tabit/sessions/debug.log");
+    let log = std::fs::read_to_string(&beside).expect("the `1` form lands beside the session logs");
+    assert!(log.contains("wire::model"), "the trace is in there");
+}

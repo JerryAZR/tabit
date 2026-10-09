@@ -116,6 +116,7 @@ impl Mailbox {
             id: crate::ids::new_entry_id(),
             message,
         };
+        tracing::debug!("mailbox: message queued");
         // The live snapshot races the pump's own start/end — both orders
         // resolve to a consistent ledger: a notice for a message that
         // drains immediately ends in `user_message` (the GUI drops the
@@ -267,6 +268,7 @@ impl AbortHandle {
     /// channel; messages arriving after this queue normally and start
     /// the next run. Aborting while idle just discards the queue.
     pub fn abort(&self) {
+        tracing::debug!("abort: token cancelled, queue discarded");
         lock(&self.token).cancel();
         self.mailbox.clear_noticing();
     }

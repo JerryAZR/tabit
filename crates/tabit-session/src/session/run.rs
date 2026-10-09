@@ -86,6 +86,7 @@ impl Session {
         // A pump may drain at any instant from here to its end: submit
         // acknowledgments switch to `message_queued` (FRONTEND.md §5).
         self.mailbox.run_started();
+        tracing::debug!("run: open");
         let mut total = RunSummary {
             outcome: RunOutcome::Completed,
             output: String::new(),
@@ -116,6 +117,7 @@ impl Session {
             }
         }
         self.mailbox.run_ended();
+        tracing::debug!(outcome = ?total.outcome, "run: closed");
         total
     }
 

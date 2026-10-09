@@ -164,6 +164,15 @@ bullet below).
   `TABIT_LOCK_TIMEOUT=<secs>` bounds each claim and panics with a
   waiting-for report instead of hanging silently. Diagnose a hung
   test by running it alone under both variables.
+- **Debug logging.** `TABIT_DEBUG_LOG=1` appends a TRACE log to
+  `<cwd>/.tabit/sessions/debug.log` (next to the session logs; any
+  other value is the file's path). It carries the wire frames in
+  both directions (`wire::frontend::{in,out}`), the model exchange
+  (`wire::model` — request/response metadata, SSE events, retries,
+  stalls), span lifecycles, and the core's transitions (run
+  open/close, mailbox, abort, compaction doors). Payloads stay
+  metadata-only; the session log already holds content. The stuck-run
+  tool: the last line before the freeze is where it froze.
 - Error doctrine: **internal errors (bugs, invariants, unexpected
   state) fail hard and loud — they panic**; not crashing means the
   app runs broken. **External errors (invalid user input, missing

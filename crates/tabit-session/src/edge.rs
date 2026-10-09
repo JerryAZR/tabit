@@ -41,7 +41,9 @@ where
     let report = ServerFrame::Control(ServerControlFrame::Report {
         protocol_version: PROTOCOL_VERSION,
     });
-    let _ = writeln!(writer, "{}", tabit_protocol::to_wire_line(&report));
+    let report_line = tabit_protocol::to_wire_line(&report);
+    tracing::trace!(target: "wire::frontend::out", "{report_line}");
+    let _ = writeln!(writer, "{report_line}");
     let _ = writer.flush();
 
     // One feed into the writer — the reader's protocol errors and the
@@ -163,6 +165,7 @@ fn read_loop<R: BufRead>(
         if frame.is_empty() {
             continue;
         }
+        tracing::trace!(target: "wire::frontend::in", "{frame}");
         match serde_json::from_str::<SessionCommand>(frame) {
             Ok(command) => {
                 // An empty message is a protocol error, never a run
@@ -211,6 +214,7 @@ async fn write_loop<W: Write>(
             frame = feed.recv() => {
                 let Some(frame) = frame else { break };
                 let line = tabit_protocol::to_wire_line(&frame);
+                tracing::trace!(target: "wire::frontend::out", "{line}");
                 if writeln!(writer, "{line}").is_err() {
                     break;
                 }
@@ -218,6 +222,7 @@ async fn write_loop<W: Write>(
             _ = end.cancelled() => {
                 while let Ok(frame) = feed.try_recv() {
                     let line = tabit_protocol::to_wire_line(&frame);
+                    tracing::trace!(target: "wire::frontend::out", "{line}");
                     if writeln!(writer, "{line}").is_err() {
                         return;
                     }

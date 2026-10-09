@@ -287,6 +287,7 @@ where
         let mut entry_checked = false;
 
         'outer: loop {
+            tracing::trace!(turn = current_turn, "converge");
             // ── CONVERGE ────────────────────────────────────────────
             // The stop check precedes the drain: the turn that set the
             // flag finished and committed naturally, and a stop never
@@ -572,10 +573,10 @@ where
                 )
                 .with_completion_calls(ledger.calls().to_vec())
                 .with_content(turn.choice.clone());
-                tracing::info!(
+                tracing::debug!(
                     turn = current_turn,
                     max_turns = runner.max_turns,
-                    "Agent run finished"
+                    "drive: run finished"
                 );
                 if let Some(final_item) = source.final_item(&response) {
                     yield Ok(DriveItem::Item(final_item));

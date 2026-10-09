@@ -123,8 +123,9 @@ impl Session {
                 notice.emit(event);
             }
         };
-        box_module::run(
-            door,
+        tracing::debug!(?door, "compaction: door invoked");
+        let outcome = box_module::run(
+            door.clone(),
             &self.conversation,
             &self.compaction,
             &agent,
@@ -135,6 +136,8 @@ impl Session {
             mailbox_empty,
             &mut emit,
         )
-        .await
+        .await;
+        tracing::debug!(?door, ?outcome, "compaction: door resolved");
+        outcome
     }
 }
