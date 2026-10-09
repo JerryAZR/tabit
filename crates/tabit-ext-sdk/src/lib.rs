@@ -64,8 +64,8 @@ use std::sync::{Arc, Mutex};
 use serde::Serialize;
 use serde_json::{Value, json};
 use tabit_ext::protocol::{
-    EXTENSION_PROTOCOL_VERSION, ExtFrame, HookResult, HostFrame, KIND_HOOK_RESULT,
-    KIND_SERVICE_RESPONSE, KIND_TOOL_RESULT, ServiceVerb, ToolWireResult,
+    EXTENSION_PROTOCOL_VERSION, ExtFrame, HOST_TO_EXT_TAGS, HookResult, HostFrame,
+    KIND_HOOK_RESULT, KIND_SERVICE_RESPONSE, KIND_TOOL_RESULT, ServiceVerb, ToolWireResult,
 };
 use tabit_protocol::points::HookPoint;
 use tabit_protocol::{EventFrame, SessionCommand, SessionEvent, tags};
@@ -902,10 +902,57 @@ fn dispatch_line(
         shared.node.intake(&shared.stdio, inbound);
         return;
     }
-    // The double tolerates garbage; the SDK exits loud — a malformed
-    // pipe is a broken host or a broken contract.
-    die(&format!("unparseable line from the host: {line}"));
+    if let Err(reason) = unknown_line_verdict(line) {
+        die(&reason);
+    }
 }
+
+/// The tail of the dispatch cascade (the line is neither a host
+/// frame nor the shared grammar): the one-directional compatibility
+/// law (EXTENSIONS.md) — a well-formed frame of a type this SDK
+/// predates is IGNORED (the host's additions need no bump). What
+/// still dies: the malformed — invalid JSON, a frame with no `type`
+/// tag, or a KNOWN tag with a broken payload (a broken host is a
+/// broken contract, and silence is how contract bugs hide).
+fn unknown_line_verdict(line: &str) -> Result<(), String> {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+        return Err(format!("unparseable line from the host: {line}"));
+    };
+    let Some(tag) = value.get("type").and_then(serde_json::Value::as_str) else {
+        return Err(format!("frame without a type tag from the host: {line}"));
+    };
+    if is_known_inbound_tag(tag) {
+        return Err(format!("malformed `{tag}` frame from the host: {line}"));
+    }
+    Ok(())
+}
+
+/// The tags this guest can receive: the dialect's host lanes
+/// ([`HOST_TO_EXT_TAGS`]) plus the shared grammar's (the commands
+/// below; the events are `tabit_protocol::tags::LIST`, the
+/// registration-validated list). A tag missing from this check
+/// degrades to ignore, never to a wrong death.
+fn is_known_inbound_tag(tag: &str) -> bool {
+    HOST_TO_EXT_TAGS.contains(&tag)
+        || COMMAND_TAGS.contains(&tag)
+        || tabit_protocol::tags::LIST.contains(&tag)
+}
+
+/// The shared grammar's command tags (the constants themselves — a
+/// renamed constant breaks the build, never silently mismatches).
+const COMMAND_TAGS: &[&str] = &[
+    tabit_protocol::command_tags::INTERACTION_RESPONSE,
+    tabit_protocol::command_tags::MESSAGE,
+    tabit_protocol::command_tags::ABORT,
+    tabit_protocol::command_tags::CONTINUE,
+    tabit_protocol::command_tags::NEW_SESSION,
+    tabit_protocol::command_tags::OPEN_SESSION,
+    tabit_protocol::command_tags::CHECKOUT,
+    tabit_protocol::command_tags::MODEL,
+    tabit_protocol::command_tags::COMPACT,
+    tabit_protocol::command_tags::LOGIN,
+    tabit_protocol::command_tags::LOGOUT,
+];
 
 /// One dispatched tool call — an arriving ask (the taxonomy law):
 /// held on the node's table against the host's channel, the body's
@@ -1763,5 +1810,22 @@ pub(crate) mod tests {
             pipe_rx.try_recv().is_err(),
             "the answer crossed nothing else to the host"
         );
+    }
+
+    #[test]
+    fn the_unknown_line_verdict_ignores_only_frames_this_sdk_predates() {
+        // The one-directional law: a well-formed frame of an unknown
+        // type is the host-from-the-future case — ignored.
+        assert!(unknown_line_verdict(r#"{"type":"future_frame","x":1}"#).is_ok());
+        // The malformed still die: invalid JSON...
+        assert!(unknown_line_verdict("not json").is_err());
+        // ...a frame with no type tag...
+        assert!(unknown_line_verdict(r#"{"x":1}"#).is_err());
+        // ...and a KNOWN tag with a broken payload — a broken host is
+        // a contract break, never an ignore (a host-lane tag, a
+        // command tag, and an event tag each stand for their table).
+        assert!(unknown_line_verdict(r#"{"type":"tool_call"}"#).is_err());
+        assert!(unknown_line_verdict(r#"{"type":"message"}"#).is_err());
+        assert!(unknown_line_verdict(r#"{"type":"run_failed"}"#).is_err());
     }
 }
