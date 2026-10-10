@@ -10,7 +10,7 @@
         clippy::unwrap_used
     )
 )]
-//! Tabit extension host (ROADMAP item 9): subprocess executables over
+//! Tabit extension host: subprocess executables over
 //! a frozen JSONL pipe — the subagent substrate, generalized.
 //!
 //! One supervisor per backend process. The `tabit-core` binary owns it:
@@ -19,7 +19,7 @@
 //! tabit-session. This crate is the leaf below that wiring — it knows
 //! processes and frames, nothing about sessions or models.
 //!
-//! Scope (ROADMAP item 9, landed): discovery, the report-first
+//! Scope: discovery, the report-first
 //! handshake, supervision, and the death policy — plus the lanes the
 //! frames ride: the tool lane (`tool_call` out, `tool_result` back),
 //! the hook lane, and the host-service envelope the SDK's asks

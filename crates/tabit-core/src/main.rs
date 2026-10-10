@@ -166,13 +166,7 @@ fn crash_injection() {
 
 fn main() {
     install_crash_hook();
-    // The backend's diagnostics: one subscriber, stderr, WARN and up
-    // — the same door the lock TTL tripwire writes to. Print mode's
-    // stdout is the answer channel; everything diagnostic is stderr.
-    tracing_subscriber::fmt()
-        .with_writer(std::io::stderr)
-        .with_max_level(tracing_subscriber::filter::LevelFilter::WARN)
-        .init();
+    init_diagnostics();
     if std::env::var_os("TABIT_CRASH_TEST").is_some() {
         crash_injection();
     }
@@ -183,4 +177,116 @@ fn main() {
             std::process::exit(1);
         }
     }
+}
+
+/// The backend's diagnostics: one subscriber, stderr, WARN and up —
+/// the same door the lock TTL tripwire writes to (print mode's
+/// stdout is the answer channel; everything diagnostic is stderr) —
+/// plus, when `TABIT_DEBUG_LOG` names it, a TRACE layer to the debug
+/// log. The switch: `TABIT_DEBUG_LOG=1` writes `debug.log` next to
+/// the session logs (`<cwd>/.tabit/sessions/`, append, one file per
+/// store root); any other non-empty value is the file's path. The
+/// layer carries span open/close events, so the engine's
+/// `#[instrument]` spans log their lifecycles, and every tabit crate
+/// traces — the wire frames in both directions
+/// (`wire::frontend::{in,out}`), the model exchange (`wire::model`),
+/// and the core's transitions. Payloads stay metadata-only (the
+/// session log already holds content).
+fn init_diagnostics() {
+    use tracing_subscriber::prelude::*;
+    let stderr = tracing_subscriber::fmt::layer()
+        .with_writer(std::io::stderr)
+        .with_filter(tracing_subscriber::filter::LevelFilter::WARN);
+    tracing_subscriber::registry()
+        .with(stderr)
+        .with(debug_log_layer())
+        .init();
+}
+
+/// The debug-log layer's type, factored out of the signature.
+type DebugLayer<S> = tracing_subscriber::filter::Filtered<
+    tracing_subscriber::fmt::Layer<
+        S,
+        tracing_subscriber::fmt::format::DefaultFields,
+        tracing_subscriber::fmt::format::Format,
+        Arc<std::fs::File>,
+    >,
+    tracing_subscriber::filter::Targets,
+    S,
+>;
+
+/// The debug-log layer, when the switch names a file.
+fn debug_log_layer<S>() -> Option<DebugLayer<S>>
+where
+    S: tracing::Subscriber + for<'span> tracing_subscriber::registry::LookupSpan<'span>,
+{
+    let value = std::env::var("TABIT_DEBUG_LOG").ok()?;
+    if value.is_empty() || value == "0" {
+        return None;
+    }
+    let path = if value == "1" {
+        std::env::current_dir()
+            .ok()?
+            .join(".tabit")
+            .join("sessions")
+            .join("debug.log")
+    } else {
+        std::path::PathBuf::from(value)
+    };
+    if let Some(parent) = path.parent()
+        && let Err(error) = std::fs::create_dir_all(parent)
+    {
+        eprintln!(
+            "tabit: cannot create the debug log directory {}: {error}",
+            parent.display()
+        );
+        return None;
+    }
+    let file = match std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
+        Ok(file) => file,
+        Err(error) => {
+            eprintln!(
+                "tabit: cannot open the debug log {}: {error}",
+                path.display()
+            );
+            return None;
+        }
+    };
+    eprintln!("tabit: debug log at {}", path.display());
+    let targets = [
+        "tabit_app",
+        "tabit_config",
+        "tabit_core",
+        "tabit_engine",
+        "tabit_ext",
+        "tabit_ext_sdk",
+        "tabit_ext_install",
+        "tabit_gate",
+        "tabit_log",
+        "tabit_protocol",
+        "tabit_providers",
+        "tabit_rig",
+        "tabit_session",
+        "tabit_tools",
+        "tabit_wire",
+        "wire",
+    ];
+    let filter = targets.iter().fold(
+        tracing_subscriber::filter::Targets::new(),
+        |filter, target| {
+            filter.with_target(*target, tracing_subscriber::filter::LevelFilter::TRACE)
+        },
+    );
+    let layer = tracing_subscriber::fmt::Layer::<S>::new()
+        .with_writer(Arc::new(file))
+        .with_ansi(false)
+        .with_span_events(
+            tracing_subscriber::fmt::format::FmtSpan::NEW
+                | tracing_subscriber::fmt::format::FmtSpan::CLOSE,
+        );
+    Some(tracing_subscriber::layer::Layer::with_filter(layer, filter))
 }

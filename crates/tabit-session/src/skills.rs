@@ -1,6 +1,5 @@
 //! Skills: the agentskills.io format over a four-source discovery
-//! ladder, the prompt catalog, and the confined `skill` tool
-//! (ROADMAP item 3, rulings 2026-09).
+//! ladder, the prompt catalog, and the confined `skill` tool.
 //!
 //! A skill is a directory carrying a `SKILL.md` with `---`-delimited
 //! YAML frontmatter (`name`, `description`). Discovery (ruled):
@@ -502,7 +501,7 @@ fn footer(entry: &SkillEntry) -> String {
 // the anchor, and each resolvable tag's skill body is APPENDED after
 // the message (never in-place — a hundred-line body mid-sentence is
 // unreadable), in the `skill` tool's result format. The first-part
-// law (ROADMAP.md's attachments design record, 2026-10): expansion
+// law (FRONTEND.md §5, 2026-10): expansion
 // only appends parts, it never touches the first part — part[0] IS
 // the authored text, structurally, so a skill block lands as its own
 // text part (the wire fold owns the join separator). The scan reads

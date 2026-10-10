@@ -18,7 +18,7 @@ render a specific tool's `details` cargo, the interaction template
 payloads — lives in **TOOLS.md**, its companion since the shapes grew
 past one doc (2026-09 ruling).
 
-Wire shapes below are the **v22 contract**. v3 was the multi-session
+Wire shapes below are the **v23 contract**. v3 was the multi-session
 host — session-addressed commands, `new_session`/`open_session` on the
 channel, the `"main"` stream alias retired (the stream stamp is the
 session id). v4 made backend-level frames **unstamped** (§6) and
@@ -71,7 +71,9 @@ unconditional announcement of every configured provider with its
 winning auth source, the login/logout view's data (§6) — and removed
 `missing_keys` from `models_available`, which returns to pure picker
 data (§5, §6; §3.2's first-run predicate re-derives from
-`providers_available`). Each version landed as one protocol-version bump
+`providers_available`). v23 added `session_closed` — the wire-level
+child-death announcement, synthesized by the spawner-side wire as the
+last frame on a dead child's stream (§6). Each version landed as one protocol-version bump
 with no compatibility
 period; always check the report's `protocol_version`. (`tabit-core --list` prints a human table —
 there is no JSON listing edge.)
@@ -95,7 +97,7 @@ you read and write on the child's stdio (one frame per line; the
    `--max-turns <n>`, `--ephemeral` (in memory, nothing persists).
    You own the lifecycle: you picked the binary, you kill it.
 2. **Read the first line — the report.**
-   `{"type":"report","protocol_version":22}`. Protocol facts only.
+   `{"type":"report","protocol_version":23}`. Protocol facts only.
    **You are the version check**: a version you do not speak is
    yours to kill and clean up (§3). After the report there is no
    handshake state — your commands may flow from your first line
@@ -214,12 +216,12 @@ arrive as events. Input tolerance: blank lines are skipped, a trailing
 size limit** — tool output can be large; buffer accordingly.
 
 ```
-← {"type":"report","protocol_version":22}
-← {"type":"session_opened","stream":"019…","id":"019…","path":"…",
-   "model":{"provider":"…","model":"…","thinking_level":null},"resumed":true}
+← {"type":"report","protocol_version":23}
+← {"type":"session_opened","stream":"019…","id":"019…","path":"…","cwd":"…",
+   "model":{"provider":"…","model":"…"},"resumed":true}
 ← {"type":"sessions_available","sessions":[
-     {"id":"019…","created_at":"2026-08-22T…","entry_count":14}, … ]}
-← {"type":"model_changed","stream":"019…","provider":"…","model":"…","thinking_level":null,"context_window":200000,"name":"…","cost":{"input":1.0,"output":4.0,"cache_read":0.1,"cache_write":0.4}}
+     {"id":"019…","created_at":"2026-08-22T…","entry_count":14,"path":"…","cwd":"…"}, … ]}
+← {"type":"model_changed","stream":"019…","provider":"…","model":"…","context_window":200000,"name":"…","cost":{"input":1.0,"output":4.0,"cache_read":0.1,"cache_write":0.4}}
 ← {"type":"replay_begin","stream":"019…","total":14}
 ← … the transcript as finalized events …
 ← {"type":"replay_end","stream":"019…"}
@@ -354,7 +356,10 @@ value, switch on `type` when recognized) and log the rest.
    `run_failed` end a run; **exactly one terminal per run** — persist
    degrade is not a second terminal, it rides `run_finished.durable`
    and the `persist_*` kinds (§6). A prompt that cannot be made
-   durable never starts a run at all: the batch comes back as drafts.
+   durable never starts a run at all: the batch still enters the
+   conversation and is acknowledged (`user_message` events — the
+   messages are kept), then the refusal lands as
+   `run_failed { kind: "persist" }`.
 - A **message sent while a run is live is a steer**: acknowledged
    immediately (`message_queued`), enters the conversation at the next
    turn boundary (`user_message`). Never lost — the only exits from
@@ -397,13 +402,14 @@ a frame.
 | command | when | effect |
 |---|---|---|
 | `message { session, text }` | any time | idle: starts a run — acknowledged directly by `user_message` (milliseconds; no queued event — nothing waits); running: steers at the next turn boundary, acknowledged by `message_queued { id, text }`. |
-| `abort { session }` | any time | running: preempts (`run_aborted`); discards messages queued at abort time (`messages_discarded`, omitted when none) **and any pending checkout** (§7 — no `checked_out` follows it; reset pending-rewind UI here). **Subtree stop (v6):** aborting a session stops its in-flight subagent descendants (every descendant's terminal flushes on its own stream; instances are never destroyed) — the cascade rides the run token each tool already holds, and aborting a child by id stops that child's subtree and leaves the parent's run alive. Children with no active tool call (the future background mode) survive aborts. Post-abort messages queue normally and start the next run. Idle: no-op. |
+| `continue { session }` | any time | parks the intent to start a run over the session's existing conversation with **no new message** — the go-ahead after a terminal you want retried (the repaired-overflow retry parks this same intent, §6). Served at the session's next beat — a run in flight finishes first. A no-op on an empty conversation. |
+| `abort { session }` | any time | running: preempts (`run_aborted`); discards messages queued at abort time (`messages_discarded`, omitted when none) **and any pending checkout** (§7 — no `checked_out` follows it; reset pending-rewind UI here). **Subtree stop (v6):** aborting a session stops its in-flight subagent descendants (every descendant's terminal flushes on its own stream; instances are never destroyed) — the cascade rides the run token each tool already holds, and aborting a child by id stops that child's subtree and leaves the parent's run alive. Children with no active tool call (the future background mode) survive aborts. Post-abort messages queue normally and start the next run. Idle: no run to cancel — but anything queued is still discarded (`messages_discarded`, omitted when none). |
 | `new_session` | any time | creates a fresh session (same config, tools, and `--model`/`--max-turns` as the boot); its `session_opened` follows — stamped with the new session's own stream, `resumed: false` (v10: one announcement shape for every path). Nothing replays (it is empty). Never waits on any session — lifecycle writes no session's file. |
 | `open_session { id }` | any time | loads the session if needed and streams a replay pass stamped with the id — the pass is the acknowledgment. Idempotent: an open session re-replays. Unknown id or unreadable file → unstamped, backend-level `error { kind: session }`. Creating, loading, and switching never wait on the session you are leaving; the one wait is the opened session's **own** in-flight run — its pass arrives at that run's terminal (its live streaming renders immediately; only committed history waits). |
 | `checkout { session, entry_id }` | any time | moves that session's chain to the entry (any entry in the file— an off-chain target is a branch switch); see §7. A target inside an open tool roundtrip (the assistant's tool-call entry, or a mid-batch result) is not a representable chain-end: it **resolves forward** to the first closed position — the batch's last tool result — and `checked_out` reports the landing, which may differ from the ask (2026-09; was: a loud refusal). **On receipt:** the target is verified (unknown entry → immediate `error { kind: checkout }`, nothing else happens) and the still-pending messages are discarded (`messages_discarded`, handed back as drafts). The rewind itself: a run in flight is aborted first (`run_aborted` — the user rewinding has declared its continuation obsolete), then the rewind applies at the session's pause point; idle → applies immediately. |
 | `model { session, provider, model, thinking_level? }` | any time | switches that session's model — the **register write**, never a chain move (§7). A **state write at receive**: the ref is validated against config (unknown provider/model → immediate `error { kind: model }`, nothing moves), then the entry and the live selection land at once and `model_changed` follows immediately — even mid-run (a run in flight finishes untouched on the model it bound at run open; the next run uses the new one). Validation is **config-existence only, never usability**: a `model` command naming an `auth: "none"` provider validates, lands, and announces `model_changed` — then fails at the next run open (`run_failed { kind: "model" }`), when construction finds no key. The picker rule follows: **never offer an `auth: "none"` provider without logging it in first** (§6) — `models_available`'s usable-only list is the pickable set. On a session that booted selection-less (`session_opened.model: null`) this is how the first selection lands. Not intent: abort never touches it, rapid switches each land (last wins). Durability: no later than the next turn (the write-behind log's prompt barrier flushes the buffer — this switch included — before any turn starts); a hard death in the window loses the switch, and resume announces the register that survived. |
 | `interaction_response { session, id, payload }` | after an `interaction_request` | answers a pending request; the payload is shaped by the asking template's convention (§8) — always an answer, never a dismissal. |
-| `compact { session, directives? }` | any time | **manual compaction (v7)**: runs the context-summarization pass now — the same machinery as the automatic doors, forced regardless of thresholds and guarded only by the short-history skip (a history shorter than the retained-tail budget → `compaction_failed { message }` saying so; nothing runs). Idle: runs at the session's next beat. Running: **parks** — compaction never aborts a run (it does not move the chain, nothing is made obsolete) — and runs when the run ends. Outcomes: the `compaction_*` bracket (§6). `directives` (v16) is the user's free-text guidance for this invocation — appended to the summarization instruction, never persisted, never replayed: "focus on details relevant to task X which we will start next". Abort clears a parked compact (drop-all-pending-intent — no bracket follows). |
+| `compact { session, directives? }` | any time | **manual compaction (v7)**: runs the context-summarization pass now — the same machinery as the automatic doors, forced regardless of thresholds and guarded only by the short-history skip (a history shorter than the retained-tail budget → `compaction_failed { message }` saying so; nothing runs). A session with no usable model answers `compaction_failed { message }` the same way. Idle: runs at the session's next beat. Running: **parks** — compaction never aborts a run (it does not move the chain, nothing is made obsolete) — and runs when the run ends. Outcomes: the `compaction_*` bracket (§6). `directives` (v16) is the user's free-text guidance for this invocation — appended to the summarization instruction, never persisted, never replayed: "focus on details relevant to task X which we will start next". Abort clears a parked compact (drop-all-pending-intent — no bracket follows). |
 | `login { provider, api_key }` | any time | **(v21) backend-level, session-less** (like `new_session`): store `api_key` for `provider` in auth.toml — a surgical write (comments, order, and other providers' entries survive; a missing file is created owner-only, 0600 on unix), then refresh the world: the catalogs re-fold and the re-announced `models_available` + `providers_available` pair is the ack (one re-announcement act, both frames, last-wins), and every open session's next run open builds against the new key (a run in flight finishes on the agent it bound at open — by construction, never disturbed). An unknown provider, an empty/whitespace `api_key` (a typo, not a credential — storing it would flip the provider usable and meet the user as a 401), or an unwritable auth file is an unstamped `error { kind: "auth" }` — no write, no re-announcement. The key is **not verified** at login — the next run open validates (a verify-at-login refinement is parked). Logging in a provider **already usable via `api_key_env`** succeeds all the same: the key is stored, and auth.toml then **wins over the environment** (the resolve order is auth.toml first, `api_key_env` second), so the provider's row flips from `env` to `stored` in the re-announced `providers_available` (its `models_available` row is unchanged) — and a later `logout` restores env-derived usability rather than dropping the provider (see `logout`). **Redaction:** `api_key` crosses the wire once and lands only in auth.toml — it never enters the session log, the model context, or any frame the backend emits. The command acts on the backend process that receives it; a subagent child is its own host with its own world. |
 | `logout { provider }` | any time | **(v21) backend-level**: remove the provider's auth.toml key and refresh the world (the same re-announced catalog pair as the ack). **Total**: an unknown provider or an absent key is an idempotent no-op — still acked. The re-announcement reflects reality: when the provider's `api_key_env` still supplies a key, it stays usable and keeps its `models_available` row, and its `providers_available` row reports `env` — logout removed the auth.toml entry, not the environment. A session on that provider keeps its register; its next run open fails with `run_failed { kind: "model" }` until a `model` command or a new login lands. |
 
@@ -477,6 +483,18 @@ Draft salvage of a discarded queued message is therefore text (the
 parts were never on the wire) — re-attaching means re-sending with the
 tag.
 
+**Capability is never gated (owner ruling 2026-10):** the backend
+sends image parts unconditionally. The `input` modalities
+`models_available` announces are advisory picker-display data, never
+an admission check — a provider stack knows its own capability better
+than user config does (vision preprocessing upstream of a text-only
+model makes pastes just work), and a declared text-only default would
+mostly fire as false refusals on undeclared but capable models. A
+server that truly cannot carry the content fails the request through
+the existing provider-error path (`run_failed { kind: "provider" }`,
+§6) — history carries forward; a model switch or a `checkout`
+repairs.
+
 ## 6. Events
 
 The `report` (the backend's first line) and `protocol_error` are
@@ -509,7 +527,7 @@ those connection-level).
 | `turn_truncated` | `turn_id` | the committed turn ended truncated: the provider cut generation at its output limit (`finish_reason: length`). Informational, never a failure — the run continues exactly as usual (steers drain into the next turn; the run may end normally). Show it as a note; a steer is how the user asks the model to go on. |
 | `turn_committed` | `id`, `completed_at_ms` | the turn is durable history. Same id as `turn_started`; `completed_at_ms` is the commit's time, Unix milliseconds (replay: the entry's recorded time). |
 | `turn_retried` | `turn_id` | the turn was discarded before commit (e.g. malformed tool-call arguments); drop its provisional groups — a fresh `turn_started` follows. |
-| `native_item` | `item` (opaque JSON) | a provider-native output the backend does not model. **Live-only**: never replayed, never an anchor. Render or skip. |
+| `native_item` | `turn_id`, `item` (opaque JSON) | a provider-native output the backend does not model. **Live-only**: never replayed, never an anchor. Render or skip. |
 
 **Steer boundary ordering.** A steer's `user_message` lands strictly
 between turns: after the previous turn's `turn_committed` and
@@ -541,8 +559,8 @@ consumes (its `details` cargo) is TOOLS.md's table of shapes.
 | `sessions_available` | `sessions: [{ id, created_at, entry_count, path, cwd }]` | once, after the boot session's announcements (notes, then its stamped `skills_available` when it has skills — §3.1's order): every stored session, newest first. **Unstamped, backend-level.** Minimal by ruling — a plain object, fields grow when
    needed (v16 added `path` and `cwd`: a frontend never lists the
    directory to learn either). A brand-new session has no file yet and is absent until it records. |
-| `skills_available` | `skills: [{ name, description, location, level }]` | **(v20) session-level**: stamped with the session's stream, announced right after each `session_opened` (boot, `new_session`, `open_session`) — every skill that session's own discovery merged (home `~/.agents`/`~/.tabit` + workspace `.agents`/`.tabit` skills dirs over the session's cwd, plus the process's extension contribution), the same facts that session's prompt catalog carries — `level` is `user` or `workspace` (which source won). Fold skills state **per stream** (v20): a subagent child is a full session host in its own cwd and announces its own stamped catalog, which must not clobber another session's list. Only announced when the session discovered at least one skill — with per-stream folding, absence is unambiguous. Skill *invocation* is no new wire shape: the model calls the `skill` tool, an ordinary `tool_call`/`tool_result` pair on the asking session's stream; the user invokes one manually with the message-text tag (§5). |
-| `extensions_available` | `extensions: [{ name, version, description?, dir, status, reason?, tools: [{ name, description }], hooks: [string] }]`, `conflicts: [{ kind, extension, tool, incumbent? }]` | **(v9)** once, right after `skills_available`: every discovered extension with its provenance (`dir`) and standing — `status` is `alive` or `dead` (a refused handshake, a failed scan, or death since; `reason` carries why). **Unstamped, backend-level** (one process, one extension host); only announced when at least one extension was discovered — a refusal counts as discovered. **A boot-time snapshot** (2026-09 ruling): a mid-run extension death does not re-announce — stderr carries the report and the catalog stands until the next backend start. `conflicts` are the boot's name-assembly reports: `kind: "replaces_core"` (an extension tool replaced the core tool of the same name — the signal is mandatory; how loudly you present it is your call) and `kind: "refused_peer"` (the newcomer was refused, `incumbent` names the extension that holds the name). Extension tool *invocation* is no new wire shape: an ordinary `tool_call`/`tool_result` pair, attributed by the model-facing name. |
+| `skills_available` | `skills: [{ name, description, location, level }]` | **(v20) session-level**: stamped with the session's stream, announced right after each `session_opened` (boot, `new_session`, `open_session`) — every skill that session's own discovery merged (home `~/.agents`/`~/.tabit` + workspace `.agents`/`.tabit` skills dirs over the session's cwd, plus the process's extension contribution), the same facts that session's prompt catalog carries — `level` is `user` or `workspace` (which source won — the process's extension contribution folds as `user`). Fold skills state **per stream** (v20): a subagent child is a full session host in its own cwd and announces its own stamped catalog, which must not clobber another session's list. Only announced when the session discovered at least one skill — with per-stream folding, absence is unambiguous. Skill *invocation* is no new wire shape: the model calls the `skill` tool, an ordinary `tool_call`/`tool_result` pair on the asking session's stream; the user invokes one manually with the message-text tag (§5). |
+| `extensions_available` | `extensions: [{ name, version, description?, dir, status, reason?, tools: [{ name, description }], hooks: [string] }]`, `conflicts: [{ kind, extension, tool, incumbent? }]` | **(v9)** once, in the boot announcements (§3.1): every discovered extension with its provenance (`dir`) and standing — `status` is `alive` or `dead` (a refused handshake, a failed scan, or death since; `reason` carries why). **Unstamped, backend-level** (one process, one extension host); only announced when at least one extension was discovered — a refusal counts as discovered. **A boot-time snapshot** (2026-09 ruling): a mid-run extension death does not re-announce — stderr carries the report and the catalog stands until the next backend start. `conflicts` are the boot's name-assembly reports: `kind: "replaces_core"` (an extension tool replaced the core tool of the same name — the signal is mandatory; how loudly you present it is your call) and `kind: "refused_peer"` (the newcomer was refused, `incumbent` names the extension that holds the name). Extension tool *invocation* is no new wire shape: an ordinary `tool_call`/`tool_result` pair, attributed by the model-facing name. |
 | `models_available` | `providers: [{ id, name?, models: [{ id, name?, context_window?, max_tokens?, cost?, reasoning, input: [string], thinking_levels: [string] }] }]` | **(v21)** once at boot, right after `extensions_available`: every **usable** provider from config, with its models — a provider with no resolvable key (auth.toml/`api_key_env`) and no `keyless = true` declaration is not runnable and does not appear (its models go with it; no `usable` flag crosses the wire to fold). Pure picker data (v22 — the login/logout view moved to `providers_available`; the v21 `missing_keys` half is gone). **Unstamped, backend-level** (one process, one model registry). **Always emitted, even when empty**: absence of the frame means the backend speaks a protocol older than v21, never "no models"; `providers: []` is a legal state meaning "no usable models at this backend", deliberately cause-agnostic. An empty list means no run can open at this backend: surface it as a setup-state warning rather than letting the user type into a session whose first run fails at open — the signal is mandatory; how loudly you present it is your call. Providers arrive in alphabetical id order, models in config-file order; display sorting is yours. Per model: `name` is the display name (absent = fall back to `id`); `context_window`/`max_tokens` are token counts, **absent when the config does not state them** (never zero); `cost` is the same `{ input, output, cache_read, cache_write }` shape `model_changed` carries; `reasoning` says the model produces reasoning output; `input` lists the accepted modalities as lowercase strings (`"text"`, `"image"`); `thinking_levels` carries the dial's ordered **names** (never the request-merge maps behind them), empty when the model has no dial — and `thinking_level: null` is always a legal selection (the provider/model default), so a picker cycles null → the announced names. Announced at boot and **re-announced when the world changes** — a `login`/`logout` landed (§5; the re-announcement, paired with `providers_available`'s in one act, is the command's ack), config reload when it lands; a re-announcement replaces the catalog wholesale (last-wins fold). |
 | `providers_available` | `providers: [{ id, name?, auth }]` | **(v22)** once at boot, right after `models_available`: **every configured provider, usable or not**, with its winning key source — the login/logout view's data (`models_available` stays the picker's). `auth` is `"stored" | "env" | "keyless" | "none"` — the winner in resolution order: a stored auth.toml key beats the provider's `api_key_env` variable, which beats a declared `keyless = true`, which is all that remains before `"none"`. The order is the law: a **keyless provider WITH a stored key reports `stored`** — the key genuinely rides requests (`keyless` is a fallback declaration, not a prohibition; the explicit user act wins). Consumer law: **login widgets target `auth: "none"`**; **logout is offered on `auth: "stored"`**; **`env` is display-only** — the app cannot unset a persistent environment variable, so render no logout for those (the row survives `logout` unchanged, reporting `env` still). **Unstamped, backend-level. Always emitted, even when empty** (the `models_available` law, one version later): absence of the frame means the backend speaks a protocol older than v22, never "no providers"; `providers: []` means no providers configured at all (§3.2's first-run predicate). Providers arrive in alphabetical id order. Re-announced together with `models_available` on every world change — one act, both frames, last-wins fold. |
 | `session_opened` | `id`, `path`, `cwd`, `model`, `resumed`, `parent?`, `parent_call?` | a session became visible in this backend — the boot (at spawn, right after the report), a `new_session`, an `open_session`, **or a subagent child** (v5). `cwd` (v16) is the session's working
@@ -581,7 +599,7 @@ report (§3.5); you never mine it for user-facing meaning.
 | `session` | — | a session command failed: `open_session` named an unknown id or an unreadable file, a command targeted an unknown session, `new_session` could not build, or the startup listing failed. **Unstamped, backend-level** — every `session`-kind error is (the failure belongs to no session; the message names the id). |
 | `checkout` | — | the checkout target does not exist in the session (§7). Stamped — it names an entry inside a real session. |
 | `auth` | — | a `login`/`logout` failed: the provider is unknown to config, or the auth file could not be resolved or written (§5). Unstamped, backend-level. |
-| `persist_degraded` | `pending` | the write-behind log could not flush: `pending` entries are committed in memory but not on disk (disk full is the usual cause). Every later commit retries; nothing is lost unless the process is force-stopped while degraded (then the pending entries go — model output and register records; a stuck start's own messages come back as drafts when the run is refused). Nag about disk space. |
+| `persist_degraded` | `pending` | the write-behind log could not flush: `pending` entries are committed in memory but not on disk (disk full is the usual cause). Every later commit retries; nothing is lost unless the process is force-stopped while degraded (then the pending entries go — model output and register records; a run refused for a stuck start has already kept and acknowledged its messages — nothing comes back as drafts). Nag about disk space. |
 | `persist_recovered` | — | the pending entries reached the disk. |
 
 **Write-behind persistence (shipped).** Commits are
@@ -725,21 +743,14 @@ the pass; queued → it renders live right after `replay_end`).
 
 **Valid cut points** (ruled). The atomic unit is the tool roundtrip:
 an assistant turn and its complete result batch commit and rewind
-together — you cannot cut in-between (partial writes from crashes or
-aborts are repaired with synthesized results, never left half-open).
+together — you cannot cut in-between (commits are whole-batch, so a
+file holding tool calls without their results is unrepresentable;
+only the tail can tear mid-batch, and a detected tear fails the open
+with a named error — there is no repair pass).
 Checkout targets — and `base_id` values — are therefore
-`user_message` entries and committed assistant turns. `model_change`
-entries exist in the file and remain acceptable targets by totality,
-but they are inert anchors: the active model is a session preference
-(§6) no longer derived from the chain, so targeting one is
-conversation-identical to targeting its neighbor.
-
-**Synthesized results tell the truth in their body.** A repaired tool
-result's content is the sentence "tool execution was interrupted
-before completing — the call may have had partial effects; verify them
-before relying on anything it did". It is never a fabricated success;
-render it like any tool result and the text says what happened. No
-wire marker.
+`user_message` entries and committed assistant turns. Side records
+(`model_change`, checkout, abort) are not tree nodes: they carry no
+entry id, so they can never be named as a target.
 
 ## 8. Interaction requests
 

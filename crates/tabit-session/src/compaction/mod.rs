@@ -1,4 +1,5 @@
-//! The compaction box (ROADMAP item 6, the 2026-09 rulings; the flow
+//! The compaction box (the 2026-09 rulings — COMPACTION.md is the
+//! policy record; the flow
 //! facts live in ENGINE.md's compaction amendment). Its own system, a
 //! black box with three doors — **pre-request** (mid-run, condition
 //! B), **idle** (the beat, A ∨ B), **manual** (the `compact` command,
@@ -124,7 +125,8 @@ pub(crate) enum Outcome {
     /// No feasible cut exists: nothing worth folding (a history
     /// shorter than the kept-tail budget). Compaction did not happen
     /// — good to continue as-is. The manual door reports this
-    /// benignly; it is not a failure.
+    /// benignly (a `compaction_failed` whose message says so — the
+    /// family's only terminal frame); it is not a failure.
     NothingToCompact,
     /// Compaction happened (the passes named landed), but the context
     /// is **still over the urgent bound** — not good to continue
@@ -260,16 +262,18 @@ pub(crate) async fn run(
     let mut passes: u32 = 0;
     // Bounded retries of a tool-call-violating response (owner ruling:
     // throw the response away and resend — never synthesize an in-band
-    // error result; each discard closes its bracket as failed so the
-    // frontend drops that attempt's deltas).
+    // error result; each discard emits `compaction_retried` so the
+    // frontend drops that attempt's deltas; the bracket closes failed
+    // only when the cap runs out).
     let mut violation_retries: u32 = 0;
     loop {
         let history = read(cell).history();
         let tail_sums = delta_suffix_sums(&history);
         let Some(boundary) = select_cut(&history, &tail_sums, tokens_now, window) else {
             // Nothing worth folding is benign for every door — the
-            // manual command reports it as a friendly note, the
-            // automatic doors are silent about it. After committed
+            // manual command reports it (a `compaction_failed` whose
+            // message says so), the automatic doors are silent about
+            // it. After committed
             // passes there is simply nothing more feasible — which
             // (unreachable by construction: the view always re-offers
             // the previous compaction as a feasible boundary) would
@@ -364,7 +368,7 @@ pub(crate) async fn run(
             // A violating response is discarded and the request resent
             // (bounded): sampling variance usually corrects a one-off
             // tool call; a model that insists fails the pass. The
-            // The discarded attempt's deltas drop; the invocation
+            // discarded attempt's deltas drop; the invocation
             // continues (turn_retried's sibling).
             PassOutcome::Violated => {
                 emit(SessionEvent::CompactionRetried);

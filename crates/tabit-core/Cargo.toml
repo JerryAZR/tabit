@@ -27,6 +27,8 @@ tabit-app = { path = "../tabit-app", version = "0.1.0" }
 # The backend's one stderr subscriber (WARN and up) — without it
 # every tracing::warn in the backend vanishes into the no-op sink.
 tracing-subscriber = { workspace = true }
+# The Subscriber trait bound the debug-log layer is generic over.
+tracing = { workspace = true }
 tabit-ext-install = { path = "../tabit-ext-install", version = "0.1.0" }
 tokio-util = { version = "0.7", default-features = false }
 tabit-protocol = { path = "../tabit-protocol", version = "0.1.0" }

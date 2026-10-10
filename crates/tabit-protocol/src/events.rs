@@ -1,7 +1,7 @@
 //! The serializable event stream a tabit frontend consumes.
 //!
 //! Events are the item-level view of one outer loop plus session-level
-//! bookkeeping. The enum is closed: the CLI/RPC surface (ROADMAP item 7)
+//! bookkeeping. The enum is closed: the CLI/RPC surface
 //! ships in this workspace, so an added variant is a coordinated change,
 //! not a compatibility hazard.
 
@@ -51,8 +51,7 @@ pub enum SessionEvent {
         /// typed, so a salvaged draft re-sent re-expands fresh.
         text: String,
     },
-    /// Queued messages were discarded (a mailbox clear: abort, checkout,
-    /// the prompt barrier). The pairs hand back what the user authored —
+    /// Queued messages were discarded (a mailbox clear: abort, checkout). The pairs hand back what the user authored —
     /// the first part, tags intact, never the expansion — ids included,
     /// so pending displays resolve by id; the messages were never part
     /// of the conversation and are not persisted.

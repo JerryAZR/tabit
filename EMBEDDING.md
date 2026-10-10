@@ -50,11 +50,13 @@ runnable.
   terminal and the pump returns cleanly. Dropping a `prompt()`/
   `prompt_with()` future mid-run is unsupported: the mailbox's run
   bookkeeping is left open and the run has no terminal.
-- **Commit writes are synchronous and bounded.** Each tool-use
-  roundtrip commits with an inline append to the session file
-  (KB-scale, unbuffered, the flush itself). The executor thread
-  blocks for the write's duration — deliberate, invisible at this
-  scale, and the thing to revisit first if commits ever grow.
+- **Commits are write-behind.** Each tool-use roundtrip commits into
+  an outbox and the flush is attempted inline (KB-scale; the executor
+  thread blocks for the write's duration — deliberate, invisible at
+  this scale). A failed flush is not fatal: the entries stay pending
+  in memory, every later commit retries them, and
+  `persist_degraded`/`persist_recovered` notices report the state —
+  only a force-stop while degraded loses the pending entries.
 
 ## Tier 2 — the session host, streaming
 
@@ -74,7 +76,8 @@ buffers the response, and answers a `select_one` card from stdin.
 
 ```rust
 let options = AppOptions { tools: Some("read".into()), ..Default::default() };
-let (registry, launchable) = world_registry(&options, config, auth)?;
+// config by value; auth as Arc
+let (registry, launchable) = world_registry(&options, config, Arc::new(auth))?;
 let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
 let mounted = mount_world(launchable, &runtime);
 let (session, notes) = assemble(&options, &registry, &store, ContinueMiss::Fail, Some(mounted.clone()))?;

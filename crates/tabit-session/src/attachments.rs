@@ -1,5 +1,5 @@
-//! Receive-time attachment expansion (ROADMAP.md's attachments design
-//! record, owner rulings 2026-10): a user message may carry the tag
+//! Receive-time attachment expansion (FRONTEND.md's contract, owner
+//! rulings 2026-10): a user message may carry the tag
 //! `<attachment path="…"/>` — the exact self-closing form, embedded by
 //! the frontend (FRONTEND.md's contract; typical UX: a paste lands as a
 //! temp file, the frontend formats the tag). The session expands at the

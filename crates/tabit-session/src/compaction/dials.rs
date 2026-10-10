@@ -1,7 +1,7 @@
 //! The compaction dials — every threshold and every prompt text as
 //! data, in one file (owner ruling 2026-09: the prompt and all the
 //! thresholds are data fields, clustered so review and polish happen
-//! in one place). The formulas these feed are ruled in ROADMAP item 6;
+//! in one place). The formulas these feed are ruled in COMPACTION.md;
 //! changing a NUMBER here is tuning, changing a FORMULA is a ruling.
 
 /// Condition A's fraction: the idle door fires when the context

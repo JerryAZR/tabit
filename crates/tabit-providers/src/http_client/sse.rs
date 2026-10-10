@@ -32,6 +32,21 @@ use std::{
 
 pub type BoxedStream = Pin<Box<dyn WasmCompatSendStream<InnerItem = StreamResult<Bytes>>>>;
 
+/// One SSE payload for the debug log: full text up to 2 KiB, a size
+/// marker past it — frames can carry long deltas, and the log stays
+/// navigable.
+fn truncate_for_log(data: &str) -> std::borrow::Cow<'_, str> {
+    const CAP: usize = 2048;
+    if data.len() <= CAP {
+        return std::borrow::Cow::Borrowed(data);
+    }
+    let mut end = CAP;
+    while !data.is_char_boundary(end) {
+        end -= 1;
+    }
+    std::borrow::Cow::Owned(format!("{}…[+{} bytes]", &data[..end], data.len() - end))
+}
+
 #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 type ResponseFuture = BoxFuture<'static, Result<Response<BoxedStream>, super::Error>>;
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
@@ -178,6 +193,12 @@ impl<HttpClient, RequestBody> Stream for GenericEventSource<HttpClient, RequestB
                     match event_stream.poll_next(cx) {
                         Poll::Pending => return Poll::Pending,
                         Poll::Ready(Some(Ok(event))) => {
+                            tracing::trace!(
+                                target: "wire::model",
+                                event = %event.event,
+                                data = %truncate_for_log(&event.data),
+                                "sse event"
+                            );
                             return Poll::Ready(Some(Ok(Event::Message(event))));
                         }
                         Poll::Ready(Some(Err(EventStreamError::Transport(err)))) => {

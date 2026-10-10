@@ -5,7 +5,7 @@
 //! same facts, structured, computed once where the file is). Hunk shape
 //! mirrors `similar`'s change model (context/removed/added lines with
 //! old/new start+count) so the frontend renders through the same crate
-//! the ROADMAP already picked for its viewer.
+//! the backend already picked.
 
 use serde::Serialize;
 

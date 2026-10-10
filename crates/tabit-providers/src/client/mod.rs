@@ -394,8 +394,22 @@ where
 
         async move {
             let response = retry
-                .execute(|| http.send::<Bytes, U>(Request::from_parts(parts.clone(), body.clone())))
+                .execute(|| {
+                    tracing::debug!(
+                        target: "wire::model",
+                        method = %parts.method,
+                        url = %parts.uri,
+                        body_bytes = body.len(),
+                        "provider request"
+                    );
+                    http.send::<Bytes, U>(Request::from_parts(parts.clone(), body.clone()))
+                })
                 .await?;
+            tracing::debug!(
+                target: "wire::model",
+                status = %response.status(),
+                "provider response"
+            );
 
             // The response (2xx) is about to be handed to the caller, so no
             // more retries from here on. A stalled body read warns
@@ -455,9 +469,21 @@ where
             // chunks and then errors is terminal.
             let response = retry
                 .execute(|| {
+                    tracing::debug!(
+                        target: "wire::model",
+                        method = %parts.method,
+                        url = %parts.uri,
+                        body_bytes = body.len(),
+                        "provider request (streaming)"
+                    );
                     http.send_streaming::<Bytes>(Request::from_parts(parts.clone(), body.clone()))
                 })
                 .await?;
+            tracing::debug!(
+                target: "wire::model",
+                status = %response.status(),
+                "provider response (streaming)"
+            );
 
             // Warn on stalls, never kill (owner ruling).
             Ok(response.map(|stream| http_client::stall_warning_stream(stream, stall_warning)))

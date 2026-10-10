@@ -3,7 +3,7 @@
 // never panics — and that ergonomics is the SDK's author-facing point.
 #![allow(clippy::indexing_slicing)]
 
-//! The provider-relay example (ROADMAP item 9's task-4 roster):
+//! The provider-relay example:
 //! LM Studio behind tabit's provider config, speaking **LM Studio's
 //! native REST API** upstream — deliberately not the OpenAI-compat
 //! endpoint LM Studio also serves, so the relay shape is demonstrated

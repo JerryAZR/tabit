@@ -89,6 +89,20 @@ pub struct Report {
     pub watch: Vec<String>,
 }
 
+/// The host → extension frame tags — the serde-derived names of
+/// [`HostFrame`]'s variants, kept beside the enum. The guest's
+/// dispatch reads this for the known-vocabulary check: a well-formed
+/// line whose tag is outside the union of this list and the shared
+/// grammar's is a frame the guest predates — ignored, never died on
+/// (the one-directional compatibility law, EXTENSIONS.md).
+pub const HOST_TO_EXT_TAGS: &[&str] = &[
+    "host_facts",
+    "tool_call",
+    "hook",
+    "cancel",
+    "service_response",
+];
+
 /// Host → extension frames.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
