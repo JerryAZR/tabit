@@ -7,7 +7,7 @@
  * session, so respawn is a user re-launch in M0, a prompt in M1).
  */
 
-import { existsSync } from "node:fs";
+import { existsSync, mkdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
@@ -90,6 +90,30 @@ function defaultResolvePackage(name: string): string | undefined {
 }
 
 /**
+ * The `--debug` switch: the backend's TRACE log and the TUI's own log,
+ * side by side next to the session logs — the backend child gets
+ * `TABIT_DEBUG_LOG=1` (its default is `<cwd>/.tabit/sessions/debug.log`),
+ * the TUI log defaults to `tui.log` in the same directory. Explicit env
+ * wins: a preset `TABIT_DEBUG_LOG`/`TABIT_TUI_LOG` is never clobbered.
+ * Returns the env addition for the backend child.
+ */
+export function applyDebugFlag(argv: string[], cwd: string = process.cwd()): Record<string, string> | undefined {
+	if (!argv.includes("--debug")) return undefined;
+	if (!process.env.TABIT_TUI_LOG) {
+		const tuiLog = join(cwd, ".tabit", "sessions", "tui.log");
+		try {
+			mkdirSync(dirname(tuiLog), { recursive: true });
+			process.env.TABIT_TUI_LOG = tuiLog;
+			process.stderr.write(`tabit: TUI log at ${tuiLog}\n`);
+		} catch (error) {
+			process.stderr.write(`tabit: cannot create the TUI log directory: ${error instanceof Error ? error.message : String(error)}\n`);
+		}
+	}
+	if (!process.env.TABIT_DEBUG_LOG) return { TABIT_DEBUG_LOG: "1" };
+	return undefined;
+}
+
+/**
  * Resolve a path against this source file; undefined when the module URL
  *  isn't a file (a bundled/embedded runtime has no source tree behind it).
  */
@@ -110,6 +134,7 @@ async function main(): Promise<void> {
 				"  no args            start a new session\n" +
 				"  -c, --continue     resume the project's newest session\n" +
 				"  --bin <path>       use this tabit-core binary\n" +
+				"  --debug            write debug logs (backend trace + TUI log) to .tabit/sessions/\n" +
 				"  --version          print the version and protocol\n" +
 				"  --print-backend    print the resolved backend command and exit\n" +
 				"\n" +
@@ -142,6 +167,7 @@ async function main(): Promise<void> {
 		process.exit(1);
 	}
 	log(`starting backend: ${resolved.bin} ${(resolved.args ?? ["--json", "--continue"]).join(" ")}`);
+	const debugEnv = applyDebugFlag(argv);
 
 	const root = new AltRoot();
 	let mode: InteractiveMode | undefined;
@@ -153,7 +179,7 @@ async function main(): Promise<void> {
 	};
 
 	const backend = Backend.spawn(
-		{ bin: resolved.bin, args: resolved.args },
+		{ bin: resolved.bin, args: resolved.args, ...(debugEnv !== undefined ? { env: debugEnv } : {}) },
 		{
 			onFrame: frame => mode?.handleFrame(frame),
 			onExit: exit => {

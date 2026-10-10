@@ -31,6 +31,9 @@ export interface BackendOptions {
 	args?: string[];
 	/** The project directory the backend works in (sessions live at `<cwd>/.tabit`). */
 	cwd?: string;
+	/** Extra environment for the child, over the inherited process env
+	 *  (the `--debug` switch's `TABIT_DEBUG_LOG=1`). */
+	env?: Record<string, string>;
 }
 
 export interface BackendEvents {
@@ -100,6 +103,7 @@ export class Backend {
 		const args = options.args ?? ["--json"];
 		const child = spawn(options.bin, args, {
 			cwd: options.cwd,
+			...(options.env !== undefined ? { env: { ...process.env, ...options.env } } : {}),
 			stdio: ["pipe", "pipe", "pipe"],
 			detached: true,
 			windowsHide: true,
@@ -118,6 +122,12 @@ export class Backend {
 
 	abort(session: string): void {
 		this.send({ type: "abort", session });
+	}
+
+	/** The go-ahead over the existing conversation (FRONTEND.md §5): a
+	 *  run with no new message — the retry door after a terminal. */
+	continue(session: string): void {
+		this.send({ type: "continue", session });
 	}
 
 	/** Manual compaction — parks behind a running run, executes at its end. */

@@ -10,7 +10,10 @@
  * Scenarios: basic | tools | subagent | steer | ask | replay | crash.
  * Every scenario also honors abort, interaction_response, and stdin-close.
  * The subagent scenario ends with the child's v23 `session_closed` (the
- * pool kill, delayed).
+ * pool kill, delayed). `continue` answers with a bare turn — no
+ * `user_message` (the wire's "nothing new" shape), a no-op when the
+ * conversation is empty (contract) or a run is live (the real backend
+ * parks the intent; the mock keeps it simple).
  * Scope: the seven scenarios above are the contract — other commands
  * (`new_session`, `open_session`, `checkout`, `model`, `compact`,
  * `continue`) are total-semantics no-ops here, and the mock does not
@@ -69,6 +72,9 @@ const BASIC_MARKDOWN = [
 ];
 
 let running = false;
+/** Whether any message ever arrived — `continue` no-ops on an empty
+ *  conversation (the wire contract). */
+let hasHistory = false;
 let turnSeq = 0;
 const nextId = (prefix: string) => `${prefix}${String(++turnSeq).padStart(4, "0")}`;
 
@@ -354,6 +360,21 @@ async function steerRun(session: string): Promise<void> {
 	running = false;
 }
 
+async function continueRun(session: string): Promise<void> {
+	// The go-ahead with nothing new (FRONTEND.md §5): a turn over the
+	// existing conversation — no user_message precedes it.
+	runStartedAt = ts();
+	await runTurn(session, ["Continuing over the existing conversation. "]);
+	emitEvent(session, {
+		type: "run_finished",
+		output: "done",
+		durable: true,
+		started_at_ms: runStartedAt,
+		completed_at_ms: ts(),
+	});
+	running = false;
+}
+
 const queued: Array<{ id: string; text: string }> = [];
 function takeQueued(): { id: string; text: string } | undefined {
 	return queued.shift();
@@ -527,6 +548,7 @@ stdin.on("line", line => {
 	}
 	switch (frame.type) {
 		case "message": {
+			hasHistory = true;
 			if (running) {
 				const id = nextId("entry-");
 				queued.push({ id, text: String(frame.text) });
@@ -557,6 +579,15 @@ stdin.on("line", line => {
 					process.exit(101);
 				});
 			}
+			return;
+		}
+		case "continue": {
+			if (running || !hasHistory) return;
+			running = true;
+			continueRun(String(frame.session)).catch(err => {
+				process.stderr.write(`mock continue failed: ${err}\n`);
+				process.exit(101);
+			});
 			return;
 		}
 		case "abort": {

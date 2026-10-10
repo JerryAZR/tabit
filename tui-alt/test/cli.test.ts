@@ -5,9 +5,12 @@
  */
 
 import assert from "node:assert/strict";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, test } from "node:test";
 
-import { resolveBackendCommand } from "../src/cli.ts";
+import { applyDebugFlag, resolveBackendCommand } from "../src/cli.ts";
 
 function withEnv<T>(value: string | undefined, run: () => T): T {
 	const saved = process.env.TABIT_CORE_BIN;
@@ -97,6 +100,50 @@ describe("the backend resolution ladder", () => {
 			assert.deepStrictEqual(resolveBackendCommand(["-c"], { exists: () => false, resolvePackage: noPackage }).args, ["--json", "--continue"]);
 			assert.deepStrictEqual(resolveBackendCommand(["--continue"], { exists: () => false, resolvePackage: noPackage }).args, ["--json", "--continue"]);
 			assert.deepStrictEqual(resolveBackendCommand([], { exists: () => false, resolvePackage: noPackage }).args, ["--json"]);
+		});
+	});
+});
+
+describe("the --debug switch", () => {
+	/** Save/restore both knobs around a run. */
+	function withDebugEnv<T>(tuiLog: string | undefined, debugLog: string | undefined, run: () => T): T {
+		const savedTui = process.env.TABIT_TUI_LOG;
+		const savedBackend = process.env.TABIT_DEBUG_LOG;
+		if (tuiLog === undefined) delete process.env.TABIT_TUI_LOG;
+		else process.env.TABIT_TUI_LOG = tuiLog;
+		if (debugLog === undefined) delete process.env.TABIT_DEBUG_LOG;
+		else process.env.TABIT_DEBUG_LOG = debugLog;
+		try {
+			return run();
+		} finally {
+			if (savedTui === undefined) delete process.env.TABIT_TUI_LOG;
+			else process.env.TABIT_TUI_LOG = savedTui;
+			if (savedBackend === undefined) delete process.env.TABIT_DEBUG_LOG;
+			else process.env.TABIT_DEBUG_LOG = savedBackend;
+		}
+	}
+
+	test("off by default: no flag, no env, no spawn addition", () => {
+		withDebugEnv(undefined, undefined, () => {
+			assert.strictEqual(applyDebugFlag([]), undefined);
+			assert.strictEqual(process.env.TABIT_TUI_LOG, undefined);
+		});
+	});
+
+	test("the flag fills both gaps: TUI log next to the session logs, the backend's trace on", () => {
+		withDebugEnv(undefined, undefined, () => {
+			const cwd = mkdtempSync(join(tmpdir(), "tabit-debug-"));
+			const env = applyDebugFlag(["--debug"], cwd);
+			assert.deepStrictEqual(env, { TABIT_DEBUG_LOG: "1" });
+			assert.strictEqual(process.env.TABIT_TUI_LOG, join(cwd, ".tabit", "sessions", "tui.log"));
+		});
+	});
+
+	test("explicit env wins: preset knobs are never clobbered", () => {
+		withDebugEnv("/custom/tui.log", "/custom/backend.log", () => {
+			const cwd = mkdtempSync(join(tmpdir(), "tabit-debug-"));
+			assert.strictEqual(applyDebugFlag(["--debug"], cwd), undefined); // backend env already set
+			assert.strictEqual(process.env.TABIT_TUI_LOG, "/custom/tui.log");
 		});
 	});
 });

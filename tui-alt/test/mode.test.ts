@@ -35,6 +35,9 @@ class FakeBackend implements BackendLink {
 	abort(session: string): void {
 		this.sent.push({ kind: "abort", session });
 	}
+	continue(session: string): void {
+		this.sent.push({ kind: "continue", session });
+	}
 	compact(session: string, directives?: string): void {
 		// The real Backend omits the field when no directives are given
 		// (`...(directives !== undefined ? { directives } : {})`) — the
@@ -397,19 +400,31 @@ describe("InteractiveMode", () => {
 		assert.strictEqual((view.notes.filter(n => n.kind === "warn")).length, 1);
 	});
 
+	test("/continue sends the wire's go-ahead to the focused stream", () => {
+		const { backend, mode, feed, control } = harness();
+		boot(control, feed);
+		mode.submit("/continue");
+		assert.deepStrictEqual(backend.sent, [{ kind: "continue", session: SESSION }]);
+		// Session-scoped: it follows focus like every session command.
+		feed({ type: "session_opened", id: CHILD, path: "", cwd: "", model: { provider: "p", model: "m1" }, resumed: false, parent: SESSION }, CHILD);
+		mode.focusStream(CHILD);
+		mode.submit("/continue");
+		assert.deepStrictEqual(backend.sent[1], { kind: "continue", session: CHILD });
+	});
+
 	test("the command table is the one home: the dropdown list and interpreter cannot diverge", () => {
 		const { mode, feed, control } = harness();
 		boot(control, feed);
 		// Static commands first — each carries its behavior.
 		const before = mode.slashCommands();
-		assert.deepStrictEqual(before.map(c => c.name), ["compact", "help", "login", "logout", "model", "tree", "exit", "quit"]);
+		assert.deepStrictEqual(before.map(c => c.name), ["compact", "continue", "help", "login", "logout", "model", "tree", "exit", "quit"]);
 		assert.strictEqual(before.every(c => c.kind === "command"), true);
 
 		// Skills join the same table as skill-typed entries (the dropdown's
 		// type column reads the kind).
 		feed({ type: "skills_available", skills: [{ name: "my-skill", description: "d", location: "l", level: "user" }] });
 		const after = mode.slashCommands();
-		assert.strictEqual((after).length, 9);
+		assert.strictEqual((after).length, 10);
 		assert.partialDeepStrictEqual(after.find(c => c.name === "my-skill"), { kind: "skill" });
 	});
 
@@ -597,11 +612,12 @@ describe("InteractiveMode", () => {
 		// note, nothing crosses the pipe.
 		mode.submit("hello?");
 		mode.submit("/compact");
+		mode.submit("/continue");
 		mode.switchModel("p", "m2");
 		mode.checkout("e1");
 		assert.deepStrictEqual(backend.sent, []);
 		const guardNotes = view.notes.filter(n => n.kind === "warn" && n.text.startsWith("session closed — "));
-		assert.strictEqual(guardNotes.length, 4);
+		assert.strictEqual(guardNotes.length, 5);
 
 		// Esc: closed ⇒ not running ⇒ the idle law walks to the parent —
 		// and focus leaving is the sweep's third trigger. The child is

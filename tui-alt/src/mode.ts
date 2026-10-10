@@ -192,6 +192,9 @@ export interface ModeView {
 export interface BackendLink {
 	message(session: string, text: string): void;
 	abort(session: string): void;
+	/** The go-ahead over the existing conversation (FRONTEND.md §5): a
+	 *  run with no new message — the retry door after a terminal. */
+	continue(session: string): void;
 	/** Manual compaction; `directives` is the user's free-text guidance
 	 *  for this invocation (v16 — appended to the instruction, never
 	 *  persisted). */
@@ -524,6 +527,16 @@ export class InteractiveMode {
 					if (s === undefined || !this.#unlessClosed(s, "compact")) return;
 					const directives = args === "" ? undefined : args;
 					this.#backend.compact(s.id, directives);
+				},
+			},
+			{
+				name: "continue",
+				description: "run again over the existing conversation, no new message",
+				kind: "command",
+				run: () => {
+					const s = focused();
+					if (s === undefined || !this.#unlessClosed(s, "continue")) return;
+					this.#backend.continue(s.id);
 				},
 			},
 			{ name: "help", description: "list keys and commands", kind: "command", run: () => this.#showHelp() },
