@@ -36,6 +36,7 @@ import {
 	TuiAltScreen,
 	VStack,
 	type Component,
+	type Terminal,
 } from "@earendil-works/pi-tui";
 
 import { AssistantBlock } from "./components/assistant-block.ts";
@@ -90,8 +91,17 @@ export class AltRoot implements ModeView {
 	readonly tui: TuiAltScreen;
 	readonly editor: Editor;
 
-	/** The transcript slot: mounts the focused stream's pane. */
-	readonly #transcriptSlot = new Container();
+	/** The transcript slot: hosts the focused stream's pane. MUST stay a
+	 *  layout node (VStack): the alt-screen engine only windows content it
+	 *  can see as a layout node — a plain Container here renders the
+	 *  ScrollView opaquely (its render() returns the FULL document), the
+	 *  window pins to the top, and follow-end/scrollbar/wheel all die
+	 *  silently once content exceeds the slot (the 2026-10 frozen-
+	 *  transcript bug). The slot is permanent; only its single entry —
+	 *  the pane's ScrollView — swaps on a focus switch. The entry's
+	 *  basis: 0 matters: "auto" would measure the scroll view's full
+	 *  document height as its intrinsic size. */
+	readonly #transcriptSlot = new VStack();
 	readonly #cardSlot = new Container();
 	readonly #pendingQueue: PendingQueue;
 	readonly #status: StatusBar;
@@ -113,8 +123,8 @@ export class AltRoot implements ModeView {
 	/** The open login/logout card, when it owns the dock slot. */
 	#authCard: AuthCardView | undefined;
 
-	constructor() {
-		this.tui = new TuiAltScreen(new ProcessTerminal(), false, undefined, {
+	constructor(terminal?: Terminal) {
+		this.tui = new TuiAltScreen(terminal ?? new ProcessTerminal(), false, undefined, {
 			mouse: true,
 			scrollToEndIndicator: () => " ↓  jump to latest ",
 		});
@@ -139,7 +149,7 @@ export class AltRoot implements ModeView {
 		const scratch = makePane();
 		this.#panes.set("", scratch);
 		this.#shownStream = "";
-		this.#transcriptSlot.addChild(scratch.scroll);
+		this.#mountTranscript(scratch);
 		this.tui.setLayoutRoot(
 			new VStack([
 				{ component: this.#transcriptSlot, basis: 0, grow: 1, shrink: 1, minSize: 1 },
@@ -267,12 +277,19 @@ export class AltRoot implements ModeView {
 		const pane = this.#paneFor(stream);
 		if (this.#shownStream !== stream) {
 			this.#shownStream = stream;
-			this.#transcriptSlot.clear();
-			this.#transcriptSlot.addChild(pane.scroll);
+			this.#mountTranscript(pane);
 			this.editor.setText("");
 		}
 		this.#setRegion("editor");
 		this.#touch();
+	}
+
+	/** Point the slot at a pane's scroll view — the only mutation a focus
+	 *  switch needs (the slot and root persist; scroll/collapse state live
+	 *  in the pane instances and survive). */
+	#mountTranscript(pane: StreamPane): void {
+		this.#transcriptSlot.clear();
+		this.#transcriptSlot.addChild(pane.scroll, { basis: 0, grow: 1, shrink: 1, minSize: 1 });
 	}
 
 	beginReplay(stream: string): void {

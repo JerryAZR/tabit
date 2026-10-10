@@ -8,7 +8,6 @@
 
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
-import { setTimeout as sleep } from "node:timers/promises";
 
 import { InteractiveMode, type BackendLink, type FooterFacts, type InteractionCard, type ModeView, type PendingMessage, type SkillInfo, type SubagentEntry } from "../src/mode.ts";
 import { parseServerFrame, PROTOCOL_VERSION, type ParsedServerFrame } from "../src/protocol.ts";
@@ -236,7 +235,6 @@ describe("InteractiveMode", () => {
 		feed({ type: "reasoning_delta", turn_id: "t1", id: "r1", reasoning: "think" });
 		feed({ type: "text_delta", turn_id: "t1", text: "Hel" });
 		feed({ type: "text_delta", turn_id: "t1", text: "lo" });
-		await sleep(45); // flush timer (33 ms)
 		assert.strictEqual(view.assistantText.get("t1"), "Hello");
 		assert.strictEqual(view.reasoningText.get("t1:r1"), "think");
 
@@ -305,7 +303,6 @@ describe("InteractiveMode", () => {
 		feed({ type: "replay_begin", total: 1 });
 		feed({ type: "completion_call", turn_id: "t1", usage: usage(100, 20), cost: 0.0002 });
 		feed({ type: "replay_end" });
-		await sleep(45);
 		assert.strictEqual(view.footer?.inputTokens, 100);
 		assert.strictEqual(view.footer?.outputTokens, 20);
 		costCloseTo(view.footer?.cost, 0.0002);
@@ -319,7 +316,6 @@ describe("InteractiveMode", () => {
 		feed({ type: "text_delta", turn_id: "t9", text: "a" });
 		feed({ type: "reasoning_delta", turn_id: "t9", id: "r9b", reasoning: "R2" });
 		feed({ type: "text_delta", turn_id: "t9", text: "b" });
-		await sleep(45);
 		assert.deepStrictEqual(view.order, ["reasoning:r9", "text:t9", "reasoning:r9b", "text:t9"]);
 		assert.strictEqual(view.assistantText.get("t9"), "ab");
 		assert.strictEqual(view.reasoningText.get("t9:r9"), "R");
@@ -348,8 +344,7 @@ describe("InteractiveMode", () => {
 		feed({ type: "reasoning_delta", turn_id: "t1", id: "r1", reasoning: "hm" });
 		feed({ type: "tool_call", turn_id: "t1", name: "bash", call_id: "c1", internal_call_id: "i1", arguments: null });
 		feed({ type: "turn_retried", turn_id: "t1" });
-		// The retried turn's still-buffered deltas must never paint.
-		await sleep(45);
+		// The retried turn's blocks are dropped, painted or not.
 		assert.ok((view.removedTurns).includes("t1"));
 		assert.strictEqual(view.assistantText.get("t1"), undefined);
 		assert.strictEqual(view.reasoningText.get("t1:r1"), undefined);
@@ -561,7 +556,6 @@ describe("InteractiveMode", () => {
 		feed({ type: "text_delta", turn_id: "t1", text: "archived answer" });
 		feed({ type: "completion_call", turn_id: "t1", usage: { input_tokens: 9, output_tokens: 4, total_tokens: 13, cached_input_tokens: 0, cache_creation_input_tokens: 0 } });
 		feed({ type: "replay_end" });
-		await sleep(45);
 		assert.strictEqual(view.replayBegun, 1);
 		assert.strictEqual(view.replayEnded, 1);
 		assert.strictEqual(view.assistantText.get("t1"), "archived answer");
@@ -649,6 +643,30 @@ describe("InteractiveMode", () => {
 		view.listed.delete(CHILD);
 		mode.notifyListHidden();
 		assert.deepStrictEqual(view.dropped, [CHILD]);
+	});
+
+	test("turn_started opens liveness for a message-less run (the /continue shape); replay stays dark", () => {
+		const { backend, view, mode, feed, control } = harness();
+		boot(control, feed);
+		assert.strictEqual(mode.running, false);
+		// A continue run opens with turn_started and NO user_message —
+		// liveness must not wait for one.
+		feed({ type: "turn_started", id: "t1", started_at_ms: 1 });
+		assert.strictEqual(mode.running, true);
+		assert.strictEqual(view.status, "working — esc interrupts");
+		assert.strictEqual(view.footer?.running, true);
+		// Esc's abort leg works on the message-less run.
+		assert.strictEqual(mode.escape(), true);
+		assert.deepStrictEqual(backend.sent, [{ kind: "abort", session: SESSION }]);
+		feed({ type: "run_aborted", output: "", started_at_ms: 1, completed_at_ms: 2 });
+		assert.strictEqual(mode.running, false);
+
+		// Replay passes never light liveness (a replayed turn is history).
+		feed({ type: "replay_begin", total: 1 });
+		feed({ type: "turn_started", id: "t2", started_at_ms: 3 });
+		assert.strictEqual(mode.running, false);
+		feed({ type: "replay_end" });
+		assert.strictEqual(mode.running, false);
 	});
 
 	test("M2 focus: submit and session commands route to the focused stream", () => {

@@ -21,10 +21,11 @@
  *
  * Transcript structure rule: **blocks are created on demand by their first
  * content** — `turn_started` allocates nothing, so a turn's text, thinking,
- * and tool rows stack in true wire-arrival order. Deltas coalesce into one
- * ordered buffer PER STREAM (text and reasoning interleaved as they
- * arrived), flushed every ~33 ms; within a flush batch the increments
- * apply in wire order.
+ * and tool rows stack in true wire-arrival order. Deltas forward to the
+ * view IMMEDIATELY, like every other event — there is no mode-side
+ * coalescer: the engine already throttles frames (16 ms) and Markdown
+ * caches per (text, width), so a second buffer only deferred block
+ * CREATION past later arrivals — the 2026-10 transcript-reorder bug.
  *
  * The report model (v19): the backend speaks first (`report`), there is no
  * handshake ack, and the routing key arrives ON the boot's stamped
@@ -213,8 +214,6 @@ export interface BackendLink {
 	logout(provider: string): void;
 }
 
-const FLUSH_MS = 33;
-
 /** Backend-level announcements arrive unstamped (they name no session) —
  *  the four events that fold globally instead of into a stream. */
 const GLOBAL_TYPES: ReadonlySet<SessionEvent["type"]> = new Set([
@@ -227,11 +226,6 @@ const GLOBAL_TYPES: ReadonlySet<SessionEvent["type"]> = new Set([
 type StampedEvent = Exclude<SessionEvent, { type: "sessions_available" | "models_available" | "providers_available" | "extensions_available" }>;
 type StampedEventType = StampedEvent["type"];
 type Handler<K extends StampedEventType> = (stream: StreamState, event: Extract<SessionEvent, { type: K }>) => void;
-
-/** One coalesced delta, kept in arrival order so a flush replays the wire. */
-type PendingDelta =
-	| { kind: "text"; turnId: string; text: string }
-	| { kind: "reasoning"; turnId: string; id: string; text: string };
 
 /**
  * One stream's fold state — everything M1 held once, M2 holds per session
@@ -279,8 +273,6 @@ class StreamState {
 	pending: PendingMessage[] = [];
 	skills: SkillInfo[] = [];
 	readonly tree = new SessionTree();
-	readonly deltas: PendingDelta[] = [];
-	flushTimer: ReturnType<typeof setTimeout> | undefined;
 	/** Tool calls awaiting their result (id → name, insertion order) —
 	 *  the activity atom's tool leg. */
 	readonly openCalls = new Map<string, string>();
@@ -417,7 +409,6 @@ export class InteractiveMode {
 		for (const s of this.#streams.values()) {
 			if (!s.closed || s.parent === undefined || s.id === this.#focused) continue;
 			if (this.#view.isStreamListed(s.id)) continue;
-			if (s.flushTimer !== undefined) clearTimeout(s.flushTimer);
 			this.#streams.delete(s.id);
 			this.#view.dropStream(s.id);
 		}
@@ -807,30 +798,6 @@ export class InteractiveMode {
 		this.#view.setSubagents(entries);
 	}
 
-	#scheduleFlush(s: StreamState): void {
-		s.flushTimer ??= setTimeout(() => this.#flush(s), FLUSH_MS);
-	}
-
-	#flush(s: StreamState): void {
-		if (s.flushTimer !== undefined) {
-			clearTimeout(s.flushTimer);
-			s.flushTimer = undefined;
-		}
-		for (const delta of s.deltas) {
-			if (delta.kind === "text") this.#view.appendAssistantText(s.id, delta.turnId, delta.text);
-			else this.#view.appendReasoning(s.id, delta.turnId, delta.id, delta.text);
-		}
-		s.deltas.length = 0;
-	}
-
-	#dropTurnDeltas(s: StreamState, turnId: string): void {
-		// A retried turn's still-buffered deltas must never paint: drop them
-		// before anything flushes. Other turns' deltas stay buffered.
-		for (let index = s.deltas.length - 1; index >= 0; index--) {
-			if (s.deltas[index]!.turnId === turnId) s.deltas.splice(index, 1);
-		}
-	}
-
 	/** Run terminals close the cards OF THAT STREAM (a card blocks its own
 	 *  run; other streams' cards are untouched). */
 	#closeStreamCards(s: StreamState, reason: string): void {
@@ -917,7 +884,6 @@ export class InteractiveMode {
 			}
 		},
 		run_finished: (s, event) => {
-			this.#flush(s);
 			s.running = false;
 			s.terminal = "completed";
 			s.terminalAt = Date.now();
@@ -929,7 +895,6 @@ export class InteractiveMode {
 			this.#closeStreamCards(s, "run finished");
 		},
 		run_aborted: (s, event) => {
-			this.#flush(s);
 			s.running = false;
 			s.terminal = "aborted";
 			s.terminalAt = Date.now();
@@ -940,7 +905,6 @@ export class InteractiveMode {
 			if (event.output !== "") log(`aborted with partial output (${event.output.length} chars)`);
 		},
 		run_failed: (s, event) => {
-			this.#flush(s);
 			s.running = false;
 			s.terminal = "failed";
 			s.terminalAt = Date.now();
@@ -965,22 +929,29 @@ export class InteractiveMode {
 		turn_started: (s, event) => {
 			s.tree.openTurn(event.id);
 			s.lastDelta = undefined;
+			if (!s.replaying && !s.running) {
+				// Liveness: a turn exists only within a run, and the wire has
+				// no run_started — a `continue` run opens with NO user_message,
+				// so the first turn_started is the certain sign. (Message runs
+				// get this from user_message earlier; the guard is idempotent.)
+				s.running = true;
+				s.terminal = undefined;
+				this.#emitStatus(s);
+				this.#emitFooter(s);
+			}
 		},
 		text_delta: (s, event) => {
 			s.tree.appendTurnText(event.turn_id, event.text);
 			s.lastDelta = "text";
-			s.deltas.push({ kind: "text", turnId: event.turn_id, text: event.text });
-			this.#scheduleFlush(s);
+			this.#view.appendAssistantText(s.id, event.turn_id, event.text);
 		},
 		reasoning_delta: (s, event) => {
 			s.lastDelta = "reasoning";
-			s.deltas.push({ kind: "reasoning", turnId: event.turn_id, id: event.id, text: event.reasoning });
-			this.#scheduleFlush(s);
+			this.#view.appendReasoning(s.id, event.turn_id, event.id, event.reasoning);
 		},
 		turn_committed: () => {},
 		turn_retried: (s, event) => {
 			s.tree.retryTurn(event.turn_id);
-			this.#dropTurnDeltas(s, event.turn_id);
 			this.#view.removeTurn(s.id, event.turn_id);
 			this.#view.addNote(s.id, "turn discarded before commit — a retry follows", "info");
 		},
@@ -1025,9 +996,7 @@ export class InteractiveMode {
 		},
 		// --- replay ------------------------------------------------------------------
 		replay_begin: (s) => {
-			this.#flush(s);
 			s.replaying = true;
-			s.deltas.length = 0;
 			s.tree.closeTurn();
 			this.#view.beginReplay(s.id);
 		},
@@ -1096,7 +1065,6 @@ export class InteractiveMode {
 			// after). Advisory (owner ruling): mark, never chase. The
 			// queue's entries are dead — it drains only into runs, and a
 			// closed stream never runs again.
-			this.#flush(s);
 			s.closed = true;
 			s.running = false;
 			s.compacting = false;
