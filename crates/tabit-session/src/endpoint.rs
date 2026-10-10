@@ -82,10 +82,6 @@ pub struct SessionInfo {
     pub session_path: String,
     /// The session's working directory.
     pub session_cwd: String,
-    /// The active model selection — `None` when the session is
-    /// selection-less (the zero-config boot; the first `model`
-    /// command lands one).
-    pub model: Option<ModelSelection>,
     /// Whether the session continues an existing chain (or started
     /// fresh — see [`Session::resumed`]).
     pub resumed: bool,
@@ -312,7 +308,7 @@ impl Worker {
                 // question: the next run open derives the agent, and
                 // every pass announces the cell.
                 self.model_register.write(selection.clone());
-                self.notice(SessionEvent::model_changed(
+                self.notice(SessionEvent::model_selected(
                     &selection,
                     self.model_register.facts(&selection),
                 ));
@@ -707,9 +703,15 @@ impl SessionHostMount {
             session_id: boot.id().to_string(),
             session_path: boot.wire_path(),
             session_cwd: boot.cwd().display().to_string(),
-            model: boot.selection(),
             resumed: boot.resumed(),
         };
+        // The boot session's selection announcement (v24's uniform
+        // ruling: creation announces like every other visibility
+        // path): a resumed boot's rides its automatic replay pass;
+        // a fresh boot's emits here, after the catalogs. Captured
+        // before the worker takes the session.
+        let boot_selection = boot.selection();
+        let boot_facts = boot_selection.as_ref().map(|s| boot.model_facts(s));
         let boot_id = info.session_id.clone();
         let boot_stream = StreamId::new(boot_id.clone());
         let node = wiring.node.clone();
@@ -740,7 +742,6 @@ impl SessionHostMount {
                 id: info.session_id.clone(),
                 path: info.session_path.clone(),
                 cwd: info.session_cwd.clone(),
-                model: info.model.clone(),
                 resumed: info.resumed,
                 parent: wiring.boot_parent.clone(),
                 parent_call: wiring.boot_parent_call.clone(),
@@ -815,12 +816,13 @@ impl SessionHostMount {
         // A resumed boot replays automatically (owner ruling
         // 2026-09-25): the resident chain re-emits right after the
         // announcements — a `--continue`/`--session` connect needs no
-        // request. A fresh boot (or an absorbed `--continue` miss)
-        // has nothing to replay. On request, the door's idempotent
-        // path serves: `open_session` of an already-open session
-        // re-replays it, any time.
+        // request. A fresh boot has nothing to replay — but it still
+        // announces its selection (v24): one `model_selected` in the
+        // slot the replay pass would have led from.
         if info.resumed {
             boot_worker.deliver_replay();
+        } else if let (Some(selection), Some(facts)) = (&boot_selection, boot_facts) {
+            boot_sink.emit(SessionEvent::model_selected(selection, facts));
         }
 
         // The lifecycle door arms (its handlers have been live since
@@ -889,7 +891,7 @@ impl SessionHost {
 
     /// Switch a session's model — the register write, immediate: the
     /// entry and the live selection land at receive (one shared-write
-    /// operation, any thread), and `model_changed` follows at once. A
+    /// operation, any thread), and `model_selected` follows at once. A
     /// ref config cannot resolve is an `error { kind: model }`,
     /// nothing moves. A run in flight is untouched (passes bind the
     /// agent at run open); the next run derives the new agent. Abort
@@ -1300,12 +1302,13 @@ impl Lifecycle {
         };
         let id = session.id().to_string();
         let stream = StreamId::new(id.clone());
-        let (path, cwd, model, resumed) = (
+        let (path, cwd, selection, resumed) = (
             session.wire_path(),
             session.cwd().display().to_string(),
             session.selection(),
             session.resumed(),
         );
+        let facts = selection.as_ref().map(|s| session.model_facts(s));
         let skills = session.skills_available();
         let (worker, channel, join) = spawn_worker(
             session,
@@ -1315,10 +1318,11 @@ impl Lifecycle {
         );
         // One announcement shape for every path (v10): the stamped
         // `session_opened` carries `resumed: false` for a fresh
-        // session — the selection rides the frame because nothing
-        // else on the wire will say so (the session is empty; no
-        // `model_changed` replays). The emission from the session's
-        // channel is what teaches the learning table its route.
+        // session — and `model_selected` follows at once (v24's
+        // uniform ruling: creation announces the selection like
+        // every other visibility path). The emission from the
+        // session's channel is what teaches the learning table its
+        // route.
         let opened = NoticeSink::new(&self.node, &channel, stream.clone());
         announce_session(
             &opened,
@@ -1326,7 +1330,6 @@ impl Lifecycle {
                 id: id.clone(),
                 path,
                 cwd,
-                model,
                 resumed,
                 parent: None,
                 parent_call: None,
@@ -1334,6 +1337,9 @@ impl Lifecycle {
             notes,
             skills,
         );
+        if let (Some(selection), Some(facts)) = (&selection, facts) {
+            opened.emit(SessionEvent::model_selected(selection, facts));
+        }
         lock(&self.workers).insert(id, worker);
         lock(&self.joins).push(join);
     }
@@ -1359,10 +1365,9 @@ impl Lifecycle {
             }
         };
         let stream = StreamId::new(id.to_string());
-        let (path, cwd, model, resumed) = (
+        let (path, cwd, resumed) = (
             session.wire_path(),
             session.cwd().display().to_string(),
-            session.selection(),
             session.resumed(),
         );
         let skills = session.skills_available();
@@ -1379,7 +1384,6 @@ impl Lifecycle {
                 id: id.to_string(),
                 path,
                 cwd,
-                model,
                 resumed,
                 parent: None,
                 parent_call: None,
@@ -1645,18 +1649,19 @@ fn execute_checkout(session: &mut Session, sink: &NoticeSink, entry_id: String) 
 /// into finalized live events, bracketed. One emission path for its
 /// askers — the transport's replay request, checkout's re-render, and
 /// the open_session boot pass — each led by the register announcement
-/// ([`SessionEvent::model_changed`], shared with the applied model
-/// switch): a session becoming visible (boot, open, re-replay,
-/// checkout) always tells the frontend its active selection. Idempotent
+/// ([`SessionEvent::model_selected`], shared with the applied model
+/// switch and session creation): a session becoming visible always
+/// tells the frontend its active selection (creation's announcement
+/// lives at the creation site — there is no pass to lead). Idempotent
 /// by construction — a pass never moves the register, so the value
-/// repeats; replayed history itself never carries `model_changed` (the
+/// repeats; replayed history itself never carries `model_selected` (the
 /// register ruling: state is announced live, not reconstructed).
 fn emit_replay(session: &Session, sink: &NoticeSink) {
     // A selection-less session (the zero-config boot) announces no
-    // `model_changed` — until the first `model` command lands one
+    // `model_selected` — until the first `model` command lands one
     // (v21, amended); the pass itself is unaffected.
     if let Some(selection) = session.selection() {
-        sink.emit(SessionEvent::model_changed(
+        sink.emit(SessionEvent::model_selected(
             &selection,
             session.model_facts(&selection),
         ));

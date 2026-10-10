@@ -149,7 +149,7 @@ fn all_events() -> Vec<SessionEvent> {
             ],
         },
         SessionEvent::error_session("no session with id `0195`"),
-        SessionEvent::ModelChanged {
+        SessionEvent::ModelSelected {
             provider: "p".to_string(),
             model: "m".to_string(),
             thinking_level: Some("high".to_string()),
@@ -230,7 +230,6 @@ fn all_events() -> Vec<SessionEvent> {
             id: "0199".to_string(),
             path: "C:/w/s.jsonl".to_string(),
             cwd: "C:/work/proj".to_string(),
-            model: Some(crate::ModelSelection::new("p", "m")),
             resumed: true,
             parent: None,
             parent_call: None,
@@ -428,46 +427,31 @@ fn every_tag_agrees_with_the_wire_the_enum_and_the_list() {
     // The announce's wire spelling: a subagent child carries its
     // parentage and the spawning call's correlation id; a user
     // session carries neither (absent fields never hit the wire).
+    // No `model` field (v24): the selection has one home — the
+    // stamped `model_selected` that follows.
     assert_eq!(
         serde_json::to_string(&SessionEvent::SessionOpened {
             id: "0199".to_string(),
             path: String::new(),
             cwd: "C:/work/proj".to_string(),
-            model: Some(ModelSelection::new("p", "m")),
             resumed: false,
             parent: Some("0192uuidv7parent".to_string()),
             parent_call: Some("i1".to_string()),
         })
         .expect("serialize"),
-        r#"{"type":"session_opened","id":"0199","path":"","cwd":"C:/work/proj","model":{"provider":"p","model":"m","thinking_level":null},"resumed":false,"parent":"0192uuidv7parent","parent_call":"i1"}"#
+        r#"{"type":"session_opened","id":"0199","path":"","cwd":"C:/work/proj","resumed":false,"parent":"0192uuidv7parent","parent_call":"i1"}"#
     );
     assert_eq!(
         serde_json::to_string(&SessionEvent::SessionOpened {
             id: "0199".to_string(),
             path: "C:/w/s.jsonl".to_string(),
             cwd: "C:/work/proj".to_string(),
-            model: Some(ModelSelection::new("p", "m")),
             resumed: true,
             parent: None,
             parent_call: None,
         })
         .expect("serialize"),
-        r#"{"type":"session_opened","id":"0199","path":"C:/w/s.jsonl","cwd":"C:/work/proj","model":{"provider":"p","model":"m","thinking_level":null},"resumed":true}"#
-    );
-    // A selection-less session (the zero-config boot, v21 amended):
-    // `model` serializes present-null, never skipped.
-    assert_eq!(
-        serde_json::to_string(&SessionEvent::SessionOpened {
-            id: "0199".to_string(),
-            path: "C:/w/s.jsonl".to_string(),
-            cwd: "C:/work/proj".to_string(),
-            model: None,
-            resumed: false,
-            parent: None,
-            parent_call: None,
-        })
-        .expect("serialize"),
-        r#"{"type":"session_opened","id":"0199","path":"C:/w/s.jsonl","cwd":"C:/work/proj","model":null,"resumed":false}"#
+        r#"{"type":"session_opened","id":"0199","path":"C:/w/s.jsonl","cwd":"C:/work/proj","resumed":true}"#
     );
     // The close's wire spelling: the one field, nothing else.
     assert_eq!(
@@ -496,11 +480,11 @@ fn every_tag_agrees_with_the_wire_the_enum_and_the_list() {
 }
 
 #[test]
-fn model_changed_carries_resolved_facts_and_omits_unknowns() {
+fn model_selected_carries_resolved_facts_and_omits_unknowns() {
     // The register announcement resolves the model record (v11): the
     // facts a frontend renders ride with the ids; unknown facts stay
     // off the wire entirely — absent means unknown, never zero.
-    let rich = SessionEvent::model_changed(
+    let rich = SessionEvent::model_selected(
         &crate::ModelSelection::new("p", "m"),
         crate::ModelFacts {
             context_window: Some(1_000_000),
@@ -521,7 +505,7 @@ fn model_changed_carries_resolved_facts_and_omits_unknowns() {
     assert!(wire.contains(r#""name":"The M model""#), "{wire}");
     assert!(wire.contains(r#""cost":{"input":1.0"#), "{wire}");
 
-    let bare = SessionEvent::model_changed(
+    let bare = SessionEvent::model_selected(
         &crate::ModelSelection::new("p", "m"),
         crate::ModelFacts::default(),
     );

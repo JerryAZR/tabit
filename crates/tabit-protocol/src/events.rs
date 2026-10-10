@@ -170,7 +170,7 @@ pub enum SessionEvent {
         /// when the provider reported nothing or the model carries no
         /// rate card. Session totals are sums over these; the same
         /// value rides the session file's entry, so a resume replays
-        /// exact history. `model_changed.cost` still carries the
+        /// exact history. `model_selected.cost` still carries the
         /// current rates for what future turns will cost.
         cost: Option<f64>,
     },
@@ -358,13 +358,6 @@ pub enum SessionEvent {
         /// session's is the backend's cwd; a subagent child's is its
         /// own spawn cwd.
         cwd: String,
-        /// The session's active selection. **Nullable (v21,
-        /// amended)**: `null` — serialized present, never skipped —
-        /// means the session has no selection (nothing usable at
-        /// this backend — the zero-config boot); the first `model`
-        /// command lands one, and until then no `model_changed` is
-        /// announced and runs fail at open.
-        model: Option<ModelSelection>,
         /// Whether the session continues an existing chain.
         resumed: bool,
         /// The parent session's id when this session is a subagent
@@ -408,13 +401,16 @@ pub enum SessionEvent {
         /// stamp carries.
         id: String,
     },
-    /// The active model changed: a `model` command applied (a state
-    /// write at receive), or the register announcement leading a
-    /// replay pass — the session's current selection, announced live,
-    /// never reconstructed from history. Never emitted for a session
-    /// with no selection (the zero-config boot announces
-    /// `session_opened.model: null` instead, v21 amended).
-    ModelChanged {
+    /// The session's current model selection (v24 — renamed from
+    /// `model_changed`, and now uniform): announced live whenever a
+    /// session becomes visible — at creation (`new_session`, the
+    /// fresh boot), ahead of every replay pass (`open_session`,
+    /// re-replay, checkout) — and at every `model` command (a state
+    /// write at receive). State is announced, never reconstructed
+    /// from history. Never emitted for a session with no selection
+    /// (the zero-config boot announces none until the first `model`
+    /// command lands one, v21 amended).
+    ModelSelected {
         /// Provider id from tabit config.
         provider: String,
         /// Model id within the provider.
@@ -727,14 +723,14 @@ impl SessionEvent {
         }
     }
 
-    /// The register announcement: a `model_changed` carrying a
-    /// selection and its resolved facts — at every receive-time write
-    /// (the `model` command's own outcome) and before every replay
-    /// pass (a session becoming visible always tells its model). One
-    /// construction site for both the weak notice path and the
-    /// worker's strong sends.
-    pub fn model_changed(selection: &ModelSelection, facts: crate::model::ModelFacts) -> Self {
-        Self::ModelChanged {
+    /// The register announcement: a `model_selected` carrying a
+    /// selection and its resolved facts — at session creation, at
+    /// every receive-time write (the `model` command's own outcome),
+    /// and before every replay pass (a session becoming visible
+    /// always tells its model). One construction site for both the
+    /// weak notice path and the worker's strong sends.
+    pub fn model_selected(selection: &ModelSelection, facts: crate::model::ModelFacts) -> Self {
+        Self::ModelSelected {
             provider: selection.provider.clone(),
             model: selection.model.clone(),
             thinking_level: selection.thinking_level.clone(),
@@ -834,7 +830,7 @@ impl SessionEvent {
             SessionEvent::ProvidersAvailable { .. } => tags::PROVIDERS_AVAILABLE,
             SessionEvent::SessionOpened { .. } => tags::SESSION_OPENED,
             SessionEvent::SessionClosed { .. } => tags::SESSION_CLOSED,
-            SessionEvent::ModelChanged { .. } => tags::MODEL_CHANGED,
+            SessionEvent::ModelSelected { .. } => tags::MODEL_SELECTED,
             SessionEvent::NativeItem { .. } => tags::NATIVE_ITEM,
             SessionEvent::InteractionRequest { .. } => tags::INTERACTION_REQUEST,
             SessionEvent::InteractionSettled { .. } => tags::INTERACTION_SETTLED,
@@ -883,7 +879,7 @@ pub mod tags {
     pub const PROVIDERS_AVAILABLE: &str = "providers_available";
     pub const SESSION_OPENED: &str = "session_opened";
     pub const SESSION_CLOSED: &str = "session_closed";
-    pub const MODEL_CHANGED: &str = "model_changed";
+    pub const MODEL_SELECTED: &str = "model_selected";
     pub const NATIVE_ITEM: &str = "native_item";
     pub const INTERACTION_REQUEST: &str = "interaction_request";
     pub const INTERACTION_SETTLED: &str = "interaction_settled";
@@ -922,7 +918,7 @@ pub mod tags {
         PROVIDERS_AVAILABLE,
         SESSION_OPENED,
         SESSION_CLOSED,
-        MODEL_CHANGED,
+        MODEL_SELECTED,
         NATIVE_ITEM,
         INTERACTION_REQUEST,
         INTERACTION_SETTLED,

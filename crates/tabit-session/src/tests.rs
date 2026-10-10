@@ -2625,12 +2625,12 @@ async fn replay_re_emits_the_chain_with_live_ids_and_whole_texts() -> Result<(),
     assert_eq!(replay_texts, vec![live_text.as_str()]);
 
     // The bracket structure: every announced turn commits, and the pass
-    // carries no model_changed at all — the register is announced live
+    // carries no model_selected at all — the register is announced live
     // at visibility, never reconstructed from history (owner ruling).
     assert!(
         replayed
             .iter()
-            .all(|e| { !matches!(e, SessionEvent::ModelChanged { .. }) })
+            .all(|e| { !matches!(e, SessionEvent::ModelSelected { .. }) })
     );
     let commits: Vec<String> = replayed
         .iter()
