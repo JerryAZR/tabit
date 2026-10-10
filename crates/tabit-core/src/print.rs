@@ -110,7 +110,7 @@ fn print_event(event: &SessionEvent) {
         SessionEvent::ReplayBegin { .. }
         | SessionEvent::ReplayEnd
         | SessionEvent::CheckedOut { .. }
-        | SessionEvent::ModelChanged { .. } => {}
+        | SessionEvent::ModelSelected { .. } => {}
         // The compaction bracket (v7): stdout stays the answer channel,
         // so the boundaries note on stderr and the summary stays quiet
         // in print mode.

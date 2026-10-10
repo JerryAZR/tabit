@@ -140,7 +140,7 @@ pub struct AvailableModel {
     pub thinking_levels: Vec<String>,
 }
 
-/// The resolved model-record facts a `model_changed` announcement
+/// The resolved model-record facts a `model_selected` announcement
 /// carries (v11): the capacity, display, and pricing facts a frontend
 /// renders next to the selection ids — a context meter's denominator,
 /// a human name, a per-turn cost. Every field is optional: the config

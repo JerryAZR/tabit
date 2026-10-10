@@ -540,7 +540,10 @@ fn zero_config_boots_selection_less_and_the_run_open_failure_teaches() {
         .iter()
         .find(|frame| frame["type"] == "session_opened")
         .expect("the boot session announced");
-    assert_eq!(opened["model"], serde_json::Value::Null, "null, present");
+    assert!(
+        opened.get("model").is_none(),
+        "no register field on session_opened (v24)"
+    );
     let session = opened["id"].as_str().expect("the session id").to_string();
     let note = frames
         .iter()
@@ -558,8 +561,8 @@ fn zero_config_boots_selection_less_and_the_run_open_failure_teaches() {
         .expect("the catalog announced");
     assert_eq!(catalog["providers"], serde_json::json!([]), "empty");
     assert!(
-        !frames.iter().any(|frame| frame["type"] == "model_changed"),
-        "a selection-less session announces no model_changed"
+        !frames.iter().any(|frame| frame["type"] == "model_selected"),
+        "a selection-less session announces no model_selected"
     );
 
     use std::io::Write as _;
@@ -605,15 +608,32 @@ fn explicit_model_on_a_known_but_unusable_provider_boots() {
     .expect("write config");
     let mut child = json_child(&dir, &home, Some(&config), &["--json", "--model", "p/m"]);
 
-    let frames = read_boot(&child);
+    let mut frames = read_boot(&child);
+    // The selection announcement follows the catalogs (v24's uniform
+    // ruling — creation announces like every other visibility path).
+    while !frames.iter().any(|frame| frame["type"] == "model_selected") {
+        frames.push(next_frame(&child));
+    }
     let opened = frames
         .iter()
         .find(|frame| frame["type"] == "session_opened")
         .expect("the boot session announced");
+    assert!(
+        opened.get("model").is_none(),
+        "session_opened carries no register (v24): {opened}"
+    );
+    assert!(
+        opened.get("model").is_none(),
+        "session_opened carries no register (v24): {opened}"
+    );
+    let selected = frames
+        .iter()
+        .find(|frame| frame["type"] == "model_selected")
+        .expect("the boot session announces its selection");
     assert_eq!(
-        opened["model"],
-        serde_json::json!({"provider": "p", "model": "m", "thinking_level": null}),
-        "the explicit selection crossed: {opened}"
+        (selected["provider"].as_str(), selected["model"].as_str()),
+        (Some("p"), Some("m")),
+        "the explicit selection crossed: {selected}"
     );
     let session = opened["id"].as_str().expect("the session id").to_string();
     let catalog = frames

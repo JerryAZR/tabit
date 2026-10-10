@@ -663,18 +663,30 @@ id = "m"
             }) => id.clone(),
             other => panic!("expected session_opened second, got {other:?}"),
         };
-        let opened = frames.iter().find_map(|frame| match frame {
+        // The boot session's selection announcement (v24): a stamped
+        // `model_selected` from its stream — `session_opened` no
+        // longer carries the register.
+        let selected = frames.iter().find_map(|frame| match frame {
             ServerFrame::Event(EventFrame {
+                stream,
                 origin: None,
-                event: crate::SessionEvent::SessionOpened { id, model, .. },
+                event:
+                    crate::SessionEvent::ModelSelected {
+                        provider, model, ..
+                    },
                 ..
-            }) => Some((id.clone(), model.clone())),
+            }) => Some((
+                stream.as_ref().map(|s| s.as_str().to_string()),
+                provider.clone(),
+                model.clone(),
+            )),
             _ => None,
         });
-        let (opened_id, opened_model) =
-            opened.expect("the boot session announces itself by session_opened");
-        assert_eq!(opened_id, boot_id);
-        assert_eq!(opened_model, Some(ModelSelection::new("p", "m")));
+        assert_eq!(
+            selected,
+            Some((Some(boot_id), "p".to_string(), "m".to_string())),
+            "the boot session announces its selection, stamped with its stream"
+        );
         assert_eq!(texts(&frames, "user"), vec!["hi"]);
         assert_eq!(texts(&frames, "delta"), vec!["hello"]);
         assert!(matches!(
@@ -1178,7 +1190,7 @@ id = "m"
                 ServerFrame::Event(event) => match &event.event {
                     crate::SessionEvent::ReplayBegin { .. } => Some("replay_begin"),
                     crate::SessionEvent::ReplayEnd => Some("replay_end"),
-                    crate::SessionEvent::ModelChanged { .. } => Some("model_changed"),
+                    crate::SessionEvent::ModelSelected { .. } => Some("model_selected"),
                     crate::SessionEvent::UserMessage { .. } => Some("user_message"),
                     crate::SessionEvent::TurnStarted { .. } => Some("turn_started"),
                     crate::SessionEvent::TextDelta { .. } => Some("text_delta"),
@@ -1205,9 +1217,9 @@ id = "m"
                 "models_available",
                 "providers_available",
                 // The register announcement precedes the bracket (the
-                // pass itself carries no model_changed — state is
+                // pass itself carries no model_selected — state is
                 // announced live, never reconstructed from history).
-                "model_changed",
+                "model_selected",
                 "replay_begin",
                 "user_message",
                 "turn_started",

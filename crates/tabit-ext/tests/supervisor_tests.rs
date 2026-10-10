@@ -963,7 +963,6 @@ async fn the_shared_grammar_flows_both_directions_over_the_pipe() {
             id: "0198".to_string(),
             path: String::new(),
             cwd: String::new(),
-            model: Some(tabit_protocol::ModelSelection::new("p", "m")),
             resumed: false,
             parent: None,
             parent_call: None,

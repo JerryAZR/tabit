@@ -531,10 +531,7 @@ async fn an_idle_message_runs_to_completion_over_the_stream() {
     ));
 
     // The info block carries the startup facts, and closing stats landed.
-    assert_eq!(
-        handle.info().model,
-        Some(tabit_protocol::ModelSelection::new("p", "m"))
-    );
+    assert!(!handle.info().resumed, "the boot session is fresh");
     assert!(
         handle.closing_stats().is_some(),
         "stats captured at wind-down"
@@ -663,6 +660,7 @@ async fn abort_while_idle_discards_queued_messages() {
             SessionEvent::SessionsAvailable { .. } => "sessions_available",
             SessionEvent::ModelsAvailable { .. } => "models_available",
             SessionEvent::ProvidersAvailable { .. } => "providers_available",
+            SessionEvent::ModelSelected { .. } => "model_selected",
             SessionEvent::MessagesDiscarded { .. } => "messages_discarded",
             _ => "other",
         })
@@ -674,10 +672,12 @@ async fn abort_while_idle_discards_queued_messages() {
             "sessions_available",
             "models_available",
             "providers_available",
+            // The fresh boot's creation announcement (v24).
+            "model_selected",
             "messages_discarded"
         ]
     );
-    let texts: Vec<String> = match &frames[4].event {
+    let texts: Vec<String> = match &frames[5].event {
         SessionEvent::MessagesDiscarded { messages } => {
             messages.iter().map(|m| m.text.clone()).collect()
         }
@@ -995,12 +995,8 @@ async fn new_session_runs_a_second_stream_and_both_route_by_id() {
     .await
     .event
     {
-        SessionEvent::SessionOpened { id, model, .. } => {
-            assert_eq!(
-                model,
-                Some(tabit_protocol::ModelSelection::new("p", "m")),
-                "the frame carries the new session's selection"
-            );
+        SessionEvent::SessionOpened { id, resumed, .. } => {
+            assert!(!resumed, "the new session announces fresh");
             id
         }
         other => panic!("expected session_opened, got {other:?}"),
@@ -1139,6 +1135,13 @@ async fn open_session_loads_a_stored_session_and_replays_it() {
         ) {
             continue;
         }
+        // The fresh boot's own creation announcement (v24) may still
+        // be draining behind the catalogs — it is not the pass.
+        if matches!(frame.event, SessionEvent::ModelSelected { .. })
+            && frame.stream.as_ref().map(StreamId::as_str) == Some(boot.as_str())
+        {
+            continue;
+        }
         assert_eq!(
             frame.stream.as_ref().map(StreamId::as_str),
             Some(stored_id.as_str()),
@@ -1155,7 +1158,7 @@ async fn open_session_loads_a_stored_session_and_replays_it() {
         pass,
         vec![
             "session_opened",
-            "model_changed",
+            "model_selected",
             "user_message",
             "turn_started",
             "text_delta",
@@ -1374,7 +1377,7 @@ async fn a_replay_request_streams_the_pass_onto_the_event_channel() {
     assert_eq!(
         pass,
         vec![
-            "model_changed",
+            "model_selected",
             "started",
             "user_message",
             "turn_started",
@@ -1396,7 +1399,7 @@ async fn a_replay_request_streams_the_pass_onto_the_event_channel() {
 fn kind_of(event: &SessionEvent) -> String {
     match event {
         SessionEvent::SessionOpened { .. } => "session_opened".to_string(),
-        SessionEvent::ModelChanged { .. } => "model_changed".to_string(),
+        SessionEvent::ModelSelected { .. } => "model_selected".to_string(),
         SessionEvent::UserMessage { .. } => "user_message".to_string(),
         SessionEvent::TurnStarted { .. } => "turn_started".to_string(),
         SessionEvent::TextDelta { .. } => "text_delta".to_string(),
@@ -2179,7 +2182,7 @@ fn model_changes(frames: &[EventFrame]) -> Vec<(String, String, Option<String>)>
     frames
         .iter()
         .filter_map(|frame| match &frame.event {
-            SessionEvent::ModelChanged {
+            SessionEvent::ModelSelected {
                 provider,
                 model,
                 thinking_level,
@@ -2252,11 +2255,11 @@ id = "bare"
     // The replay pass's lead announcement resolves the record.
     handle.replay(&id);
     collect_until(&mut handle, &mut frames, |event| {
-        matches!(event, SessionEvent::ModelChanged { .. })
+        matches!(event, SessionEvent::ModelSelected { .. })
     })
     .await;
     let boot = frames.iter().find_map(|frame| match &frame.event {
-        SessionEvent::ModelChanged {
+        SessionEvent::ModelSelected {
             model,
             context_window,
             name,
@@ -2286,12 +2289,12 @@ id = "bare"
     collect_until(&mut handle, &mut frames, |event| {
         matches!(
             event,
-            SessionEvent::ModelChanged { model, .. } if model == "bare"
+            SessionEvent::ModelSelected { model, .. } if model == "bare"
         )
     })
     .await;
     let bare = frames.iter().rev().find_map(|frame| match &frame.event {
-        SessionEvent::ModelChanged {
+        SessionEvent::ModelSelected {
             model,
             context_window,
             name,
@@ -2327,16 +2330,21 @@ async fn a_model_switch_lands_at_receive_and_announces() {
     collect_until(&mut handle, &mut frames, terminal).await;
     handle.model(&id, ModelSelection::new("q", "m2"));
     collect_until(&mut handle, &mut frames, |event| {
-        matches!(event, SessionEvent::ModelChanged { .. })
+        matches!(event, SessionEvent::ModelSelected { .. })
     })
     .await;
 
     // The announcement carries the new selection, and the register is
     // durable the moment the event is seen (the write precedes it).
+    // The leading (p, m) is the boot's own creation announcement
+    // (v24's uniform ruling).
     assert_eq!(
         model_changes(&frames),
-        vec![("q".to_string(), "m2".to_string(), None)],
-        "the switch announced itself"
+        vec![
+            ("p".to_string(), "m".to_string(), None),
+            ("q".to_string(), "m2".to_string(), None)
+        ],
+        "the boot announced, then the switch announced itself"
     );
     assert_eq!(
         last_model(&handle, &store),
@@ -2389,10 +2397,15 @@ async fn a_bad_model_ref_errors_at_receive_and_parks_nothing() {
     })
     .await;
 
-    // Nothing landed: no announcement, the register untouched, and the
-    // session still runs on the standing selection (no factory
+    // Nothing landed: no announcement beyond the boot's own (v24:
+    // creation announces the standing selection), the register
+    // untouched, and the session still runs on it (no factory
     // derivation for the rejected ref).
-    assert_eq!(model_changes(&frames), Vec::new());
+    assert_eq!(
+        model_changes(&frames),
+        vec![("p".to_string(), "m".to_string(), None)],
+        "only the boot announcement; the bad ref announced nothing"
+    );
     assert_eq!(
         last_model(&handle, &store),
         Some(("p".to_string(), "m".to_string(), None))
@@ -2462,7 +2475,7 @@ async fn a_mid_run_model_switch_lands_at_receive_under_the_run() {
     );
     let switch_at = frames
         .iter()
-        .position(|frame| matches!(&frame.event, SessionEvent::ModelChanged { provider, .. } if provider == "q"))
+        .position(|frame| matches!(&frame.event, SessionEvent::ModelSelected { provider, .. } if provider == "q"))
         .expect("the switch landed");
     assert!(
         switch_at < terminal_at,
@@ -2616,7 +2629,7 @@ async fn a_model_switch_survives_an_abort() {
     ));
     let switch_at = frames
         .iter()
-        .position(|frame| matches!(&frame.event, SessionEvent::ModelChanged { provider, .. } if provider == "q"))
+        .position(|frame| matches!(&frame.event, SessionEvent::ModelSelected { provider, .. } if provider == "q"))
         .expect("the switch announced");
     assert!(
         switch_at < terminal_at,
@@ -2655,25 +2668,29 @@ async fn rapid_model_switches_each_land_and_the_last_wins() {
             thinking_level: Some("high".to_string()),
         },
     );
-    let mut announced = 0;
-    while let Some(frame) = handle.next_event().await {
-        if matches!(frame.event, SessionEvent::ModelChanged { .. }) {
-            announced += 1;
-        }
-        frames.push(frame);
-        if announced == 2 {
-            break;
-        }
-    }
+    // Wait for the last switch's announcement specifically (the
+    // boot's creation announcement already drained with the run's
+    // frames — counting model_selecteds here would wait forever).
+    collect_until(&mut handle, &mut frames, |event| {
+        matches!(
+            event,
+            SessionEvent::ModelSelected {
+                thinking_level: Some(_),
+                ..
+            }
+        )
+    })
+    .await;
     frames.extend(drain(&mut handle).await);
 
     assert_eq!(
         model_changes(&frames),
         vec![
+            ("p".to_string(), "m".to_string(), None),
             ("q".to_string(), "m2".to_string(), None),
             ("p".to_string(), "m".to_string(), Some("high".to_string()))
         ],
-        "each switch announced, in wire order"
+        "the boot announced, then each switch announced, in wire order"
     );
     assert_eq!(
         last_model(&handle, &store),
@@ -2725,7 +2742,7 @@ async fn a_model_switch_precedes_a_parked_checkout() {
 
     let switch_at = frames
         .iter()
-        .position(|frame| matches!(&frame.event, SessionEvent::ModelChanged { provider, .. } if provider == "q"))
+        .position(|frame| matches!(&frame.event, SessionEvent::ModelSelected { provider, .. } if provider == "q"))
         .expect("the switch landed at receive");
     let checked_at = frames
         .iter()
@@ -2739,7 +2756,7 @@ async fn a_model_switch_precedes_a_parked_checkout() {
     // (its leading `model_changed` — idempotent repetition by design).
     assert!(matches!(
         &frames[checked_at + 1].event,
-        SessionEvent::ModelChanged { provider, .. } if provider == "q"
+        SessionEvent::ModelSelected { provider, .. } if provider == "q"
     ));
     assert_eq!(
         last_model(&handle, &store),
@@ -4061,7 +4078,9 @@ async fn the_stream_is_live_from_the_mount_in_arrival_order() {
             "session_opened",
             "sessions_available",
             "models_available",
-            "providers_available"
+            "providers_available",
+            // The fresh boot's creation announcement (v24).
+            "model_selected"
         ],
         "live from the mount, in arrival order — no buffer, no drop"
     );
@@ -4811,7 +4830,6 @@ async fn a_selection_less_boot_announces_null_and_fails_runs_at_open() {
         plain_data(),
     );
     let id = boot_id(&handle);
-    assert_eq!(handle.info().model, None, "selection-less at attach");
 
     handle.message(&id, "hi");
     // A replay request proves the pass announces no register either.
@@ -4819,8 +4837,8 @@ async fn a_selection_less_boot_announces_null_and_fails_runs_at_open() {
     let frames = drain(&mut handle).await;
 
     match frames.first().map(|f| &f.event) {
-        Some(SessionEvent::SessionOpened { model, .. }) => {
-            assert_eq!(*model, None, "the null selection crosses")
+        Some(SessionEvent::SessionOpened { resumed, .. }) => {
+            assert!(!resumed, "the fresh boot announces fresh")
         }
         other => panic!("session_opened first, got {other:?}"),
     }
@@ -4834,7 +4852,7 @@ async fn a_selection_less_boot_announces_null_and_fails_runs_at_open() {
     assert!(
         !frames
             .iter()
-            .any(|f| matches!(f.event, SessionEvent::ModelChanged { .. })),
+            .any(|f| matches!(f.event, SessionEvent::ModelSelected { .. })),
         "a selection-less session never announces model_changed"
     );
     assert!(
@@ -4886,11 +4904,11 @@ id = "m"
 
     handle.model(&id, ModelSelection::new("locked", "m"));
     let changed = until_event(&mut handle, |event| {
-        matches!(event, SessionEvent::ModelChanged { .. })
+        matches!(event, SessionEvent::ModelSelected { .. })
     })
     .await;
     assert!(
-        matches!(&changed.event, SessionEvent::ModelChanged { provider, model, .. } if provider == "locked" && model == "m"),
+        matches!(&changed.event, SessionEvent::ModelSelected { provider, model, .. } if provider == "locked" && model == "m"),
         "the first selection announces: {:?}",
         changed.event
     );

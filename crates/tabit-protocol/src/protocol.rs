@@ -25,7 +25,12 @@ use serde::{Deserialize, Serialize};
 /// source; absence of the frame now means "protocol older than v22"),
 /// re-announced with `models_available` on every world change; and
 /// `missing_keys` is removed from `models_available`, which returns
-/// to pure picker data. v21: models — the unconditional `models_available` boot
+/// to pure picker data. v24: the uniform model announcement —
+/// `model_changed` is renamed `model_selected` (it announces the
+/// current selection, initial or switched) and is now emitted at
+/// session creation too (a fresh session announces like every other
+/// visibility path), and `session_opened.model` is removed — one
+/// home for one semantic. v21: models — the unconditional `models_available` boot
 /// announcement (the usable model catalog; absence of the frame now
 /// means "protocol older than v21"); amended while unreleased: the
 /// zero-config boot (nullable `session_opened.model`), then the
@@ -47,7 +52,7 @@ use serde::{Deserialize, Serialize};
 /// compaction — the `compact` command and its event family (reshaped
 /// in v15 into the
 /// `compaction_begin`/`compaction_step`/`compaction_end` envelope).
-pub const PROTOCOL_VERSION: u32 = 23;
+pub const PROTOCOL_VERSION: u32 = 24;
 
 /// Which session produced an event. The stamp is the session id
 /// itself (v3: the `"main"` alias is retired — one name per session);
@@ -233,7 +238,7 @@ pub enum SessionCommand {
     /// `error { kind: model }` — even mid-run, where a picker wants
     /// the feedback), then the register write lands at once (the
     /// `model_change` entry and the live selection, one shared-write
-    /// operation) and `model_changed` follows immediately. A run in
+    /// operation) and `model_selected` follows immediately. A run in
     /// flight finishes untouched on the model it bound at run open;
     /// the next run derives the new agent. Not
     /// conversation intent: abort never touches it, and there is no
