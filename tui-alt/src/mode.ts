@@ -1029,8 +1029,12 @@ export class InteractiveMode {
 			s.path = event.path === "" ? undefined : event.path;
 			s.cwd = event.cwd === "" ? undefined : event.cwd;
 			s.resumed = event.resumed;
-			// Per-session facts reset here: the model_changed ahead of the
-			// following replay restates the resolved record, and the pass
+			// Per-session facts reset here. A resumed session's model_changed
+			// (leading the replay pass) restates the resolved record; a FRESH
+			// session gets no register announcement at all today (backend gap,
+			// reported 2026-10) — until then a fresh footer honestly shows the
+			// bare id and no context bar. No catalog fallback by ruling: what
+			// the wire didn't state, the footer doesn't know. The pass still
 			// re-delivers completion_calls, so sums rebuild from history.
 			s.modelName = undefined;
 			s.contextWindow = undefined;
