@@ -1146,10 +1146,12 @@ mod tests {
             80
         );
 
-        // Verify core Usage also has cached_input_tokens
+        // Verify core Usage: cached is a SUBSET of the wire's
+        // prompt_tokens — the shared record is disjoint, so uncached
+        // input is the difference.
         let core_usage = crate::completion::Usage::from(res.usage);
         assert_eq!(core_usage.cached_input_tokens, 80);
-        assert_eq!(core_usage.input_tokens, 100);
+        assert_eq!(core_usage.input_tokens, 20);
         assert_eq!(core_usage.total_tokens, 110);
     }
 

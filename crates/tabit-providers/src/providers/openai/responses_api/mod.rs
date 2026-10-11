@@ -959,15 +959,21 @@ impl ResponsesUsage {
 
 impl From<&ResponsesUsage> for crate::completion::Usage {
     fn from(usage: &ResponsesUsage) -> Self {
+        // The wire's `input_tokens` INCLUDES cache reads
+        // (`input_tokens_details.cached_tokens` is a subset); the
+        // shared usage record is disjoint (see
+        // [`crate::completion::Usage`]), so uncached input is the
+        // difference.
+        let cached = usage
+            .input_tokens_details
+            .as_ref()
+            .map(|details| details.cached_tokens)
+            .unwrap_or(0);
         crate::completion::Usage {
-            input_tokens: usage.input_tokens,
+            input_tokens: usage.input_tokens.saturating_sub(cached),
             output_tokens: usage.output_tokens,
             total_tokens: usage.total_tokens,
-            cached_input_tokens: usage
-                .input_tokens_details
-                .as_ref()
-                .map(|details| details.cached_tokens)
-                .unwrap_or(0),
+            cached_input_tokens: cached,
             cache_creation_input_tokens: 0,
             cache_creation_1h_input_tokens: 0,
             tool_use_prompt_tokens: 0,

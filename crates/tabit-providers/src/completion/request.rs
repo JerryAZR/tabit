@@ -499,9 +499,20 @@ pub trait NormalizeCompletionResponse {
 
 /// Struct representing the token usage for a completion request.
 /// If tokens used are `0`, then the provider failed to supply token usage metrics.
+///
+/// INVARIANT — the legs are DISJOINT: `input_tokens` excludes cache
+/// reads and cache writes, so
+/// `total = input + cached + cache_creation + output`.
+/// `reasoning_tokens` is the exception: a breakdown of
+/// `output_tokens`, already counted there. Provider wires differ —
+/// Anthropic reports disjoint counters natively; OpenAI-family wires
+/// report input INCLUSIVE of cache reads, and their normalizers
+/// subtract. `cost_of` bills each leg at its own rate, so a
+/// non-disjoint record double-bills.
 #[derive(Debug, PartialEq, Eq, Clone, Copy, Serialize, Deserialize)]
 pub struct Usage {
-    /// The number of input ("prompt") tokens used in a given request.
+    /// The number of input ("prompt") tokens used in a given request,
+    /// EXCLUDING cache reads and writes (see the type's invariant).
     pub input_tokens: u64,
     /// The number of output ("completion") tokens used in a given request.
     pub output_tokens: u64,

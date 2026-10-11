@@ -1192,7 +1192,8 @@ fn responses_usage_token_usage_preserves_reasoning_tokens() {
 
     let token_usage = crate::completion::Usage::from(&usage);
 
-    assert_eq!(token_usage.input_tokens, 100);
+    // Disjoint legs: the wire's input_tokens INCLUDES the 25 cached.
+    assert_eq!(token_usage.input_tokens, 75);
     assert_eq!(token_usage.cached_input_tokens, 25);
     assert_eq!(token_usage.output_tokens, 50);
     assert_eq!(token_usage.reasoning_tokens, 15);
@@ -1215,7 +1216,7 @@ fn responses_usage_deserializes_without_output_token_details() {
 
     let token_usage = crate::completion::Usage::from(&usage);
 
-    assert_eq!(token_usage.input_tokens, 100);
+    assert_eq!(token_usage.input_tokens, 75);
     assert_eq!(token_usage.cached_input_tokens, 25);
     assert_eq!(token_usage.output_tokens, 50);
     assert_eq!(token_usage.reasoning_tokens, 0);
@@ -2170,7 +2171,8 @@ fn responses_usage_add_preserves_rhs_details_when_lhs_details_are_absent() {
     let usage = lhs + rhs;
     let token_usage = crate::completion::Usage::from(&usage);
 
-    assert_eq!(token_usage.input_tokens, 13);
+    // Summed wire input 13 with 2 cached inside → uncached 11.
+    assert_eq!(token_usage.input_tokens, 11);
     assert_eq!(token_usage.cached_input_tokens, 2);
     assert_eq!(token_usage.output_tokens, 25);
     assert_eq!(token_usage.reasoning_tokens, 4);

@@ -1231,17 +1231,24 @@ impl From<Usage> for crate::completion::Usage {
 
 impl Usage {
     /// Normalize this provider usage payload into rig's [`crate::completion::Usage`].
+    ///
+    /// The wire's `prompt_tokens` INCLUDES cache reads
+    /// (`prompt_tokens_details.cached_tokens` is a subset); the shared
+    /// usage record is disjoint (see [`crate::completion::Usage`]), so
+    /// uncached input is the difference.
     pub fn to_normalized(&self) -> crate::completion::Usage {
+        let cached = self
+            .prompt_tokens_details
+            .as_ref()
+            .map(|d| d.cached_tokens as u64)
+            .unwrap_or(0);
         let mut usage = crate::providers::internal::completion_usage(
-            self.prompt_tokens as u64,
+            (self.prompt_tokens as u64).saturating_sub(cached),
             self.completion_tokens
                 .unwrap_or_else(|| self.total_tokens.saturating_sub(self.prompt_tokens))
                 as u64,
             self.total_tokens as u64,
-            self.prompt_tokens_details
-                .as_ref()
-                .map(|d| d.cached_tokens as u64)
-                .unwrap_or(0),
+            cached,
         );
         usage.reasoning_tokens = self
             .completion_tokens_details
