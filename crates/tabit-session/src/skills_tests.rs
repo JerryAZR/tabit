@@ -726,3 +726,100 @@ fn the_scan_reads_the_authored_first_part_only() {
     );
     let _ = fs::remove_dir_all(&root);
 }
+
+#[tokio::test]
+async fn the_tool_strips_the_frontmatter_and_carries_the_details() {
+    // One result format with the message expansion: the frontmatter
+    // (discovery metadata) stays out of the model-facing body, and
+    // the invocation's identity rides `details` for the frontend.
+    let cwd = temp_dir("tool-details");
+    skill_dir(
+        &cwd.join(".tabit/skills"),
+        "lint",
+        "description: Lint the workspace.\n",
+        "# the skill body",
+    );
+    let skills = discover_with_home(None, &cwd);
+    let mut context = context_for(&skills);
+    let output = skill(&mut context, "lint".to_string(), None)
+        .await
+        .expect("runs");
+    let text = output.render().to_string();
+    assert!(text.contains("# the skill body"), "{text}");
+    assert!(
+        !text.contains("description:"),
+        "the frontmatter stays out of the body: {text}"
+    );
+    let details = output.details().expect("the details ride");
+    assert_eq!(details["name"], "lint");
+    assert_eq!(details["description"], "Lint the workspace.");
+    assert_eq!(details["rel_path"], "SKILL.md");
+    assert!(
+        details["base_dir"]
+            .as_str()
+            .expect("a string")
+            .ends_with("lint"),
+        "{details}"
+    );
+}
+
+#[tokio::test]
+async fn a_reference_file_keeps_a_leading_rule_and_still_carries_details() {
+    // The strip is the skill file's own: a reference file whose
+    // content opens with `---` loses nothing.
+    let cwd = temp_dir("tool-ref-rule");
+    let dir = skill_dir(
+        &cwd.join(".tabit/skills"),
+        "pack",
+        "description: Pack things.\n",
+        "body",
+    );
+    write(
+        &dir.join("reference/notes.md"),
+        "---\nkept, not frontmatter",
+    );
+    let skills = discover_with_home(None, &cwd);
+    let mut context = context_for(&skills);
+    let output = skill(
+        &mut context,
+        "pack".to_string(),
+        Some("reference/notes.md".to_string()),
+    )
+    .await
+    .expect("runs");
+    let text = output.render().to_string();
+    assert!(
+        text.contains("---\nkept, not frontmatter"),
+        "the reference file is verbatim: {text}"
+    );
+    let details = output.details().expect("the details ride");
+    assert_eq!(details["rel_path"], "reference/notes.md");
+    assert_eq!(details["name"], "pack");
+}
+
+#[tokio::test]
+async fn a_directory_listing_carries_the_details() {
+    let cwd = temp_dir("tool-dir-details");
+    let dir = skill_dir(
+        &cwd.join(".tabit/skills"),
+        "pack",
+        "description: Pack things.\n",
+        "body",
+    );
+    write(&dir.join("scripts/run.py"), "print('hi')");
+    let skills = discover_with_home(None, &cwd);
+    let mut context = context_for(&skills);
+    let output = skill(
+        &mut context,
+        "pack".to_string(),
+        Some("scripts".to_string()),
+    )
+    .await
+    .expect("runs");
+    assert!(output.render().to_string().contains("run.py"));
+    let details = output
+        .details()
+        .expect("the listing carries the details too");
+    assert_eq!(details["name"], "pack");
+    assert_eq!(details["rel_path"], "scripts");
+}

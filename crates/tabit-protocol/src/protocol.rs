@@ -25,7 +25,11 @@ use serde::{Deserialize, Serialize};
 /// source; absence of the frame now means "protocol older than v22"),
 /// re-announced with `models_available` on every world change; and
 /// `missing_keys` is removed from `models_available`, which returns
-/// to pure picker data. v24: the uniform model announcement —
+/// to pure picker data. v25: the authored/expanded split —
+/// `user_message.text` becomes the authored text (was: the fold),
+/// and `user_message.expanded` carries the full model-visible fold
+/// when door expansions touched the message (absent otherwise).
+/// v24: the uniform model announcement —
 /// `model_changed` is renamed `model_selected` (it announces the
 /// current selection, initial or switched) and is now emitted at
 /// session creation too (a fresh session announces like every other
@@ -52,7 +56,7 @@ use serde::{Deserialize, Serialize};
 /// compaction — the `compact` command and its event family (reshaped
 /// in v15 into the
 /// `compaction_begin`/`compaction_step`/`compaction_end` envelope).
-pub const PROTOCOL_VERSION: u32 = 24;
+pub const PROTOCOL_VERSION: u32 = 25;
 
 /// Which session produced an event. The stamp is the session id
 /// itself (v3: the `"main"` alias is retired — one name per session);

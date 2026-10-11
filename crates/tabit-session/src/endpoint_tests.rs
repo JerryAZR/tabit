@@ -96,6 +96,21 @@ fn user_texts(frames: &[EventFrame]) -> Vec<String> {
         .collect()
 }
 
+/// The model-visible text of each `user_message` (v25): `expanded`
+/// when the door appended to the message, the authored `text`
+/// otherwise.
+fn user_expanded(frames: &[EventFrame]) -> Vec<String> {
+    frames
+        .iter()
+        .filter_map(|frame| match &frame.event {
+            SessionEvent::UserMessage { text, expanded, .. } => {
+                Some(expanded.clone().unwrap_or_else(|| text.clone()))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
 fn finished_outputs(frames: &[EventFrame]) -> Vec<String> {
     frames
         .iter()
@@ -593,7 +608,7 @@ async fn a_message_mid_run_steers_instead_of_starting_a_second_run() {
     let steer_id = &queued[0].0;
     assert!(
         frames.iter().any(|frame| matches!(&frame.event,
-            SessionEvent::UserMessage { text, entry_id }
+            SessionEvent::UserMessage { text, entry_id, .. }
                 if text == "also this" && entry_id == steer_id)),
         "the steer's user_message resolves its queued id"
     );
@@ -1958,6 +1973,7 @@ fn entry_id_of(frames: &[EventFrame], text: &str) -> String {
             SessionEvent::UserMessage {
                 text: seen,
                 entry_id,
+                ..
             } if seen == text => Some(entry_id.clone()),
             _ => None,
         })
@@ -2103,7 +2119,7 @@ async fn a_checkout_during_a_run_aborts_it_then_rewinds_at_the_beat() {
     let mut go_entry = None;
     while let Some(frame) = handle.next_event().await {
         match &frame.event {
-            SessionEvent::UserMessage { text, entry_id } if text == "go" => {
+            SessionEvent::UserMessage { text, entry_id, .. } if text == "go" => {
                 go_entry = Some(entry_id.clone());
             }
             SessionEvent::ToolCall { .. } if !sent => {
@@ -2723,7 +2739,7 @@ async fn a_model_switch_precedes_a_parked_checkout() {
     let mut go_entry = None;
     while let Some(frame) = handle.next_event().await {
         match &frame.event {
-            SessionEvent::UserMessage { text, entry_id } if text == "go" => {
+            SessionEvent::UserMessage { text, entry_id, .. } if text == "go" => {
                 go_entry = Some(entry_id.clone());
             }
             SessionEvent::ToolCall { .. } if !sent => {
@@ -3114,7 +3130,7 @@ async fn an_abort_discards_a_pending_checkout() {
     let mut go_entry = None;
     while let Some(frame) = handle.next_event().await {
         match &frame.event {
-            SessionEvent::UserMessage { text, entry_id } if text == "go" => {
+            SessionEvent::UserMessage { text, entry_id, .. } if text == "go" => {
                 go_entry = Some(entry_id.clone());
             }
             SessionEvent::ToolCall { .. } if !sent => {
@@ -3232,7 +3248,7 @@ async fn an_id_announced_mid_run_is_validatable_the_moment_it_is_knowable() {
                 sent = true;
                 handle.message(&id, "a correction");
             }
-            SessionEvent::UserMessage { text, entry_id } if text == "a correction" => {
+            SessionEvent::UserMessage { text, entry_id, .. } if text == "a correction" => {
                 // Mid-run (the answer turn has not started): the id is
                 // already committed, so the checkout must validate.
                 steer_entry = Some(entry_id.clone());
@@ -3474,7 +3490,7 @@ async fn abort_then_checkout_composes_at_the_pause_point() {
     let mut go_entry = None;
     while let Some(frame) = handle.next_event().await {
         match &frame.event {
-            SessionEvent::UserMessage { text, entry_id } if text == "go" => {
+            SessionEvent::UserMessage { text, entry_id, .. } if text == "go" => {
                 go_entry = Some(entry_id.clone());
             }
             SessionEvent::ToolCall { .. } if !sent => {
@@ -4401,19 +4417,24 @@ async fn a_tagged_message_expands_at_the_door() {
         "the run completed"
     );
     let texts = user_texts(&frames);
-    assert_eq!(texts.len(), 1, "one user message");
+    assert_eq!(
+        texts,
+        vec!["run the checks <skill name=\"commit\"/> before pushing".to_string()],
+        "text is the authored message, the tag the anchor"
+    );
+    let expanded = user_expanded(&frames);
     assert!(
-        texts[0].starts_with("run the checks <skill name=\"commit\"/> before pushing"),
-        "the message is verbatim, the tag the anchor: {}",
-        texts[0]
+        expanded[0].starts_with("run the checks <skill name=\"commit\"/> before pushing"),
+        "the expanded fold opens with the authored message: {}",
+        expanded[0]
     );
     assert!(
-        texts[0].contains("COMMIT-BODY-MARKER") && texts[0].ends_with("</skill>"),
+        expanded[0].contains("COMMIT-BODY-MARKER") && expanded[0].ends_with("</skill>"),
         "the skill body appended after the message: {}",
-        texts[0]
+        expanded[0]
     );
     assert!(
-        !texts[0].contains("description: Make a commit"),
+        !expanded[0].contains("description: Make a commit"),
         "frontmatter stripped"
     );
 
@@ -4472,18 +4493,23 @@ async fn an_attachment_expands_at_the_door_and_the_wire_stays_text() {
     let frames = drain(&mut handle).await;
     assert_eq!(finished_outputs(&frames), vec!["done".to_string()]);
 
-    // The wire is text-only: the event text is the message verbatim
-    // (the tag the anchor) plus the basename label — never the bytes.
+    // The wire is text-only and split (v25): `text` is the authored
+    // message (the tag the anchor), `expanded` adds the basename
+    // label — never the bytes.
     let texts = user_texts(&frames);
-    assert_eq!(texts.len(), 1, "one user message");
+    assert_eq!(texts, vec![text.clone()], "text is the authored message");
+    let expanded = user_expanded(&frames);
     assert_eq!(
-        texts[0],
+        expanded[0],
         format!("{text}\n\nshot.png"),
-        "the event text joins the message and the label"
+        "expanded joins the message and the label"
     );
     use base64::Engine as _;
     let b64 = base64::engine::general_purpose::STANDARD.encode(&png);
-    assert!(!texts[0].contains(&b64), "image bytes never cross the wire");
+    assert!(
+        !expanded[0].contains(&b64),
+        "image bytes never cross the wire"
+    );
 
     // The model's request carried the image part (the door, not the
     // engine, expanded — the request is the folded conversation).
@@ -4551,19 +4577,21 @@ async fn skill_and_attachment_tags_compose_skills_first() {
     assert_eq!(finished_outputs(&frames), vec!["done".to_string()]);
 
     let texts = user_texts(&frames);
-    assert_eq!(texts.len(), 1);
-    let body_at = texts[0].find("COMMIT-BODY-MARKER").expect("skill body");
+    assert_eq!(texts, vec![text.clone()], "text is the authored message");
+    let expanded = user_expanded(&frames);
+    assert_eq!(expanded.len(), 1);
+    let body_at = expanded[0].find("COMMIT-BODY-MARKER").expect("skill body");
     // The tag itself names the file (the anchor); the label is the
     // newline-separated basename after the text.
-    let label_at = texts[0].find("\n\nattach.png").expect("the label");
+    let label_at = expanded[0].find("\n\nattach.png").expect("the label");
     assert!(
         body_at < label_at,
         "the skill block lands in the text, the attachment label after it: {}",
-        texts[0]
+        expanded[0]
     );
     assert!(
-        texts[0].contains(&text),
-        "the message is verbatim, both tags the anchors"
+        expanded[0].contains(&text),
+        "the expanded fold carries the message verbatim, both tags the anchors"
     );
     let _ = std::fs::remove_dir_all(&cwd);
 }
@@ -4659,22 +4687,28 @@ async fn ack_and_discard_carry_the_authored_text_and_a_resend_expands_once() {
         "an idle send never queues — user_message is the acknowledgment"
     );
     let texts = user_texts(&frames);
-    assert_eq!(texts.len(), 1, "one user message in the re-run");
+    assert_eq!(
+        texts,
+        vec![authored.clone()],
+        "text is authored, tags the anchors"
+    );
+    let expanded = user_expanded(&frames);
+    assert_eq!(expanded.len(), 1, "one user message in the re-run");
     assert!(
-        texts[0].starts_with(&authored),
-        "the authored text is part[0], tags the anchors: {}",
-        texts[0]
+        expanded[0].starts_with(&authored),
+        "the expanded fold opens with the authored text: {}",
+        expanded[0]
     );
     assert_eq!(
-        texts[0].matches("COMMIT-BODY-MARKER").count(),
+        expanded[0].matches("COMMIT-BODY-MARKER").count(),
         1,
         "the live user_message renders the expansion exactly once: {}",
-        texts[0]
+        expanded[0]
     );
     assert!(
-        texts[0].contains("\n\nshot.png"),
+        expanded[0].contains("\n\nshot.png"),
         "the fold-owned separator joins the attachment label: {}",
-        texts[0]
+        expanded[0]
     );
 
     // Replay renders the same full joined text (the one constructor).
