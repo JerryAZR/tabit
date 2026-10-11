@@ -400,7 +400,9 @@ struct AnthropicAdapter {
     /// The stream's open content blocks, keyed by the wire's block `index`.
     open_blocks: HashMap<usize, OpenBlock>,
     /// `input_tokens` captured from `message_start`; the terminal
-    /// `message_delta` usage omits it.
+    /// `message_delta` may repeat it (gateways) or omit/zero it
+    /// (Anthropic proper) — the terminal arm prefers a nonzero delta
+    /// value and falls back to this.
     input_tokens: u64,
     /// The `cache_creation` TTL breakdown captured from `message_start`'s
     /// usage (the terminal `message_delta` carries only the aggregate).
@@ -458,9 +460,20 @@ impl WireAdapter for AnthropicAdapter {
                 // cache_creation_input_tokens and cache_read_input_tokens are
                 // cumulative totals on message_delta.usage per the Anthropic
                 // streaming API spec — use them directly.
+                //
+                // input_tokens: prefer the delta's own count when it carries
+                // a nonzero one. Anthropic proper reports the prompt size on
+                // `message_start` and omits it here, but Anthropic-compatible
+                // gateways disagree — OpenRouter's Messages endpoint sends
+                // `input_tokens: 0` on `message_start` and the real count on
+                // the terminal delta. A zero on the delta is "not reported",
+                // not a count (rig 9b9c428e); Anthropic proper is unchanged.
                 let usage = PartialUsage {
                     output_tokens: usage.output_tokens,
-                    input_tokens: usize::try_from(self.input_tokens).ok(),
+                    input_tokens: usage
+                        .input_tokens
+                        .filter(|tokens| *tokens > 0)
+                        .or_else(|| usize::try_from(self.input_tokens).ok()),
                     cache_creation_input_tokens: usage.cache_creation_input_tokens,
                     cache_read_input_tokens: usage.cache_read_input_tokens,
                     // The TTL breakdown rides `message_start`'s usage; fall
@@ -2701,6 +2714,44 @@ mod tests {
             input_tokens + cache_write_5m + cache_write_1h + output_tokens,
             "the 1h breakdown must not inflate the total"
         );
+    }
+
+    /// Anthropic-compatible gateways split usage differently:
+    /// OpenRouter's Messages endpoint reports `input_tokens: 0` on
+    /// `message_start` and the real count on the terminal
+    /// `message_delta`. The terminal arm prefers the delta's nonzero
+    /// count (rig 9b9c428e).
+    #[tokio::test]
+    async fn a_nonzero_terminal_delta_input_tokens_wins_over_message_start() {
+        let mut adapter = AnthropicAdapter::default();
+        let mut out = Vec::new();
+
+        let start = WireFrame::Text(
+            r#"{"type":"message_start","message":{"id":"msg_1","role":"assistant","content":[],"model":"claude-sonnet-4-6","stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":0,"output_tokens":1}}}"#
+                .into(),
+        );
+        let crate::providers::internal::wire::WireEvent::Known(event) = adapter.classify(start)
+        else {
+            panic!("message_start must classify as Known");
+        };
+        adapter.interpret(event, &mut out);
+        assert!(out.is_empty(), "message_start emits nothing by itself");
+
+        let terminal = WireFrame::Text(
+            r#"{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"input_tokens":4772,"output_tokens":20}}"#
+                .into(),
+        );
+        let crate::providers::internal::wire::WireEvent::Known(event) = adapter.classify(terminal)
+        else {
+            panic!("message_delta must classify as Known");
+        };
+        adapter.interpret(event, &mut out);
+
+        let Some(Ok(RawStreamingChoice::FinalResponse(response))) = out.into_iter().next() else {
+            panic!("a stop-bearing message_delta emits the terminal record");
+        };
+        let normalized = crate::completion::Usage::from(&response.usage);
+        assert_eq!(normalized.input_tokens, 4772);
     }
 
     #[test]

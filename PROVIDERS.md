@@ -117,11 +117,13 @@ Precedence: user `providers.toml` → extension fragments →
 in it are inert data (`base_url`, `api`, auth env name) that resolve
 against the standard engines like any config.
 
-**Second source — live listing.** Providers that resolve but aren't
-in the catalog (local servers, anything user-declared) get their
-models listed live (`ModelLister` exists in tabit-providers,
-currently unwired), same merge path. A listed model keeps user-declared
-metadata verbatim; generated/listed data *fills* new ids and
+**Uncataloged providers are user-declared, as today.** Live
+`/models` listing was ruled out (2026-09, ROADMAP): listings return
+ids only — no context windows, no costs — not useful enough to ship.
+A provider the downloaded catalog doesn't know (a local server, a
+user-declared endpoint) gets its models from `providers.toml` exactly
+as before. The catalog's merge semantics: a listed model keeps
+user-declared metadata verbatim; generated data *fills* new ids and
 *annotates* unset fields, never overriding a set field.
 
 ## The generator (interface settled; implementation elsewhere)
