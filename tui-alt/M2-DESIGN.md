@@ -68,10 +68,15 @@ the end and nowhere else. When a rule changes, change it here first.
   out at delete-to-line-start/end, so there is none — a stranded draft
   could only be sent to the wrong stream). Region-focus moves (editor ↔
   list ↔ transcript) never touch the draft.
-- **Esc**: focused stream running → `abort` that stream; focused stream
-  idle and not root → return to its **parent** (generic walk-up, never
-  hardcoded to root); root idle → nothing. Quit stays ctrl+d/ctrl+c on
-  an empty editor; Ctrl+C keeps its global interrupt shape.
+- **Esc**: focused stream not root → return to its **parent** (generic
+  walk-up, never hardcoded to root), running or idle alike — navigation
+  is never destructive (2026-10 ruling reversal: the old law aborted a
+  running child from its own pane — one key, two meanings, decided by
+  state the user wasn't tracking). Abort is the root's: focused root
+  running → `abort` (killing the parent's run takes the subagent calls
+  with it — the bridge tree-kills the children); root idle → nothing.
+  Quit stays ctrl+d/ctrl+c on an empty editor; Ctrl+C keeps its global
+  interrupt shape.
 - **Slash commands**: session-scoped ones (`/model`, `/compact`,
   `/rewind`, `/tree`) route to the focused stream; backend-level ones
   (`/new`, `/login`, `/logout`, `/sessions`) stay global. Uniform rule.

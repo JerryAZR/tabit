@@ -170,6 +170,18 @@ describe("ToolBlock", () => {
 		assert.ok(!replay.render(80).join("\n").includes("Took"));
 	});
 
+	test("subagent: the task IS the call line, whitespace-collapsed, cwd suffix; the answer previews", () => {
+		const block = new ToolBlock("t1", touch, "subagent", JSON.stringify({ task: "survey the\n  diff landscape", cwd: "/elsewhere" }));
+		block.setResult("the child surveyed and preferred none", true);
+		const collapsed = block.render(80).join("\n");
+		assert.ok(collapsed.includes("subagent survey the diff landscape"));
+		assert.ok(collapsed.includes("(cwd: /elsewhere)"));
+		assert.ok(collapsed.includes("the child surveyed")); // the final answer, default result law
+
+		const bare = new ToolBlock("t1", touch, "subagent", JSON.stringify({ task: "ping" }));
+		assert.ok(!bare.render(80).join("\n").includes("cwd"));
+	});
+
 	test("bash expanded shows everything without the hint", async () => {
 		const block = new ToolBlock("t1", touch, "bash", JSON.stringify({ command: "ls -la" }));
 		await sleep(3);

@@ -452,19 +452,23 @@ export class InteractiveMode {
 		this.#sweepClosed();
 	}
 
-	/** Esc's law (M2-DESIGN.md): abort the focused stream's run; when
-	 *  idle and not root, walk to the parent (generic — never hardcoded
-	 *  to root). Returns whether it acted — root-idle Esc falls through
-	 *  to the editor (its autocomplete dismiss). */
+	/** Esc's law (2026-10 ruling): navigation before destruction — a
+	 *  non-root stream's Esc ALWAYS walks to the parent (viewing is never
+	 *  destructive; the old order aborted a running child from its own
+	 *  pane — one key, two meanings, decided by state the user wasn't
+	 *  tracking). Abort is the root's: killing the parent's run takes the
+	 *  subagent calls with it (the bridge tree-kills the children). An
+	 *  idle root's Esc falls through to the editor (its autocomplete
+	 *  dismiss). Returns whether it acted. */
 	escape(): boolean {
 		const s = this.#focusedState();
 		if (s === undefined) return false;
-		if (s.running) {
-			this.#backend.abort(s.id);
-			return true;
-		}
 		if (s.id !== this.#root) {
 			this.focusStream(s.parent ?? this.#root ?? s.id);
+			return true;
+		}
+		if (s.running) {
+			this.#backend.abort(s.id);
 			return true;
 		}
 		return false;
@@ -743,9 +747,11 @@ export class InteractiveMode {
 	}
 
 	#statusText(s: StreamState): string {
-		if (s.closed) return "session closed";
 		if (s.compacting) return "compacting context…";
 		if (s.running) return "working — esc interrupts";
+		// A closed stream is not busy — the blank row, and the footer's
+		// state badge carries the "closed" word (the one-indicator ruling:
+		// the status strip spins for busy states only).
 		return "idle";
 	}
 
@@ -1057,9 +1063,11 @@ export class InteractiveMode {
 				// Boot facts have landed — the connection is no longer
 				// "connecting".
 				this.#emitFocusedState();
-			} else {
-				this.#view.addNote(this.#root, `subagent started: ${s.title ?? s.id}`, "info");
 			}
+			// A child's delegation renders as its tool_call card on the
+			// PARENT's transcript (the subagent renderer's call line carries
+			// the task) — no "subagent started" note (2026-10: it only
+			// existed because the default card showed a bare name).
 		},
 		session_closed: s => {
 			// v23: the spawner vouched for this stream's death — the LAST

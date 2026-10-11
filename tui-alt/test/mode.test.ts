@@ -599,7 +599,7 @@ describe("InteractiveMode", () => {
 		feed({ type: "session_closed", id: CHILD }, CHILD);
 		assert.deepStrictEqual(view.dropped, []);
 		assert.deepStrictEqual(view.pending, []);
-		assert.strictEqual(view.status, "session closed");
+		assert.strictEqual(view.status, "idle"); // not busy: the blank row; the footer's state badge says closed
 		assert.strictEqual(view.footer?.closed, true);
 		assert.strictEqual(view.subagents.find(e => e.stream === CHILD)?.state, "closed");
 		assert.strictEqual(view.notes.at(-1)?.text, "session closed — viewing only; nothing more is sent");
@@ -686,7 +686,7 @@ describe("InteractiveMode", () => {
 		);
 	});
 
-	test("M2 Esc's law: abort the focused run; idle child walks to its parent; idle root is a no-op", () => {
+	test("M2 Esc's law (2026-10): a child's Esc always walks to its parent; abort is the root's; idle root is a no-op", () => {
 		const { backend, mode, feed, control } = harness();
 		boot(control, feed);
 		// Root idle: nothing happens, the key falls through.
@@ -704,11 +704,14 @@ describe("InteractiveMode", () => {
 		assert.strictEqual(mode.focusedStream, SESSION);
 		assert.strictEqual(backend.sent.length, 1); // still only the root's abort
 
-		// Running child focused: Esc aborts THE CHILD, not the root.
+		// Running child focused: Esc STILL walks to the parent — viewing is
+		// never destructive; the child's run is untouched (aborting the root
+		// takes the subagent calls with it — the one abort semantic).
 		mode.focusStream(CHILD);
 		feed({ type: "user_message", entry_id: "cx", text: "child task" }, CHILD);
 		assert.strictEqual(mode.escape(), true);
-		assert.deepStrictEqual(backend.sent.map(f => `${f.kind}:${f.session}`), [`abort:${SESSION}`, `abort:${CHILD}`]);
+		assert.strictEqual(mode.focusedStream, SESSION);
+		assert.deepStrictEqual(backend.sent.map(f => `${f.kind}:${f.session}`), [`abort:${SESSION}`]);
 	});
 
 	test("M2 the list projection: title from the parent call's task, the activity atom's priority", () => {

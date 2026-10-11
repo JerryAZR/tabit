@@ -113,6 +113,7 @@ describe("footer badges", () => {
 		const state = badge("state");
 		assert.strictEqual(renderOne(state, { running: true }), "running");
 		assert.strictEqual(renderOne(state, { running: false }), "idle");
+		assert.strictEqual(renderOne(state, { closed: true, running: false }), "closed");
 	});
 });
 
