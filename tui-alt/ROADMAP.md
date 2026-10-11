@@ -5,7 +5,7 @@ Process: merge `master` into this worktree during development; merge back
 to main as `tui/` when done. Follow pi's proven patterns (`reports/pi.md`,
 the pi repo); **deviations need justification stated in advance**.
 
-Protocol state: **v23** (synced; see FRONTEND.md's changelog).
+Protocol state: **v24** (synced; see FRONTEND.md's changelog).
 
 ## 1. `/model` picker — landed (f3d4699, v22 sync a7d2283)
 
@@ -55,13 +55,14 @@ flight keeps its bound model. A pick from catalog rows cannot fail
 validation (existence-only rule, §5).
 
 **Deliberately out of v1** (each a later item if wanted): `/model <ref>`
-direct switch; model cycling keybindings (pi's `cycleForward`); the
-`/thinking` selector (pi splits it — thinking cycles `null` → the
-catalog's announced `thinking_levels` names); showing cost/reasoning/
-modality facts (the wire carries them; the owner-ruled row is three
-columns).
+direct switch; model cycling keybindings (pi's `cycleForward`); showing
+cost/reasoning/modality facts (the wire carries them; the owner-ruled
+row is three columns). ~~The `/thinking` selector~~ — **landed
+2026-10** (fce0b84): a picker in the card slot (`default` + the
+announced level names, current ✓-pinned), the dial rides the `model`
+command, the model badge shows a named level as a suffix.
 
-## 2. `/login` (+ `/logout`)
+## 2. `/login` (+ `/logout`) — **landed** (the auth card; v22 sync)
 
 The v21/v22 in-app auth path. Reuses #1's selector seam: `/login` lists
 `providers_available`'s `auth: "none"` providers (the login widget's
