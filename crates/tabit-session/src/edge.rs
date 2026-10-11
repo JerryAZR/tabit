@@ -1690,7 +1690,7 @@ id = "m"
             .find_map(|line| match serde_json::from_str::<ServerFrame>(&line) {
                 Ok(ServerFrame::Event(EventFrame {
                     origin: None,
-                    event: crate::SessionEvent::UserMessage { text, entry_id },
+                    event: crate::SessionEvent::UserMessage { text, entry_id, .. },
                     ..
                 })) if text == "hi" => Some(entry_id),
                 _ => None,

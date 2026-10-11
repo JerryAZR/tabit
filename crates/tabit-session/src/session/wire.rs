@@ -49,9 +49,11 @@ pub(crate) fn authored_text(message: &Message) -> String {
         .expect("authored_text: the door's one-text-part guarantee")
 }
 
-/// The one `user_message` event assembly: the message's joined text
-/// (the wire fold — every text part, the door's expansion included)
-/// under its entry id. Emission stays at the three sites (run.rs's
+/// The one `user_message` event assembly (v25): the AUTHORED text
+/// (part[0], the first-part law) under `text`, and — only when the
+/// door's expansions changed anything — the whole fold under
+/// `expanded` (what the model saw; the transcript's render source).
+/// Emission stays at the three sites (run.rs's
 /// failed-open drain and Steer arm, replay.rs's projection) —
 /// custody and stream ordering are load-bearing there; the assembly
 /// is one concern and lives here.
@@ -59,9 +61,12 @@ pub(crate) fn user_message_event(
     entry_id: String,
     message: &Message,
 ) -> tabit_protocol::SessionEvent {
+    let authored = authored_text(message);
+    let fold = user_text(message);
     tabit_protocol::SessionEvent::UserMessage {
-        text: user_text(message),
         entry_id,
+        expanded: (fold != authored).then_some(fold),
+        text: authored,
     }
 }
 
@@ -185,8 +190,23 @@ mod tests {
         };
         let event = user_message_event("entry-1".to_string(), &message);
         assert!(
-            matches!(event, tabit_protocol::SessionEvent::UserMessage { text, entry_id }
-                if text == "authored\n\nappended" && entry_id == "entry-1")
+            matches!(event, tabit_protocol::SessionEvent::UserMessage { text, entry_id, expanded }
+                if text == "authored"
+                    && entry_id == "entry-1"
+                    && expanded.as_deref() == Some("authored\n\nappended"))
+        );
+
+        // No door expansion → `text` is the whole story, `expanded`
+        // absent.
+        let message = tabit_providers::message::Message::User {
+            content: tabit_providers::OneOrMany::one(tabit_providers::message::UserContent::text(
+                "plain",
+            )),
+        };
+        let event = user_message_event("entry-2".to_string(), &message);
+        assert!(
+            matches!(event, tabit_protocol::SessionEvent::UserMessage { text, expanded, .. }
+                if text == "plain" && expanded.is_none())
         );
     }
 

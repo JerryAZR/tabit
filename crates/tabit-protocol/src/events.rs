@@ -26,14 +26,21 @@ pub enum SessionEvent {
     },
     /// A user message was accepted and recorded.
     UserMessage {
-        /// The message text — the wire fold: every text part joined,
-        /// the door's expansion (skill bodies, attachment labels)
-        /// included.
+        /// The AUTHORED text — what the user typed, tags intact
+        /// (v25; the first-part law made wire-visible: door
+        /// expansions only append, so the first text part IS the
+        /// authored text). Before v25 this field was the fold.
         text: String,
         /// The message's durable entry id — the id `message_queued`
         /// announced at submit (born early: minted at accept, carried into
         /// the log at drain).
         entry_id: String,
+        /// The message as the model saw it — the authored text plus
+        /// the door's expansions (skill bodies, attachment labels),
+        /// the whole wire fold (v25). Absent when no door expansion
+        /// touched the message; read `text` then.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expanded: Option<String>,
     },
     /// A message was accepted while a run is live: it steers at the next
     /// turn boundary. The submit-time acknowledgment for messages that

@@ -216,6 +216,7 @@ fn sampled_event_variants_survive_the_frame_envelope() {
             event: SessionEvent::UserMessage {
                 text: "hi".to_string(),
                 entry_id: "e0".to_string(),
+                expanded: None,
             },
         },
         EventFrame {

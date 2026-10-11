@@ -10,6 +10,12 @@ fn all_events() -> Vec<SessionEvent> {
         SessionEvent::UserMessage {
             text: "hi".to_string(),
             entry_id: "0192uuidv7user".to_string(),
+            expanded: Some(
+                "hi
+
+[expanded]"
+                    .to_string(),
+            ),
         },
         SessionEvent::MessageQueued {
             id: "0192uuidv7queued".to_string(),

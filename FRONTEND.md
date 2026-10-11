@@ -77,7 +77,11 @@ last frame on a dead child's stream (§6). v24 made the model
 announcement uniform: `model_changed` is renamed `model_selected` (it
 announces the current selection, initial or switched), a fresh
 session announces it at creation like every other visibility path,
-and `session_opened.model` is removed — one home for one semantic. Each version landed as one protocol-version bump
+and `session_opened.model` is removed — one home for one semantic.
+v25 split the user message's text: `user_message.text` is the
+authored text (was: the fold), and `user_message.expanded` carries
+the full model-visible fold when door expansions (skills,
+attachments) touched the message — absent otherwise. Each version landed as one protocol-version bump
 with no compatibility
 period; always check the report's `protocol_version`. (`tabit-core --list` prints a human table —
 there is no JSON listing edge.)
@@ -452,9 +456,11 @@ in the same format the `skill` tool returns:
 Unresolvable tags — no such skill in *that session's* catalog, or an
 unreadable file — are left as-is: the message is never rejected
 ("write to /tmp, redirect errors to /dev/null" contains no tag and is
-never a fetch attempt). The `user_message` event, the log, and the
-model's request all carry the expanded text — what the model saw is
-what replay shows. No arguments by design (pi's prompt-template is
+never a fetch attempt). The log and the model's request carry the
+expanded message — what the model saw is what replay shows — while
+the `user_message` event splits the two (v25): `text` is the
+authored message (the tag the anchor), `expanded` the whole fold
+(the same split on replay). No arguments by design (pi's prompt-template is
 the future direction if that ever changes), and the bare leading
 `/name` shorthand is not recognized (deferred until the tag path is
 stable).
@@ -481,9 +487,10 @@ model saw.
 
 **The wire stays text.** `message { session, text }` carries the tags
 as plain text; image bytes never cross the wire. The `user_message`
-event's text is the message's text parts joined — the original text
-with the tags, then each basename label — so the transcript shows the
-attachment by name; you may render the tag as an attachment chip.
+event's `text` is the authored message (the tags in place); its
+`expanded` is the model-visible fold — the authored text, then each
+basename label — so the transcript shows the attachment by name; you
+may render the tag as an attachment chip.
 Draft salvage of a discarded queued message is therefore text (the
 parts were never on the wire) — re-attaching means re-sending with the
 tag.
@@ -513,7 +520,7 @@ those connection-level).
 | event | payload | when |
 |---|---|---|
 | `message_queued` | `id`, `text` | a `message` accepted while a run is live (a steer that waits). `id` is the message's entry id, minted here. `text` is the **authored text** — the message's first part, tags intact; the door's expansion (skill bodies, attachment labels) never rides it. Idle sends never produce this event. |
-| `user_message` | `entry_id`, `text` | the message drains into a run (opening batch or steer boundary) and becomes history. Consecutive `user_message`s = an opening batch. |
+| `user_message` | `entry_id`, `text`, `expanded?` | the message drains into a run (opening batch or steer boundary) and becomes history. Consecutive `user_message`s = an opening batch. `text` is the **authored** text — what the user typed, tags intact (v25; the first-part law made wire-visible). `expanded` (v25) is the message as the model saw it — the full fold, authored text plus the door's expansions — present only when an expansion changed anything; render `expanded ?? text`, recall `text` into the editor. |
 | `messages_discarded` | `messages: [{ id, text }]` | a clear site: abort (what was queued at abort time — the notice is immediate, at the abort site, ahead of `run_aborted`) or checkout (what was submitted before the checkout; §7, ahead of `run_aborted` and `checked_out`). Omitted when nothing was pending. Salvage as drafts; the backend keeps no copy. Each `text` is the **authored text** — the message's first part, tags intact — so a salvaged draft re-sent re-expands fresh at the door (no duplication). |
 | `turn_started` | `id`, `started_at_ms` | a model turn begins; `id` is the turn's entry id, minted here and reused at commit. `started_at_ms` is the turn's start, Unix milliseconds (live runs stamp at emission; replay stamps from the turn entry's recorded time, so a replayed bracket's two stamps coincide). |
 | `text_delta` | `turn_id`, `text` | assistant text; appends within the turn. Full-text exactly once in replay. |
