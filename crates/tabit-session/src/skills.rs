@@ -470,11 +470,10 @@ pub async fn skill(
             lines.push(line);
         }
         lines.sort();
-        return Ok(ToolOutput::text(format!(
-            "{}{}",
-            lines.join("\n"),
-            footer(entry)
-        )));
+        return tabit_providers::tool::content_parts(
+            format!("{}{}", lines.join("\n"), footer(entry)),
+            Some(details(entry, rel)),
+        );
     }
     let content = std::fs::read_to_string(&target).map_err(|err| {
         ToolExecutionError::other(format!(
@@ -482,7 +481,36 @@ pub async fn skill(
             entry.name
         ))
     })?;
-    Ok(ToolOutput::text(format!("{}{}", content, footer(entry))))
+    // The frontmatter is discovery metadata: the model already chose
+    // the skill from the catalog, so the body it reads starts after
+    // it — the message expansion's shape (one result format). Only
+    // the skill file itself strips; a reference file's leading `---`
+    // (if any) is content.
+    let is_skill_file = std::fs::canonicalize(&entry.skill_file)
+        .map(|skill_file| skill_file == target)
+        .unwrap_or(false);
+    let body = if is_skill_file {
+        body_after_frontmatter(&content)
+    } else {
+        &content
+    };
+    tabit_providers::tool::content_parts(
+        format!("{}{}", body, footer(entry)),
+        Some(details(entry, rel)),
+    )
+}
+
+/// The result's `details` cargo — frontend-only, the model never sees
+/// it (ToolOutput's ruled split): the invocation's identity and
+/// target, so a frontend renders the skill (name, description) and
+/// the path read without parsing content.
+fn details(entry: &SkillEntry, rel: &str) -> serde_json::Value {
+    serde_json::json!({
+        "name": entry.name,
+        "description": entry.description,
+        "rel_path": rel,
+        "base_dir": entry.base_dir,
+    })
 }
 
 /// The base-directory footer appended to success results — advanced

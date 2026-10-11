@@ -77,9 +77,9 @@ pub(crate) fn result_text(result: &tabit_providers::message::ToolResult) -> Stri
 }
 
 /// The tool's presentation cargo, when it produced any — the
-/// structured facts riding `tool_result.details` (today: the edit
-/// tool's diff + outcomes). Details live on the result itself; the
-/// model never sees them.
+/// structured facts riding `tool_result.details` (TOOLS.md's table:
+/// edit, bash, subagent, skill). Details live on the result itself;
+/// the model never sees them.
 pub(crate) fn result_details(
     result: &tabit_providers::message::ToolResult,
 ) -> Option<serde_json::Value> {

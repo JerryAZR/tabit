@@ -19,9 +19,8 @@ hooks; providers never serialize it.
 
 ## `tool_result.details` by tool name
 
-Today's producers — `read`, `write`, and `skill` emit no cargo
-(their `content` is the whole story; the skill tool's content ends
-with the base-directory footer); unknown names have no cargo by
+Today's producers — `read` and `write` emit no cargo (their
+`content` is the whole story); unknown names have no cargo by
 definition.
 
 ### `edit`
@@ -55,6 +54,28 @@ The unified diff of the applied edit batch, plus per-edit outcomes.
   renderer marks exactly those. A rejected outcome also carries
   `reason` (the same string `content` reports for that edit; absent
   when applied).
+
+### `skill`
+
+The invocation's identity and target — a frontend renders the skill
+(name, description) and the path read without parsing `content`.
+Present on every success (the file read and the directory listing).
+The model-facing `content` starts after the skill file's frontmatter
+(discovery metadata, already in the catalog) and ends with the
+base-directory footer — the same shape a user-side `<skill>` tag
+expansion appends.
+
+```json
+{
+  "name": "commit",
+  "description": "Create a well-formed commit …",
+  "rel_path": "reference/verbs.md",
+  "base_dir": "C:/work/proj/.agents/skills/commit"
+}
+```
+
+- `rel_path` is the requested path within the skill (`SKILL.md` by
+  default); `base_dir` is the skill's absolute base.
 
 ### `bash`
 
