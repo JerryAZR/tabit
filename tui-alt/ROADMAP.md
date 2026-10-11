@@ -124,9 +124,9 @@ text: `user_message` events join the text parts (tags + basename labels),
 so the transcript shows the attachment by name; the log and the model's
 request hold exactly what the model saw (the first-part law: door
 expansion only appends parts, part[0] is the authored text, salvaged
-drafts re-expand exactly once). Known mismatch to trim: the TUI's sniff
-also accepts BMP, which the backend leaves unexpanded (the tag passes
-through).
+drafts re-expand exactly once). ~~Known mismatch to trim: the TUI's sniff
+also accepts BMP~~ — **trimmed 2026-10**: the sniff table is the door's
+four formats exactly (PNG/JPEG/GIF/WebP).
 
 Chips share item 3's blocker (the editor's marker machinery is private)
 and its deferral. The catalog's per-model `input` modalities (v21) tell

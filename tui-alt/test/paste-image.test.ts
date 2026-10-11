@@ -23,12 +23,14 @@ const reader = (image: Uint8Array | null | undefined, text: string | null | unde
 });
 
 describe("sniffImageExtension", () => {
-	test("the five formats by magic bytes; unknown is undefined", () => {
+	test("the backend door's four formats by magic bytes; BMP and unknown are undefined", () => {
 		assert.strictEqual(sniffImageExtension(PNG), "png");
 		assert.strictEqual(sniffImageExtension(JPEG), "jpg");
 		assert.strictEqual(sniffImageExtension(GIF), "gif");
-		assert.strictEqual(sniffImageExtension(BMP), "bmp");
 		assert.strictEqual(sniffImageExtension(WEBP), "webp");
+		// The door (attachments.rs) resolves PNG/JPEG/GIF/WebP only — a BMP
+		// tag would pass through unexpanded, so the sniff doesn't name it.
+		assert.strictEqual(sniffImageExtension(BMP), undefined);
 		assert.strictEqual(sniffImageExtension(new Uint8Array([1, 2, 3])), undefined);
 	});
 });

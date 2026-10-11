@@ -95,14 +95,17 @@ class CommandReader implements ClipboardReader {
 	}
 }
 
-/** The image format from its magic bytes; undefined = unrecognized
- *  (saved as .png — most clipboard sources speak it). */
+/** The image format from its magic bytes — the backend door's table
+ *  exactly (attachments.rs: PNG/JPEG/GIF/WebP, sniffed and
+ *  decode-verified); anything else (BMP included, 2026-10 alignment —
+ *  the door leaves it unexpanded) is undefined and saved as .png, the
+ *  clipboard's common tongue. The extension only names the temp file;
+ *  the backend sniffs the bytes, never the name. */
 export function sniffImageExtension(bytes: Uint8Array): string | undefined {
 	const starts = (...magic: number[]) => magic.every((byte, index) => bytes[index] === byte);
 	if (starts(0x89, 0x50, 0x4e, 0x47)) return "png";
 	if (starts(0xff, 0xd8, 0xff)) return "jpg";
 	if (starts(0x47, 0x49, 0x46, 0x38)) return "gif";
-	if (starts(0x42, 0x4d)) return "bmp";
 	if (starts(0x52, 0x49, 0x46, 0x46) && bytes[8] === 0x57 && bytes[9] === 0x45) return "webp";
 	return undefined;
 }
