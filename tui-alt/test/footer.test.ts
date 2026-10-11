@@ -64,11 +64,15 @@ describe("footer badges", () => {
 		assert.strictEqual(renderOne(model, { model: undefined }), undefined);
 	});
 
-	test("context: bar, percent, absolute; silent until both facts exist; thresholds colorize", () => {
+	test("context: bar, percent, absolute; gated on the ceiling alone; thresholds colorize", () => {
 		const context = badge("context");
 		assert.strictEqual(renderOne(context), undefined);
-		assert.strictEqual(renderOne(context, { contextUsed: 1000 }), undefined);
+		assert.strictEqual(renderOne(context, { contextUsed: 1000 }), undefined); // no ceiling, no bar
 		assert.strictEqual(renderOne(context, { contextWindow: 0, contextUsed: 1000 }), undefined);
+		// Ceiling known, usage not yet reported (a fresh boot): an honest zero bar.
+		const fresh = renderOne(context, { contextWindow: 1_000_000 })!;
+		assert.ok(fresh.includes("░".repeat(10)));
+		assert.ok(fresh.includes("0.0% (0/1.0M)"));
 		const full = renderOne(context, { contextWindow: 1_000_000, contextUsed: 291_000 })!;
 		assert.match(full, /^ctx: /);
 		assert.ok(full.includes("█".repeat(3) + "░".repeat(7)));
