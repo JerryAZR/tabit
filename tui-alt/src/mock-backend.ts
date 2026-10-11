@@ -362,6 +362,75 @@ async function steerRun(session: string): Promise<void> {
 	running = false;
 }
 
+/** The skill scenario (v25): a manual invocation — `user_message`
+ *  splits the authored tag text from the door's fold — then the
+ *  model's own `skill` tool calls with the details cargo: one with a
+ *  description, one a description-less reference read (the path
+ *  fallback). */
+async function skillRun(session: string): Promise<void> {
+	runStartedAt = ts();
+	emitEvent(session, {
+		type: "user_message",
+		text: '<skill name="commit"/>',
+		expanded:
+			'<skill name="commit"/>\n<skill name="commit">Draft a commit message from the diff.\n\n---\nBase directory: ~/.agents/skills/commit\n</skill>',
+		entry_id: nextId("entry-"),
+	});
+	const turn = nextId("turn-");
+	emitEvent(session, { type: "turn_started", id: turn, started_at_ms: ts() });
+	emitEvent(session, {
+		type: "tool_call",
+		turn_id: turn,
+		name: "skill",
+		call_id: "call-skill-1",
+		internal_call_id: "int-skill-1",
+		arguments: JSON.stringify({ name: "review" }),
+	});
+	await sleep(60);
+	emitEvent(session, {
+		type: "tool_result",
+		turn_id: turn,
+		entry_id: nextId("entry-"),
+		name: "skill",
+		internal_call_id: "int-skill-1",
+		content: "Review the diff carefully.\n\n---\nBase directory: .agents/skills/review",
+		status: { status: "success" },
+		details: { name: "review", description: "review a diff", rel_path: "SKILL.md", base_dir: ".agents/skills/review" },
+	});
+	// The reference read: no description on the entry — the card names
+	// the path instead.
+	emitEvent(session, {
+		type: "tool_call",
+		turn_id: turn,
+		name: "skill",
+		call_id: "call-skill-2",
+		internal_call_id: "int-skill-2",
+		arguments: JSON.stringify({ name: "notes", rel_path: "reference.md" }),
+	});
+	await sleep(60);
+	emitEvent(session, {
+		type: "tool_result",
+		turn_id: turn,
+		entry_id: nextId("entry-"),
+		name: "skill",
+		internal_call_id: "int-skill-2",
+		content: "Reference material the model asked for.\n\n---\nBase directory: .agents/skills/notes",
+		status: { status: "success" },
+		details: { name: "notes", rel_path: "reference.md", base_dir: ".agents/skills/notes" },
+	});
+	emitEvent(session, { type: "text_delta", turn_id: turn, text: "Both skills read. " });
+	emitEvent(session, { type: "completion_call", turn_id: turn, usage: usage(421, 137), cost: cost(421, 137) });
+	emitEvent(session, { type: "turn_committed", id: turn, completed_at_ms: ts() });
+	emitEvent(session, {
+		type: "run_finished",
+		output: "done",
+		durable: true,
+		started_at_ms: runStartedAt,
+		completed_at_ms: ts(),
+	});
+	running = false;
+}
+
 async function continueRun(session: string): Promise<void> {
 	// The go-ahead with nothing new (FRONTEND.md §5): a turn over the
 	// existing conversation — no user_message precedes it.
@@ -570,6 +639,7 @@ stdin.on("line", line => {
 					{
 						basic: basicRun,
 						tools: toolsRun,
+						skill: skillRun,
 						subagent: subagentRun,
 						steer: steerRun,
 						ask: askRun,

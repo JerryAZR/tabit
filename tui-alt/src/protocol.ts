@@ -1,5 +1,5 @@
 /**
- * The tabit frontend wire vocabulary (FRONTEND.md, protocol v24), mirrored
+ * The tabit frontend wire vocabulary (FRONTEND.md, protocol v25), mirrored
  * from `crates/tabit-protocol` as TypeScript types, plus the lenient parse
  * a hand-rolled client owes the contract: JSON.parse first, switch on
  * known `type`s to a typed union, and hand everything unrecognized back as
@@ -54,7 +54,7 @@
  * views stay while focused or listed.
  */
 
-export const PROTOCOL_VERSION = 24;
+export const PROTOCOL_VERSION = 25;
 
 // ---------------------------------------------------------------------------
 // Commands (frontend → backend). Fire-and-forget; outcomes arrive as
@@ -245,7 +245,18 @@ export interface SubagentDetails {
 /** One session event, tag-flattened exactly as it rides the wire. */
 export type SessionEvent =
 	| { type: "run_aborted"; output: string; started_at_ms: number; completed_at_ms: number }
-	| { type: "user_message"; text: string; entry_id: string }
+	| {
+			// v25: `text` is the AUTHORED message (tags intact — arrow-up
+			// recall restores what the user typed); `expanded` is the
+			// model-visible fold when the door's expansions (skills,
+			// attachments) changed anything, absent otherwise. The
+			// transcript renders the authored text (owner ruling); expanded
+			// views for messages are a later item.
+			type: "user_message";
+			text: string;
+			entry_id: string;
+			expanded?: string;
+		  }
 	| { type: "message_queued"; id: string; text: string }
 	| { type: "messages_discarded"; messages: DiscardedMessage[] }
 	| { type: "turn_started"; id: string; started_at_ms: number }

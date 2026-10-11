@@ -12,6 +12,7 @@ import "./read.ts";
 import "./write.ts";
 import "./bash.ts";
 import "./subagent.ts";
+import "./skill.ts";
 
 export { rendererFor, defaultCall, defaultResult } from "./registry.ts";
 export type { ToolCardRenderer, ToolRenderInput } from "./registry.ts";

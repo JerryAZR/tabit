@@ -182,6 +182,32 @@ describe("ToolBlock", () => {
 		assert.ok(!bare.render(80).join("\n").includes("cwd"));
 	});
 
+	test("skill: name on the call line, description collapsed (path without one), body expanded", () => {
+		const details = { name: "review", description: "review a diff", rel_path: "SKILL.md", base_dir: ".agents/skills/review" };
+		const block = new ToolBlock("t1", touch, "skill", JSON.stringify({ name: "review" }));
+		block.setResult("Review the diff carefully.\nLine two of the body.", true, details);
+		const collapsed = block.render(80).join("\n");
+		assert.ok(collapsed.includes("skill review"));
+		assert.ok(collapsed.includes("review a diff")); // the description, not the body
+		assert.ok(!collapsed.includes("Line two of the body"));
+
+		// Reference material: no description on the entry — the path read.
+		const reference = new ToolBlock("t1", touch, "skill", JSON.stringify({ name: "notes", rel_path: "reference.md" }));
+		reference.setResult("Reference material.", true, { name: "notes", rel_path: "reference.md", base_dir: ".agents/skills/notes" });
+		const refCollapsed = reference.render(80).join("\n");
+		assert.ok(refCollapsed.includes(".agents/skills/notes/reference.md"));
+		assert.ok(!refCollapsed.includes("Reference material."));
+
+		// Expanded: the result body is the view.
+		block.setExpanded(true);
+		assert.ok(block.render(80).join("\n").includes("Line two of the body"));
+
+		// A failure renders the error text, not the description shape.
+		const failed = new ToolBlock("t1", touch, "skill", JSON.stringify({ name: "nope" }));
+		failed.setResult("no skill named `nope`", false);
+		assert.ok(failed.render(80).join("\n").includes("no skill named `nope`"));
+	});
+
 	test("bash expanded shows everything without the hint", async () => {
 		const block = new ToolBlock("t1", touch, "bash", JSON.stringify({ command: "ls -la" }));
 		await sleep(3);
