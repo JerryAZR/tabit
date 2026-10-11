@@ -1362,6 +1362,34 @@ impl TryFrom<ResponsesRequestParams> for CompletionRequest {
                 },
             )?
         };
+        // The thinking level, natively: the typed channel builds the
+        // `reasoning` block. `"off"` is this dialect's explicit
+        // `none`; a level outside the documented enum is a loud build
+        // error (PROVIDERS.md).
+        if let Some(level) = req.thinking_level.as_deref() {
+            let effort = match crate::completion::ThinkingLevel::parse(level) {
+                Some(crate::completion::ThinkingLevel::Off) => ReasoningEffort::None,
+                Some(crate::completion::ThinkingLevel::Minimal) => ReasoningEffort::Minimal,
+                Some(crate::completion::ThinkingLevel::Low) => ReasoningEffort::Low,
+                Some(crate::completion::ThinkingLevel::Medium) => ReasoningEffort::Medium,
+                Some(crate::completion::ThinkingLevel::High) => ReasoningEffort::High,
+                Some(crate::completion::ThinkingLevel::Xhigh) => ReasoningEffort::Xhigh,
+                Some(crate::completion::ThinkingLevel::Max) => ReasoningEffort::Max,
+                None => {
+                    return Err(CompletionError::RequestError(
+                        format!(
+                            "unknown thinking level `{level}` for openai-responses \
+                             (supported: off, minimal, low, medium, high, xhigh, max)"
+                        )
+                        .into(),
+                    ));
+                }
+            };
+            additional_parameters.reasoning = Some(Reasoning {
+                effort: Some(effort),
+                ..Reasoning::default()
+            });
+        }
         if additional_parameters.reasoning.is_some() {
             let include = additional_parameters.include.get_or_insert_with(Vec::new);
             if !include

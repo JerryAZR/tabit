@@ -1,3 +1,42 @@
+#[test]
+fn thinking_level_realizes_as_reasoning_effort() {
+    let base = crate::completion::CompletionRequest {
+        model: None,
+        preamble: None,
+        chat_history: OneOrMany::one(crate::completion::Message::from("Hi")),
+        documents: Vec::new(),
+        tools: Vec::new(),
+        temperature: None,
+        max_tokens: None,
+        tool_choice: None,
+        thinking_level: None,
+        additional_params: None,
+    };
+    let build = |level: Option<&str>| {
+        let request = crate::completion::CompletionRequest {
+            thinking_level: level.map(str::to_string),
+            ..base.clone()
+        };
+        CompletionRequest::try_from(("some-model".to_string(), request))
+    };
+
+    let body = |level: Option<&str>| {
+        serde_json::to_value(build(level).expect("converts")).expect("serialize")
+    };
+    assert_eq!(body(Some("high"))["reasoning"]["effort"], "high");
+    assert_eq!(
+        body(Some("off"))["reasoning"]["effort"],
+        "none",
+        "this dialect's off is the explicit none"
+    );
+    assert!(
+        body(None).get("reasoning").is_none(),
+        "no level sends nothing"
+    );
+    let err = build(Some("bogus")).expect_err("bogus is not a level");
+    assert!(err.to_string().contains("bogus"), "{err}");
+}
+
 use super::*;
 use crate::completion::CompletionRequestBuilder;
 use crate::message;
@@ -426,6 +465,7 @@ fn weather_tool_request() -> completion::CompletionRequest {
         temperature: None,
         max_tokens: None,
         tool_choice: None,
+        thinking_level: None,
         additional_params: None,
     }
 }
@@ -593,6 +633,7 @@ fn request_with_preamble(preamble: &str) -> completion::CompletionRequest {
         temperature: None,
         max_tokens: None,
         tool_choice: None,
+        thinking_level: None,
         additional_params: None,
     }
 }
@@ -607,6 +648,7 @@ fn system_only_request(system_text: &str) -> completion::CompletionRequest {
         temperature: None,
         max_tokens: None,
         tool_choice: None,
+        thinking_level: None,
         additional_params: None,
     }
 }
@@ -854,6 +896,7 @@ fn orphan_tool_result_history_fails_request_conversion() {
         temperature: None,
         max_tokens: None,
         tool_choice: None,
+        thinking_level: None,
         additional_params: None,
     };
 
@@ -1111,6 +1154,7 @@ fn responses_direct_request_keeps_mid_conversation_system_messages_in_input() {
         temperature: None,
         max_tokens: None,
         tool_choice: None,
+        thinking_level: None,
         additional_params: None,
     };
 
@@ -2116,6 +2160,7 @@ fn mocked_second_turn_request_omits_unreplayable_reasoning() {
         temperature: None,
         max_tokens: Some(64),
         tool_choice: None,
+        thinking_level: None,
         additional_params: None,
     };
 
@@ -2617,6 +2662,7 @@ fn url_pdf_in_full_completion_request_omits_filename() {
         temperature: None,
         max_tokens: None,
         tool_choice: None,
+        thinking_level: None,
         additional_params: None,
     };
 

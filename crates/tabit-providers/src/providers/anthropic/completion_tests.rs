@@ -3,6 +3,58 @@ use serde_json::json;
 use serde_path_to_error::deserialize;
 
 #[test]
+fn thinking_level_realizes_as_adaptive_thinking_with_effort() {
+    let base = CompletionRequest {
+        model: None,
+        preamble: None,
+        chat_history: OneOrMany::one(message::Message::from("Hi")),
+        documents: Vec::new(),
+        tools: Vec::new(),
+        temperature: None,
+        max_tokens: Some(64),
+        tool_choice: None,
+        thinking_level: None,
+        additional_params: None,
+    };
+    let build = |level: Option<&str>| {
+        let request = CompletionRequest {
+            thinking_level: level.map(str::to_string),
+            ..base.clone()
+        };
+        AnthropicCompletionRequest::try_from(AnthropicRequestParams {
+            model: "claude-sonnet-4-6",
+            request,
+            prompt_caching: false,
+            automatic_caching: false,
+            automatic_caching_ttl: None,
+        })
+    };
+
+    let body =
+        serde_json::to_value(build(Some("high")).expect("high converts")).expect("serialize");
+    assert_eq!(body["thinking"]["type"], "adaptive");
+    assert_eq!(body["output_config"]["effort"], "high");
+
+    let body = serde_json::to_value(build(Some("off")).expect("off converts")).expect("serialize");
+    assert_eq!(body["thinking"]["type"], "disabled");
+    assert!(body.get("output_config").is_none(), "off carries no effort");
+
+    let body = serde_json::to_value(build(None).expect("no level converts")).expect("serialize");
+    assert!(body.get("thinking").is_none(), "no level sends nothing");
+
+    let err = build(Some("minimal")).expect_err("minimal is not an anthropic level");
+    assert!(
+        err.to_string().contains("minimal"),
+        "the error names the level: {err}"
+    );
+    let err = build(Some("bogus")).expect_err("bogus is not a level");
+    assert!(
+        err.to_string().contains("bogus"),
+        "the error names the level: {err}"
+    );
+}
+
+#[test]
 fn missing_max_tokens_defaults_to_64k() {
     let request = CompletionRequest {
         model: None,
@@ -13,6 +65,7 @@ fn missing_max_tokens_defaults_to_64k() {
         temperature: None,
         max_tokens: None,
         tool_choice: None,
+        thinking_level: None,
         additional_params: None,
     };
 
@@ -39,6 +92,7 @@ fn automatic_caching_pins_one_top_level_directive_on_the_wire() {
         temperature: None,
         max_tokens: None,
         tool_choice: None,
+        thinking_level: None,
         additional_params: None,
     };
 
@@ -512,6 +566,7 @@ fn completion_request_with_tools(
         temperature: None,
         max_tokens: Some(64),
         tool_choice: None,
+        thinking_level: None,
         additional_params,
     }
 }
@@ -529,6 +584,7 @@ fn completion_request_with_history(
         temperature: None,
         max_tokens: Some(64),
         tool_choice: None,
+        thinking_level: None,
         additional_params: None,
     }
 }

@@ -1494,6 +1494,9 @@ pub struct CompletionRequest {
     pub temperature: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u64>,
+    /// The thinking level, natively (`reasoning_effort`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
     #[serde(flatten)]
     pub additional_params: Option<serde_json::Value>,
 }
@@ -1553,8 +1556,29 @@ impl TryFrom<OpenAIRequestParams> for CompletionRequest {
             max_tokens,
             additional_params,
             tool_choice,
+            thinking_level,
             ..
         } = req;
+
+        // The thinking level, natively. This dialect's `off` is the
+        // omitted field; a level outside the documented enum is a
+        // loud build error (PROVIDERS.md).
+        let reasoning_effort = match thinking_level.as_deref() {
+            None | Some("off") => None,
+            Some(level) => Some(
+                crate::completion::ThinkingLevel::parse(level)
+                    .map(|parsed| parsed.as_str().to_string())
+                    .ok_or_else(|| {
+                        CompletionError::RequestError(
+                            format!(
+                                "unknown thinking level `{level}` for openai-completions \
+                                 (supported: off, minimal, low, medium, high, xhigh, max)"
+                            )
+                            .into(),
+                        )
+                    })?,
+            ),
+        };
 
         let mut partial_history = Vec::new();
         partial_history.extend(chat_history);
@@ -1674,6 +1698,7 @@ impl TryFrom<OpenAIRequestParams> for CompletionRequest {
             tool_choice,
             temperature,
             max_tokens,
+            reasoning_effort,
             additional_params,
         };
 

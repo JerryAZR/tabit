@@ -2,27 +2,7 @@
 //! thinking levels.
 
 use serde::Deserialize;
-use serde_json::{Map, Value};
 use std::collections::BTreeMap;
-
-/// One step on a model's thinking/reasoning dial. Levels form an ordered
-/// list so a UI can cycle through them; each level is a named merge into the
-/// top level of the completion request body (e.g.
-/// `extra_body = { thinking = { type = "enabled" } }` for DeepSeek-style
-/// servers, `extra_body = { enable_thinking = true }` for DashScope Qwen).
-/// The framework attaches no meaning to the values — it only knows that
-/// levels are ordered and named, which keeps it free of any model catalog.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ThinkingLevel {
-    /// The user-facing level name (e.g. "off", "low", "high"). Must be
-    /// non-empty and unique within a model.
-    pub name: String,
-    /// Fields merged into the top level of the request body when this level
-    /// is active. Later merges win (level over model over provider).
-    #[serde(default)]
-    pub extra_body: Option<Map<String, Value>>,
-}
 
 /// Per-million-token pricing for a model, in USD. All rates are required —
 /// use `0.0` for free or unknown legs rather than omitting them.
@@ -40,7 +20,8 @@ pub struct Cost {
 }
 
 /// Default sampling parameters for a model; per-request settings override
-/// these. Anything beyond these knobs goes through `extra_body`.
+/// these. Anything beyond these knobs does not exist — the engines
+/// implement the standard dialects and nothing else (PROVIDERS.md).
 #[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SamplingParams {
@@ -93,14 +74,14 @@ pub struct Model {
     /// Default sampling parameters.
     #[serde(default)]
     pub sampling_params: Option<SamplingParams>,
-    /// Ordered thinking/reasoning levels for UI cycling.
+    /// Ordered thinking/reasoning levels for UI cycling — plain names of
+    /// the levels the model supports (e.g. `["off", "low", "high"]`).
+    /// The engine realizes a level natively in the provider's dialect
+    /// (PROVIDERS.md); `"off"` is the explicit no-thinking request where
+    /// the dialect has one. An absent list means the provider default —
+    /// no thinking field is sent at all.
     #[serde(default)]
-    pub thinking_levels: Vec<ThinkingLevel>,
-    /// Fields merged into the top level of the request body for this model
-    /// (overrides the provider's `extra_body`, is overridden by the active
-    /// thinking level's).
-    #[serde(default)]
-    pub extra_body: Option<Map<String, Value>>,
+    pub thinking_levels: Vec<String>,
     /// Extra headers for requests to this model (merged over the
     /// provider's headers).
     #[serde(default)]
@@ -122,36 +103,8 @@ impl Model {
         self.input.contains(&modality)
     }
 
-    /// Look up a thinking level by name.
-    pub fn thinking_level(&self, name: &str) -> Option<&ThinkingLevel> {
-        self.thinking_levels.iter().find(|level| level.name == name)
-    }
-
-    /// The `extra_body` map for a request to this model: the provider's map
-    /// merged with the model's, overlaid with the active thinking level's
-    /// (later sources win; the merge is a shallow top-level key overwrite,
-    /// not a recursive merge). Returns `None` when no source contributes
-    /// any fields.
-    pub fn merged_extra_body(
-        &self,
-        provider_extra_body: Option<&Map<String, Value>>,
-        level: Option<&ThinkingLevel>,
-    ) -> Option<Map<String, Value>> {
-        let mut merged: Option<Map<String, Value>> = None;
-        for source in [
-            provider_extra_body,
-            self.extra_body.as_ref(),
-            level.and_then(|level| level.extra_body.as_ref()),
-        ]
-        .into_iter()
-        .flatten()
-        {
-            merged.get_or_insert_with(Map::new).extend(
-                source
-                    .iter()
-                    .map(|(key, value)| (key.clone(), value.clone())),
-            );
-        }
-        merged
+    /// Whether the model lists `name` as a supported thinking level.
+    pub fn has_thinking_level(&self, name: &str) -> bool {
+        self.thinking_levels.iter().any(|level| level == name)
     }
 }

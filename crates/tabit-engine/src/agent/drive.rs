@@ -434,6 +434,7 @@ where
                 &runner.static_context,
                 runner.temperature,
                 runner.max_tokens,
+                runner.thinking_level.as_deref(),
                 runner.additional_params.as_ref(),
                 runner.tool_choice.as_ref(),
                 &runner.tool_server_handle,

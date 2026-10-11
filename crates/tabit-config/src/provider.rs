@@ -5,7 +5,6 @@ use crate::auth::AuthConfig;
 use crate::model::Model;
 use crate::wire::WireApi;
 use serde::Deserialize;
-use serde_json::{Map, Value};
 use std::collections::BTreeMap;
 
 /// A provider entry: everything needed to construct a wire client for it.
@@ -40,12 +39,20 @@ pub struct Provider {
     /// Extra headers sent with every request to this provider.
     #[serde(default)]
     pub headers: Option<BTreeMap<String, String>>,
-    /// Fields merged into the top level of every request body to this
-    /// provider (overridden by model- and thinking-level `extra_body`).
-    /// This is tabit's compat escape hatch: provider quirks are expressed
-    /// as plain request fields, never as named compat flags.
+    /// Provider-level defaults for every model entry: any `Model`
+    /// field, inherited field-by-field (a model's own fields win).
+    /// Merged into each model at load time (the value-level
+    /// normalization in `TabitConfig::from_toml_str`, which validates
+    /// the table against the `Model` shape) — the field is carried
+    /// for provenance but read by nothing after the merge.
     #[serde(default)]
-    pub extra_body: Option<Map<String, Value>>,
+    pub model_defaults: Option<toml::Table>,
+    /// Engine quirk values for this provider (PROVIDERS.md's seam):
+    /// a raw table, parsed into the engine's typed `Quirks` struct at
+    /// client construction — an unknown key is a loud config error
+    /// there. The initial vocabulary is empty, so any key errors.
+    #[serde(default)]
+    pub quirks: Option<toml::Table>,
     /// The models this provider offers.
     #[serde(default)]
     pub models: Vec<Model>,

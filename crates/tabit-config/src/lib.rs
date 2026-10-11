@@ -102,7 +102,7 @@ mod wire;
 
 pub use auth::{AuthConfig, AuthEntry, default_path as auth_default_path};
 pub use error::ConfigError;
-pub use model::{Cost, InputModality, Model, SamplingParams, ThinkingLevel};
+pub use model::{Cost, InputModality, Model, SamplingParams};
 pub use provider::Provider;
 pub use settings::{ExtensionsSettings, SettingsConfig};
 pub use wire::WireApi;
@@ -181,11 +181,30 @@ pub struct TabitConfig {
 impl TabitConfig {
     /// Parse and validate a config from a TOML string, attributing any
     /// error to `path`.
+    ///
+    /// Before deserializing, each provider's `model_defaults` table is
+    /// merged into its model entries at the VALUE level (a model's own
+    /// keys win; absent keys inherit) — the only level where "unset"
+    /// is distinguishable from an explicit value (`reasoning = false`
+    /// vs absent). The defaults table itself is validated against the
+    /// `Model` shape, so a typo there errors as loudly as one in a
+    /// model entry.
     pub fn from_toml_str(raw: &str, path: &Path) -> Result<Self, ConfigError> {
-        let config: Self = toml::from_str(raw).map_err(|source| ConfigError::Parse {
+        let mut value: toml::Value = toml::from_str(raw).map_err(|source| ConfigError::Parse {
             path: path.to_path_buf(),
             source,
         })?;
+        apply_model_defaults(&mut value).map_err(|issue| ConfigError::Validation {
+            path: path.to_path_buf(),
+            issues: vec![issue],
+        })?;
+        let config: Self =
+            value
+                .try_into()
+                .map_err(|source: toml::de::Error| ConfigError::Parse {
+                    path: path.to_path_buf(),
+                    source,
+                })?;
         let issues = config.validation_issues();
         if issues.is_empty() {
             Ok(config)
@@ -282,6 +301,31 @@ impl TabitConfig {
         contributed
     }
 
+    /// Merge the downloaded catalog (`providers.auto.toml`,
+    /// PROVIDERS.md) under this config. Like fragment merge, an
+    /// unknown provider id inserts whole; unlike fragments, a provider
+    /// the config already has merges at MODEL granularity — the
+    /// catalog's models fill in under the configured provider, and a
+    /// model id the config already declares wins whole (provider-level
+    /// fields of an existing provider are never touched). The catalog
+    /// is one generated source, so no collision warnings exist here.
+    pub fn merge_catalog(&mut self, catalog: TabitConfig) {
+        for (id, catalog_provider) in catalog.providers {
+            match self.providers.get_mut(&id) {
+                None => {
+                    self.providers.insert(id, catalog_provider);
+                }
+                Some(existing) => {
+                    for model in catalog_provider.models {
+                        if existing.model(&model.id).is_none() {
+                            existing.models.push(model);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     /// Look up a provider by its config id.
     pub fn provider(&self, id: &str) -> Option<&Provider> {
         self.providers.get(id)
@@ -371,6 +415,60 @@ impl TabitConfig {
     }
 }
 
+/// Merge every provider's `model_defaults` table into its model
+/// entries (the `from_toml_str` normalization — see its docs). A
+/// model's own keys win; the defaults table is validated against the
+/// `Model` shape with a placeholder id. Returns the one issue on
+/// failure (the walk stops at the first malformed spot — config
+/// errors are fixed one at a time anyway).
+fn apply_model_defaults(value: &mut toml::Value) -> Result<(), String> {
+    let Some(providers) = value
+        .get_mut("providers")
+        .and_then(toml::Value::as_table_mut)
+    else {
+        return Ok(());
+    };
+    for (provider_id, provider) in providers.iter_mut() {
+        let Some(provider_table) = provider.as_table_mut() else {
+            continue; // a non-table provider errors at deserialize
+        };
+        let Some(defaults) = provider_table.get("model_defaults") else {
+            continue;
+        };
+        let Some(defaults) = defaults.as_table() else {
+            return Err(format!(
+                "providers.{provider_id}.model_defaults: must be a table"
+            ));
+        };
+        // Validate the defaults against the Model shape: a typo here
+        // must error as loudly as one in a model entry. The
+        // placeholder id satisfies Model's one required field.
+        let mut probe = toml::map::Map::new();
+        probe.insert("id".to_string(), toml::Value::String("\0".to_string()));
+        probe.extend(defaults.clone());
+        if let Err(source) = crate::model::Model::deserialize(toml::Value::Table(probe)) {
+            return Err(format!(
+                "providers.{provider_id}.model_defaults: not a valid model-defaults table: {source}"
+            ));
+        }
+        let defaults = defaults.clone();
+        if let Some(models) = provider_table
+            .get_mut("models")
+            .and_then(toml::Value::as_array_mut)
+        {
+            for model in models.iter_mut() {
+                let Some(model_table) = model.as_table_mut() else {
+                    continue; // a non-table model errors at deserialize
+                };
+                let mut merged = defaults.clone();
+                merged.extend(model_table.clone());
+                *model_table = merged;
+            }
+        }
+    }
+    Ok(())
+}
+
 fn validate_provider(provider_id: &str, provider: &Provider, issues: &mut Vec<String>) {
     let provider_key = format!("providers.{provider_id}");
 
@@ -405,15 +503,14 @@ fn validate_provider(provider_id: &str, provider: &Provider, issues: &mut Vec<St
 
         let mut seen_level_names = std::collections::BTreeSet::new();
         for level in &model.thinking_levels {
-            if level.name.is_empty() {
+            if level.is_empty() {
                 issues.push(format!(
                     "{model_key}: thinking level name must not be empty"
                 ));
             }
-            if !seen_level_names.insert(level.name.clone()) {
+            if !seen_level_names.insert(level.clone()) {
                 issues.push(format!(
-                    "{model_key}: duplicate thinking level name `{}`",
-                    level.name
+                    "{model_key}: duplicate thinking level name `{level}`",
                 ));
             }
         }

@@ -269,12 +269,7 @@ keyless = true
 [[providers.local.models]]
 id = "m"
 context_window = 128000
-
-[[providers.local.models.thinking_levels]]
-name = "off"
-
-[[providers.local.models.thinking_levels]]
-name = "high"
+thinking_levels = ["off", "high"]
 
 [providers.locked]
 base_url = "https://locked.example/v1"

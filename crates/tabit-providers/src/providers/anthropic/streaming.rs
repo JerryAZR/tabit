@@ -1086,6 +1086,7 @@ mod tests {
             temperature: None,
             max_tokens: Some(64),
             tool_choice: None,
+            thinking_level: None,
             additional_params: None,
         };
 
@@ -1133,6 +1134,7 @@ mod tests {
             temperature: Some(0.5),
             max_tokens: Some(64),
             tool_choice: None,
+            thinking_level: None,
             additional_params: None,
         };
 
@@ -1187,6 +1189,7 @@ mod tests {
             temperature: None,
             max_tokens: Some(64),
             tool_choice: None,
+            thinking_level: None,
             additional_params: None,
         };
 
@@ -1222,6 +1225,7 @@ mod tests {
             temperature: None,
             max_tokens: Some(64),
             tool_choice: Some(crate::message::ToolChoice::Auto),
+            thinking_level: None,
             additional_params: None,
         };
 

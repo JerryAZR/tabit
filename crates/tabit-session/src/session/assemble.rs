@@ -178,19 +178,17 @@ pub(crate) fn build_agent(
     if let Some(temperature) = params.temperature {
         builder = builder.temperature(temperature);
     }
+    if let Some(level) = params.thinking_level {
+        builder = builder.thinking_level(level);
+    }
     // `top_p`/`top_k` have no dedicated field on the completion
-    // request — they ride the same flattened `additional_params` map
-    // as `extra_body`, which is the compat escape hatch and therefore
-    // gets the last word over the named knobs.
+    // request — they ride the flattened `additional_params` map.
     let mut additional = serde_json::Map::new();
     if let Some(top_p) = params.top_p {
         additional.insert("top_p".to_string(), serde_json::json!(top_p));
     }
     if let Some(top_k) = params.top_k {
         additional.insert("top_k".to_string(), serde_json::json!(top_k));
-    }
-    if let Some(extra) = params.extra_body {
-        additional.extend(extra);
     }
     if !additional.is_empty() {
         builder = builder.additional_params(serde_json::Value::Object(additional));

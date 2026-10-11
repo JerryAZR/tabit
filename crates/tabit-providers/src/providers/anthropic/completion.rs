@@ -1789,7 +1789,26 @@ enum OutputFormat {
 /// Configuration for the model's output format.
 #[derive(Debug, Deserialize, Serialize)]
 struct OutputConfig {
-    format: OutputFormat,
+    /// Structured-output format. The runtime has no structured-output
+    /// feature; the field is modeled so the wire shape is complete.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    format: Option<OutputFormat>,
+    /// The thinking effort, natively (adaptive thinking).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    effort: Option<String>,
+}
+
+/// Anthropic's thinking control: adaptive thinking (with the effort in
+/// `output_config`) or the explicit disabled marker for `"off"`.
+/// (Owned fields: `AnthropicCompletionRequest` derives `Deserialize`.)
+#[derive(Debug, Deserialize, Serialize)]
+pub(super) struct Thinking {
+    #[serde(rename = "type")]
+    kind: String,
+    /// The reasoning-summary display; "summarized" matches the API's
+    /// own default for older Claude models.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    display: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -1808,6 +1827,8 @@ pub(super) struct AnthropicCompletionRequest {
     tools: Vec<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     output_config: Option<OutputConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thinking: Option<Thinking>,
     #[serde(flatten, skip_serializing_if = "Option::is_none")]
     additional_params: Option<serde_json::Value>,
     /// Top-level cache_control for Anthropic's automatic caching mode. When set, the API
@@ -2281,6 +2302,52 @@ impl TryFrom<AnthropicRequestParams<'_>> for AnthropicCompletionRequest {
             top_level_cache_control.as_ref(),
         )?;
 
+        // The thinking level, natively (PROVIDERS.md): `"off"` is the
+        // explicit disabled marker, any other level is adaptive
+        // thinking with the effort in `output_config`; a level outside
+        // the dialect's enum is a loud build error.
+        let (thinking, output_config) = match req
+            .thinking_level
+            .as_deref()
+            .map(crate::completion::ThinkingLevel::parse)
+        {
+            None => (None, None),
+            Some(None) => {
+                return Err(CompletionError::RequestError(
+                    format!(
+                        "unknown thinking level `{}` for anthropic-messages \
+                         (supported: off, low, medium, high, xhigh, max)",
+                        req.thinking_level.as_deref().unwrap_or_default()
+                    )
+                    .into(),
+                ));
+            }
+            Some(Some(crate::completion::ThinkingLevel::Off)) => (
+                Some(Thinking {
+                    kind: "disabled".to_string(),
+                    display: None,
+                }),
+                None,
+            ),
+            Some(Some(crate::completion::ThinkingLevel::Minimal)) => {
+                return Err(CompletionError::RequestError(
+                    "thinking level `minimal` is not in the anthropic-messages enum \
+                     (supported: off, low, medium, high, xhigh, max)"
+                        .into(),
+                ));
+            }
+            Some(Some(level)) => (
+                Some(Thinking {
+                    kind: "adaptive".to_string(),
+                    display: Some("summarized".to_string()),
+                }),
+                Some(OutputConfig {
+                    format: None,
+                    effort: Some(level.as_str().to_string()),
+                }),
+            ),
+        };
+
         Ok(Self {
             model: model.to_string(),
             messages,
@@ -2289,11 +2356,8 @@ impl TryFrom<AnthropicRequestParams<'_>> for AnthropicCompletionRequest {
             temperature: req.temperature,
             tool_choice: req.tool_choice.map(ToolChoice::try_from).transpose()?,
             tools,
-            // Anthropic's structured-output wire field. The runtime has no
-            // structured-output feature; a user who
-            // wants it sets `output_config` through `extra_body`, which
-            // merges straight into the JSON body.
-            output_config: None,
+            output_config,
+            thinking,
             // Automatic caching: one top-level field; the API moves the breakpoint automatically.
             cache_control: top_level_cache_control,
             additional_params: if additional_params_payload.is_null() {

@@ -104,6 +104,7 @@ pub(crate) async fn build_prepared_completion_request(
     static_context: &[Document],
     temperature: Option<f64>,
     max_tokens: Option<u64>,
+    thinking_level: Option<&str>,
     additional_params: Option<&serde_json::Value>,
     tool_choice: Option<&ToolChoice>,
     tool_server_handle: &ToolServerHandle,
@@ -140,6 +141,7 @@ pub(crate) async fn build_prepared_completion_request(
         .messages(chat_history)
         .temperature_opt(temperature)
         .max_tokens_opt(max_tokens)
+        .thinking_level_opt(thinking_level.map(str::to_string))
         .additional_params_opt(additional_params.cloned())
         .documents(static_context.to_vec())
         .tools(tooldefs);
@@ -213,6 +215,9 @@ pub struct Agent {
     pub(crate) temperature: Option<f64>,
     /// Maximum number of tokens for the completion
     pub(crate) max_tokens: Option<u64>,
+    /// The thinking/reasoning level forwarded to every completion
+    /// request.
+    pub(crate) thinking_level: Option<String>,
     /// Additional parameters to be passed to the model
     pub(crate) additional_params: Option<serde_json::Value>,
     pub(crate) tool_server_handle: ToolServerHandle,
@@ -329,6 +334,7 @@ impl Agent {
             &self.static_context,
             self.temperature,
             max_tokens.or(self.max_tokens),
+            self.thinking_level.as_deref(),
             self.additional_params.as_ref(),
             self.tool_choice.as_ref(),
             &self.tool_server_handle,

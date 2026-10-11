@@ -106,6 +106,9 @@ pub struct AgentBuilder<ToolState = NoToolConfig> {
     additional_params: Option<serde_json::Value>,
     /// Maximum number of tokens for the completion
     max_tokens: Option<u64>,
+    /// The thinking/reasoning level (see
+    /// [`CompletionRequest::thinking_level`](tabit_providers::completion::CompletionRequest::thinking_level)).
+    thinking_level: Option<String>,
     /// Temperature of the model
     temperature: Option<f64>,
     /// Whether or not the underlying LLM should be forced to use a tool before providing a response.
@@ -184,6 +187,12 @@ impl<ToolState> AgentBuilder<ToolState> {
         self
     }
 
+    /// Set the thinking/reasoning level for completions
+    pub fn thinking_level(mut self, level: impl Into<String>) -> Self {
+        self.thinking_level = Some(level.into());
+        self
+    }
+
     /// Set additional parameters to be passed to the model
     pub fn additional_params(mut self, params: serde_json::Value) -> Self {
         self.additional_params = Some(params);
@@ -229,6 +238,7 @@ impl AgentBuilder<NoToolConfig> {
             static_context: vec![],
             temperature: None,
             max_tokens: None,
+            thinking_level: None,
             additional_params: None,
             tool_choice: None,
             default_max_turns: None,
@@ -256,6 +266,7 @@ impl AgentBuilder<NoToolConfig> {
             static_context: self.static_context,
             additional_params: self.additional_params,
             max_tokens: self.max_tokens,
+            thinking_level: self.thinking_level.clone(),
             temperature: self.temperature,
             tool_choice: self.tool_choice,
             default_max_turns: self.default_max_turns,
@@ -282,6 +293,7 @@ impl AgentBuilder<NoToolConfig> {
             static_context: self.static_context,
             additional_params: self.additional_params,
             max_tokens: self.max_tokens,
+            thinking_level: self.thinking_level.clone(),
             temperature: self.temperature,
             tool_choice: self.tool_choice,
             default_max_turns: self.default_max_turns,
@@ -318,6 +330,7 @@ impl AgentBuilder<NoToolConfig> {
             static_context: self.static_context,
             additional_params: self.additional_params,
             max_tokens: self.max_tokens,
+            thinking_level: self.thinking_level.clone(),
             temperature: self.temperature,
             tool_choice: self.tool_choice,
             default_max_turns: self.default_max_turns,
@@ -405,6 +418,7 @@ impl AgentBuilder<NoToolConfig> {
             static_context: self.static_context,
             additional_params: self.additional_params,
             max_tokens: self.max_tokens,
+            thinking_level: self.thinking_level.clone(),
             temperature: self.temperature,
             tool_choice: self.tool_choice,
             default_max_turns: self.default_max_turns,
@@ -435,6 +449,7 @@ impl AgentBuilder<NoToolConfig> {
             static_context: self.static_context,
             temperature: self.temperature,
             max_tokens: self.max_tokens,
+            thinking_level: self.thinking_level.clone(),
             additional_params: self.additional_params,
             tool_choice: self.tool_choice,
             tool_server_handle,
@@ -455,6 +470,7 @@ impl AgentBuilder<WithToolServerHandle> {
             static_context: self.static_context,
             temperature: self.temperature,
             max_tokens: self.max_tokens,
+            thinking_level: self.thinking_level.clone(),
             additional_params: self.additional_params,
             tool_choice: self.tool_choice,
             tool_server_handle: self.tool_state.handle,
@@ -548,6 +564,7 @@ impl AgentBuilder<WithBuilderTools> {
             static_context: self.static_context,
             temperature: self.temperature,
             max_tokens: self.max_tokens,
+            thinking_level: self.thinking_level.clone(),
             additional_params: self.additional_params,
             tool_choice: self.tool_choice,
             tool_server_handle,

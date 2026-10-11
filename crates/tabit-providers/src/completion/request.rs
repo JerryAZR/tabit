@@ -661,6 +661,61 @@ impl<M: CompletionModel + ?Sized> CompletionModel for std::sync::Arc<M> {
     }
 }
 
+/// The canonical thinking/reasoning levels a config's
+/// `thinking_levels` may name (PROVIDERS.md). Level names are plain
+/// strings in config; the engines parse into this vocabulary at
+/// request build and realize the level in their dialect — a level the
+/// dialect does not document is a loud request-build error, never a
+/// silent drop. `Off` is the explicit no-thinking request (a dialect
+/// without one omits the field); an absent level is the provider
+/// default and sends nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThinkingLevel {
+    /// Explicitly no thinking.
+    Off,
+    /// Minimal effort.
+    Minimal,
+    /// Low effort.
+    Low,
+    /// Medium effort.
+    Medium,
+    /// High effort.
+    High,
+    /// Extra-high effort.
+    Xhigh,
+    /// Maximum effort.
+    Max,
+}
+
+impl ThinkingLevel {
+    /// Parse a level name (the config/wire spelling, lowercase).
+    pub fn parse(level: &str) -> Option<Self> {
+        Some(match level {
+            "off" => Self::Off,
+            "minimal" => Self::Minimal,
+            "low" => Self::Low,
+            "medium" => Self::Medium,
+            "high" => Self::High,
+            "xhigh" => Self::Xhigh,
+            "max" => Self::Max,
+            _ => return None,
+        })
+    }
+
+    /// The level's canonical spelling.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Minimal => "minimal",
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::Xhigh => "xhigh",
+            Self::Max => "max",
+        }
+    }
+}
+
 /// Struct representing a general completion request that can be sent to a completion model provider.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompletionRequest {
@@ -684,6 +739,14 @@ pub struct CompletionRequest {
     pub max_tokens: Option<u64>,
     /// Whether tools are required to be used by the model provider or not before providing a response.
     pub tool_choice: Option<ToolChoice>,
+    /// The thinking/reasoning level for this request — a plain level
+    /// name (PROVIDERS.md). The engine realizes it in its dialect
+    /// (`reasoning_effort`, `reasoning.effort`, or anthropic's
+    /// thinking/output_config pair); `"off"` is the explicit
+    /// no-thinking request where the dialect has one; a level outside
+    /// the dialect's documented enum is a loud request-build error.
+    #[serde(default)]
+    pub thinking_level: Option<String>,
     /// Additional provider-specific parameters to be sent to the completion model provider
     pub additional_params: Option<serde_json::Value>,
 }
@@ -842,6 +905,7 @@ pub struct CompletionRequestBuilder<M: CompletionModel> {
     temperature: Option<f64>,
     max_tokens: Option<u64>,
     tool_choice: Option<ToolChoice>,
+    thinking_level: Option<String>,
     additional_params: Option<serde_json::Value>,
 }
 
@@ -859,6 +923,7 @@ impl<M: CompletionModel> CompletionRequestBuilder<M> {
             temperature: None,
             max_tokens: None,
             tool_choice: None,
+            thinking_level: None,
             additional_params: None,
         }
     }
@@ -994,6 +1059,13 @@ impl<M: CompletionModel> CompletionRequestBuilder<M> {
     }
 
     /// Sets the thing.
+    /// Sets the thinking/reasoning level for this request (see
+    /// [`CompletionRequest::thinking_level`]).
+    pub fn thinking_level_opt(mut self, level: Option<String>) -> Self {
+        self.thinking_level = level;
+        self
+    }
+
     pub fn tool_choice(mut self, tool_choice: ToolChoice) -> Self {
         self.tool_choice = Some(tool_choice);
         self
@@ -1036,6 +1108,7 @@ impl<M: CompletionModel> CompletionRequestBuilder<M> {
             temperature: self.temperature,
             max_tokens: self.max_tokens,
             tool_choice: self.tool_choice,
+            thinking_level: self.thinking_level,
             additional_params,
         };
         (model, request)
@@ -1290,6 +1363,7 @@ mod tests {
             temperature: None,
             max_tokens: None,
             tool_choice: None,
+            thinking_level: None,
             additional_params: None,
         };
 
@@ -1321,6 +1395,7 @@ mod tests {
             temperature: None,
             max_tokens: None,
             tool_choice: None,
+            thinking_level: None,
             additional_params: None,
         };
 
@@ -1445,6 +1520,7 @@ mod tests {
             temperature: None,
             max_tokens: None,
             tool_choice: None,
+            thinking_level: None,
             additional_params: None,
         };
 
@@ -1477,6 +1553,7 @@ mod tests {
             temperature: None,
             max_tokens: None,
             tool_choice: None,
+            thinking_level: None,
             additional_params: None,
         };
 
@@ -1513,6 +1590,7 @@ mod tests {
             temperature: None,
             max_tokens: None,
             tool_choice: None,
+            thinking_level: None,
             additional_params: None,
         };
 
@@ -1696,6 +1774,7 @@ mod tests {
             temperature: None,
             max_tokens: None,
             tool_choice: None,
+            thinking_level: None,
             additional_params: None,
         }
     }

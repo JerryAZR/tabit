@@ -10,12 +10,7 @@ api = "openai-completions"
 
 [[providers.local.models]]
 id = "m"
-
-[[providers.local.models.thinking_levels]]
-name = "off"
-
-[[providers.local.models.thinking_levels]]
-name = "high"
+thinking_levels = ["off", "high"]
 
 [[providers.local.models]]
 id = "m2"
@@ -343,17 +338,12 @@ const PARAMS_CONFIG: &str = r#"
 [providers.local]
 base_url = "http://127.0.0.1:1234/v1"
 api = "openai-completions"
-extra_body = { shared = "provider", only_provider = true }
 
 [[providers.local.models]]
 id = "m"
 max_tokens = 512
 sampling_params = { temperature = 0.7, top_p = 0.9, top_k = 40 }
-extra_body = { shared = "model", model_only = true }
-
-[[providers.local.models.thinking_levels]]
-name = "high"
-extra_body = { shared = "level", only_level = 1 }
+thinking_levels = ["off", "high"]
 "#;
 
 #[test]
@@ -371,21 +361,18 @@ api_key = "dummy"
     assert_eq!(params.temperature, Some(0.7));
     assert_eq!(params.top_p, Some(0.9));
     assert_eq!(params.top_k, Some(40));
-    // No active level: the model's extra_body overlays the provider's.
-    let extra = params.extra_body.expect("merged extra_body");
-    assert_eq!(extra.get("shared"), Some(&serde_json::json!("model")));
-    assert_eq!(extra.get("model_only"), Some(&serde_json::json!(true)));
-    assert_eq!(extra.get("only_provider"), Some(&serde_json::json!(true)));
+    assert_eq!(
+        params.thinking_level, None,
+        "no level selected: nothing sent"
+    );
 
-    // The active level overlays both, keeping their unique keys.
+    // The active level forwards verbatim; the engine realizes it.
     let selection = ModelSelection {
         thinking_level: Some("high".to_string()),
         ..selection
     };
     let params = request_params(registry.config(), &selection);
-    let extra = params.extra_body.expect("merged extra_body");
-    assert_eq!(extra.get("shared"), Some(&serde_json::json!("level")));
-    assert_eq!(extra.get("only_level"), Some(&serde_json::json!(1)));
+    assert_eq!(params.thinking_level.as_deref(), Some("high"));
 
     // Unknown ids contribute nothing; the model factory is the loud check.
     let params = request_params(registry.config(), &ModelSelection::new("nope", "m"));
@@ -483,14 +470,7 @@ input = ["text", "image"]
 context_window = 200000
 max_tokens = 16000
 cost = { input = 1.0, output = 4.0, cache_read = 0.1, cache_write = 0.4 }
-
-[[providers.beta.models.thinking_levels]]
-name = "low"
-extra_body = { thinking = { effort = "low" } }
-
-[[providers.beta.models.thinking_levels]]
-name = "high"
-extra_body = { thinking = { effort = "high" } }
+thinking_levels = ["low", "high"]
 
 [[providers.beta.models]]
 id = "b2"

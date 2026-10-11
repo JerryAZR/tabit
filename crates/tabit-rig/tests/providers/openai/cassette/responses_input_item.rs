@@ -131,6 +131,7 @@ fn assistant_reasoning_mixed_content_serializes_text_content_and_summaries() {
 #[test]
 fn openai_responses_request_auto_adds_reasoning_encrypted_include() {
     let core_request = tabit_rig::completion::CompletionRequest {
+        thinking_level: None,
         preamble: None,
         chat_history: OneOrMany::one(CompletionMessage::user("hello")),
         documents: vec![],
@@ -303,6 +304,7 @@ fn assistant_reasoning_redacted_only_serializes_as_encrypted_content() {
 fn openai_responses_request_reasoning_without_id_is_omitted_without_panicking() {
     let panic_result = catch_unwind(AssertUnwindSafe(|| {
         let request = tabit_rig::completion::CompletionRequest {
+            thinking_level: None,
             preamble: None,
             chat_history: OneOrMany::one(CompletionMessage::Assistant {
                 id: Some("assistant_message_id".to_string()),
@@ -445,6 +447,7 @@ fn user_tool_result_without_call_id_returns_request_error() {
 fn openai_responses_invalid_additional_params_returns_error_without_panicking() {
     let panic_result = catch_unwind(AssertUnwindSafe(|| {
         let request = tabit_rig::completion::CompletionRequest {
+            thinking_level: None,
             preamble: None,
             chat_history: OneOrMany::one(CompletionMessage::user("hello")),
             documents: vec![],
@@ -471,6 +474,7 @@ fn openai_responses_invalid_additional_params_returns_error_without_panicking() 
 #[test]
 fn openai_responses_request_preserves_prompt_cache_parameters() {
     let request = tabit_rig::completion::CompletionRequest {
+        thinking_level: None,
         preamble: None,
         chat_history: OneOrMany::one(CompletionMessage::user("hello")),
         documents: vec![],

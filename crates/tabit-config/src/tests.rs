@@ -1,5 +1,4 @@
 use crate::{AuthConfig, ConfigError, InputModality, Provider, TabitConfig, WireApi};
-use serde_json::json;
 use std::collections::BTreeMap;
 use std::path::Path;
 
@@ -24,12 +23,7 @@ api_key_env = "ANTHROPIC_API_KEY"
 [[providers.anthropic.models]]
 id = "claude-some-model"
 cost = { input = 3.0, output = 15.0, cache_read = 0.3, cache_write = 3.75 }
-
-[[providers.anthropic.models.thinking_levels]]
-name = "off"
-
-[[providers.anthropic.models.thinking_levels]]
-name = "high"
+thinking_levels = ["off", "high"]
 "#;
 
 const VALID_AUTH: &str = r#"
@@ -88,7 +82,7 @@ fn parses_a_full_config() {
         model
             .thinking_levels
             .iter()
-            .map(|l| l.name.as_str())
+            .map(String::as_str)
             .collect::<Vec<_>>(),
         ["off", "high"],
     );
@@ -183,12 +177,7 @@ api = "openai-responses"
 
 [[providers.x.models]]
 id = "m"
-
-[[providers.x.models.thinking_levels]]
-name = "high"
-
-[[providers.x.models.thinking_levels]]
-name = "high"
+thinking_levels = ["high", "high"]
 "#;
     let err = validation_error(raw);
     assert!(
@@ -581,56 +570,69 @@ fn auth_load_default_missing_file_is_empty_not_an_error() {
 }
 
 #[test]
-fn merged_extra_body_overlays_in_order() {
+fn model_defaults_inherit_field_by_field() {
     let raw = r#"
 [providers.p]
 base_url = "https://example.com"
 api = "openai-completions"
-extra_body = { a = 1, shared = "provider", only_provider = true }
+model_defaults = { reasoning = true, context_window = 1_000_000, thinking_levels = ["off", "high"] }
 
 [[providers.p.models]]
-id = "m"
-extra_body = { b = 2, shared = "model" }
+id = "m1"
 
-[[providers.p.models.thinking_levels]]
-name = "high"
-extra_body = { c = 3, shared = "level" }
+[[providers.p.models]]
+id = "m2"
+reasoning = false
+max_tokens = 4096
 "#;
     let config = parse(raw);
     let provider = config.provider("p").expect("provider exists");
-    let model = provider.model("m").expect("model exists");
-    let level = model.thinking_level("high").expect("level exists");
 
-    let merged = model
-        .merged_extra_body(provider.extra_body.as_ref(), Some(level))
-        .expect("merge produces a map");
-    assert_eq!(merged.get("a"), Some(&json!(1)));
-    assert_eq!(merged.get("b"), Some(&json!(2)));
-    assert_eq!(merged.get("c"), Some(&json!(3)));
-    assert_eq!(merged.get("only_provider"), Some(&json!(true)));
-    assert_eq!(merged.get("shared"), Some(&json!("level")));
+    let m1 = provider.model("m1").expect("m1 exists");
+    assert!(m1.reasoning, "defaults inherit when the model is silent");
+    assert_eq!(m1.context_window, Some(1_000_000));
+    assert_eq!(m1.thinking_levels, ["off", "high"]);
 
-    // Without an active level the model overlay wins.
-    let merged_no_level = model
-        .merged_extra_body(provider.extra_body.as_ref(), None)
-        .expect("merge produces a map");
-    assert_eq!(merged_no_level.get("shared"), Some(&json!("model")));
+    let m2 = provider.model("m2").expect("m2 exists");
+    // The model's own keys win — including an explicit `false`, which
+    // only the value-level merge can distinguish from an absent key.
+    assert!(!m2.reasoning, "an explicit false overrides the default");
+    assert_eq!(m2.context_window, Some(1_000_000), "unset still inherits");
+    assert_eq!(m2.max_tokens, Some(4096));
+    assert_eq!(m2.thinking_levels, ["off", "high"]);
 }
 
 #[test]
-fn merged_extra_body_is_none_when_no_source_contributes() {
+fn model_defaults_validate_against_the_model_shape() {
     let raw = r#"
 [providers.p]
 base_url = "https://example.com"
 api = "openai-completions"
+model_defaults = { cotnext_window = 1_000_000 }
 
 [[providers.p.models]]
 id = "m"
 "#;
-    let config = parse(raw);
-    let provider = config.provider("p").expect("provider exists");
-    let model = provider.model("m").expect("model exists");
-    assert!(model.merged_extra_body(None, None).is_none());
+    let err = validation_error(raw);
+    assert!(
+        err.to_string().contains("model_defaults"),
+        "a typo in model_defaults is as loud as one in a model: {err}"
+    );
+}
+
+#[test]
+fn model_defaults_must_be_a_table() {
+    let raw = r#"
+[providers.p]
+base_url = "https://example.com"
+api = "openai-completions"
+model_defaults = "nope"
+"#;
+    let err = validation_error(raw);
+    assert!(
+        err.to_string().contains("model_defaults: must be a table"),
+        "{err}"
+    );
 }
 
 #[test]
@@ -713,9 +715,7 @@ api = "openai-responses"
 
 [[providers.x.models]]
 id = ""
-
-[[providers.x.models.thinking_levels]]
-name = ""
+thinking_levels = [""]
 "#;
     let err = validation_error(raw);
     let msg = err.to_string();
@@ -792,9 +792,7 @@ api = "openai-responses"
 
 [[providers.x.models]]
 id = "m"
-
-[[providers.x.models.thinking_levels]]
-name = "high"
+thinking_levels = ["high"]
 "#,
     ] {
         let config = TabitConfig::from_toml_str(stale, Path::new("providers.toml"))

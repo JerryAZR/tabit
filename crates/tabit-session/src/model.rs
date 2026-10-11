@@ -38,18 +38,13 @@ pub fn validate_selection(
             ),
         })?;
     if let Some(level) = &selection.thinking_level
-        && model.thinking_level(level).is_none()
+        && !model.has_thinking_level(level)
     {
         return Err(SessionError::Config {
             message: format!(
                 "thinking level `{level}` for model `{}` (defined levels: {})",
                 selection.model,
-                model
-                    .thinking_levels
-                    .iter()
-                    .map(|l| l.name.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", ")
+                model.thinking_levels.join(", ")
             ),
         });
     }

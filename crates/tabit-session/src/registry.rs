@@ -331,13 +331,7 @@ impl ModelRegistry {
                                 .to_string()
                             })
                             .collect(),
-                        // Names only — the dial's request-merge maps
-                        // never cross the wire.
-                        thinking_levels: model
-                            .thinking_levels
-                            .iter()
-                            .map(|level| level.name.clone())
-                            .collect(),
+                        thinking_levels: model.thinking_levels.clone(),
                     })
                     .collect(),
             })
@@ -514,8 +508,8 @@ impl ModelRegistry {
 }
 
 /// The request parameters a session forwards for a selection: the model's
-/// pass-through knobs, with the active thinking level's `extra_body`
-/// overlaid last (level over model over provider).
+/// pass-through knobs and the active thinking level (realized natively
+/// by the engine — PROVIDERS.md).
 ///
 /// Pure forwarding — nothing here interprets the values. Unknown ids
 /// contribute nothing (the model factory is the loud check for those).
@@ -529,16 +523,12 @@ pub(crate) fn request_params(
     let Some(model) = provider.model(&selection.model) else {
         return ModelRequestParams::default();
     };
-    let level = selection
-        .thinking_level
-        .as_deref()
-        .and_then(|name| model.thinking_level(name));
     ModelRequestParams {
         max_tokens: model.max_tokens,
         temperature: model.sampling_params.and_then(|params| params.temperature),
         top_p: model.sampling_params.and_then(|params| params.top_p),
         top_k: model.sampling_params.and_then(|params| params.top_k),
-        extra_body: model.merged_extra_body(provider.extra_body.as_ref(), level),
+        thinking_level: selection.thinking_level.clone(),
     }
 }
 
@@ -551,7 +541,7 @@ pub(crate) struct ModelRequestParams {
     pub temperature: Option<f64>,
     pub top_p: Option<f64>,
     pub top_k: Option<u64>,
-    pub extra_body: Option<serde_json::Map<String, serde_json::Value>>,
+    pub thinking_level: Option<String>,
 }
 
 /// The provider's configured headers as an HTTP header map. Provider

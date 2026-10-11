@@ -122,12 +122,7 @@ api = "openai-completions"
 [[providers.p.models]]
 id = "m"
 cost = { input = 2.0, output = 4.0, cache_read = 0.2, cache_write = 2.0 }
-
-[[providers.p.models.thinking_levels]]
-name = "off"
-
-[[providers.p.models.thinking_levels]]
-name = "high"
+thinking_levels = ["off", "high"]
 
 [providers.q]
 base_url = "http://127.0.0.1:9998/v1"
@@ -2436,17 +2431,12 @@ async fn configured_request_parameters_reach_the_model() -> Result<(), SessionEr
 [providers.p]
 base_url = "http://127.0.0.1:9999/v1"
 api = "openai-completions"
-extra_body = { shared = "provider", only_provider = true }
 
 [[providers.p.models]]
 id = "m"
 max_tokens = 512
 sampling_params = { temperature = 0.7, top_p = 0.9, top_k = 40 }
-extra_body = { shared = "model", model_only = true }
-
-[[providers.p.models.thinking_levels]]
-name = "high"
-extra_body = { shared = "level" }
+thinking_levels = ["high"]
 "#,
             Path::new("providers.toml"),
         )
@@ -2479,11 +2469,8 @@ extra_body = { shared = "level" }
     // `top_p`/`top_k` have no dedicated field — they ride the flattened map.
     assert_eq!(additional.get("top_p"), Some(&json!(0.9)));
     assert_eq!(additional.get("top_k"), Some(&json!(40)));
-    // The overlay: level over model over provider, earlier sources' unique
-    // keys retained.
-    assert_eq!(additional.get("shared"), Some(&json!("level")));
-    assert_eq!(additional.get("model_only"), Some(&json!(true)));
-    assert_eq!(additional.get("only_provider"), Some(&json!(true)));
+    // The active thinking level forwards for the engine to realize.
+    assert_eq!(request.thinking_level.as_deref(), Some("high"));
     std::fs::remove_dir_all(store.dir()).ok();
     Ok(())
 }
