@@ -9,7 +9,7 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 
-import { InteractiveMode, type BackendLink, type FooterFacts, type InteractionCard, type ModeView, type PendingMessage, type SkillInfo, type SubagentEntry } from "../src/mode.ts";
+import { InteractiveMode, type ProgramStatusReport, type BackendLink, type FooterFacts, type InteractionCard, type ModeView, type PendingMessage, type SkillInfo, type SubagentEntry } from "../src/mode.ts";
 import { parseServerFrame, PROTOCOL_VERSION, type ParsedServerFrame } from "../src/protocol.ts";
 
 const SESSION = "0199aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -76,6 +76,7 @@ class RecordingView implements ModeView {
 	tools = new Map<string, { stream: string; turnId: string; name: string; args: string | null; content?: string; ok?: boolean; details?: unknown }>();
 	pending: PendingMessage[] = [];
 	status = "";
+	programStatuses: ProgramStatusReport[] = [];
 	footer: FooterFacts | undefined;
 	cards: InteractionCard[] = [];
 	cardLabels: Array<string | undefined> = [];
@@ -145,6 +146,9 @@ class RecordingView implements ModeView {
 	}
 	setPending(pending: PendingMessage[]): void {
 		this.pending = pending;
+	}
+	setProgramStatus(status: ProgramStatusReport): void {
+		this.programStatuses.push(status);
 	}
 	setStatus(text: string): void {
 		this.status = text;
@@ -508,6 +512,42 @@ describe("InteractiveMode", () => {
 		mode.submit("/thinking");
 		assert.strictEqual(opened, 1);
 		assert.strictEqual(view.notes.at(-1)?.text, "this model has no thinking dial");
+	});
+
+	test("program status (pi-tui 1.1.0): blocked > working > resting, dedup'd, error carries the first line", () => {
+		const { view, feed, control } = harness();
+		boot(control, feed);
+		// The boot's frames report the initial idle once (dedup: repeats don't cross).
+		assert.deepStrictEqual(view.programStatuses, [{ state: "idle" }]);
+		feed({ type: "replay_begin", total: 0 });
+		feed({ type: "replay_end" });
+		assert.strictEqual(view.programStatuses.length, 1);
+
+		// A run opens → working; a background CHILD's run is the app working.
+		feed({ type: "session_opened", id: CHILD, path: "", cwd: "", resumed: false, parent: SESSION }, CHILD);
+		feed({ type: "user_message", entry_id: "cx", text: "child task" }, CHILD);
+		assert.deepStrictEqual(view.programStatuses.at(-1), { state: "working" });
+
+		// A card outranks working; its title is the message.
+		feed({
+			type: "interaction_request",
+			id: "ask1",
+			ui_type: "native:select_one",
+			payload: { title: "Allow bash?", body: "ls", options: [{ label: "Allow" }, { label: "Deny" }] },
+		});
+		assert.deepStrictEqual(view.programStatuses.at(-1), { state: "blocked", message: "Allow bash?" });
+		feed({ type: "interaction_settled", id: "ask1" });
+		assert.deepStrictEqual(view.programStatuses.at(-1), { state: "working" });
+
+		// Settles: done, error (first line), idle on abort.
+		feed({ type: "run_finished", output: "", durable: true, started_at_ms: 0, completed_at_ms: 1 }, CHILD);
+		assert.deepStrictEqual(view.programStatuses.at(-1), { state: "done" });
+		feed({ type: "user_message", entry_id: "e1", text: "go" });
+		feed({ type: "run_failed", kind: "model", message: "no usable model\nsecond line", started_at_ms: 0, completed_at_ms: 1 });
+		assert.deepStrictEqual(view.programStatuses.at(-1), { state: "error", message: "no usable model" });
+		feed({ type: "user_message", entry_id: "e2", text: "again" });
+		feed({ type: "run_aborted", output: "", started_at_ms: 0, completed_at_ms: 1 });
+		assert.deepStrictEqual(view.programStatuses.at(-1), { state: "idle" });
 	});
 
 	test("the model picker dispatch: /model routes to the root, select sends the command", () => {

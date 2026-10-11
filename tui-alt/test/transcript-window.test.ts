@@ -46,6 +46,7 @@ class FakeTerminal implements Terminal {
 	clearScreen(): void {}
 	setTitle(): void {}
 	setProgress(): void {}
+	setProgramStatus(): void {}
 }
 
 /** The painted screen (the alt screen's diff state) with ANSI stripped. */

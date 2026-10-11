@@ -191,6 +191,17 @@ export interface ModeView {
 	/** A closed, unfocused, unlisted stream's state was dropped — dispose
 	 *  its transcript pane (the sweep's memory ruling, v23). */
 	dropStream(stream: string): void;
+	/** The program-status report (OSC 7501, pi-tui 1.1.0) — dedup'd by
+	 *  the mode; the view adds `app` and crosses to the terminal. */
+	setProgramStatus(status: ProgramStatusReport): void;
+}
+
+/** pi-tui's ProgramStatus, mirrored (the mode stays pi-tui-free) minus
+ *  the wire-only states (`clear`) and the blocked `kind` (the wire's
+ *  interaction cards don't distinguish permission from question). */
+export interface ProgramStatusReport {
+	state: "idle" | "working" | "blocked" | "done" | "error";
+	message?: string;
 }
 
 /** What the mode needs of the backend — `Backend` satisfies it structurally. */
@@ -645,6 +656,7 @@ export class InteractiveMode {
 		this.#backend.interactionResponse(entry.stream, id, { selected, text });
 		this.#view.closeCard(id, undefined);
 		this.#emitSubagents();
+		this.#reportProgramStatus();
 	}
 
 	/** Whether an interaction card is open — the input listener stands
@@ -654,6 +666,11 @@ export class InteractiveMode {
 	}
 
 	handleFrame(parsed: ParsedServerFrame): void {
+		this.#dispatchFrame(parsed);
+		this.#reportProgramStatus();
+	}
+
+	#dispatchFrame(parsed: ParsedServerFrame): void {
 		if (parsed.kind === "control") return this.#handleControl(parsed.frame);
 		if (parsed.kind === "unknown") {
 			log(`unknown frame${parsed.type ? ` type=${parsed.type}` : " (unparseable)"}: ${parsed.raw}`);
@@ -720,6 +737,30 @@ export class InteractiveMode {
 		// The list re-projects on any stamped fold — cheap (streams are few)
 		// and never stale (run state, tools, and cards all feed the atom).
 		this.#emitSubagents();
+	}
+
+	/** OSC 7501 (pi-tui 1.1.0): the terminal-visible app state. pi's
+	 *  priority — blocked (a card waits on the user) > working (any
+	 *  stream runs or compacts — a background child is the app working)
+	 *  > resting (the last run's outcome). Dedup'd: unchanged reports
+	 *  don't cross. */
+	#restingStatus: ProgramStatusReport = { state: "idle" };
+	#lastProgramStatusJson: string | undefined;
+
+	#reportProgramStatus(): void {
+		let status: ProgramStatusReport;
+		const openCard = this.#cards.values().next().value;
+		if (openCard !== undefined) {
+			status = { state: "blocked", message: openCard.card.title };
+		} else if ([...this.#streams.values()].some(s => s.running || s.compacting)) {
+			status = { state: "working" };
+		} else {
+			status = this.#restingStatus;
+		}
+		const json = JSON.stringify(status);
+		if (json === this.#lastProgramStatusJson) return;
+		this.#lastProgramStatusJson = json;
+		this.#view.setProgramStatus(status);
 	}
 
 	#handleControl(frame: ServerControlFrame): void {
@@ -936,6 +977,7 @@ export class InteractiveMode {
 			s.running = false;
 			s.terminal = "completed";
 			s.terminalAt = Date.now();
+			this.#restingStatus = { state: "done" };
 			this.#emitStatus(s);
 			this.#emitFooter(s);
 			if (!event.durable) {
@@ -947,6 +989,7 @@ export class InteractiveMode {
 			s.running = false;
 			s.terminal = "aborted";
 			s.terminalAt = Date.now();
+			this.#restingStatus = { state: "idle" };
 			this.#emitStatus(s);
 			this.#emitFooter(s);
 			this.#closeStreamCards(s, "run aborted");
@@ -957,6 +1000,7 @@ export class InteractiveMode {
 			s.running = false;
 			s.terminal = "failed";
 			s.terminalAt = Date.now();
+			this.#restingStatus = { state: "error", message: event.message.split("\n", 1)[0] };
 			this.#emitStatus(s);
 			this.#emitFooter(s);
 			this.#view.addNote(s.id, `run failed (${event.kind}): ${event.message}`, "error");
@@ -1187,6 +1231,7 @@ export class InteractiveMode {
 		},
 		compaction_end: (s, event) => {
 			s.compacting = false;
+			this.#restingStatus = { state: "done" };
 			// tokens_after is the authoritative post-compaction context length.
 			s.contextUsed = event.tokens_after;
 			this.#view.addNote(s.id, "context compacted — history is now summary + retained tail", "info");
@@ -1195,6 +1240,7 @@ export class InteractiveMode {
 		},
 		compaction_failed: (s, event) => {
 			s.compacting = false;
+			this.#restingStatus = { state: "error", message: event.message.split("\n", 1)[0] };
 			this.#view.addNote(s.id, `compaction failed: ${event.message}`, "error");
 			this.#emitStatus(s);
 		},

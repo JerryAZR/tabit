@@ -59,7 +59,7 @@ import { log } from "./log.ts";
 import { AtPathCompletionProvider } from "./path-completion.ts";
 import { pasteClipboardIntoEditor, platformClipboardReader } from "./paste-image.ts";
 import { APP_KEYBINDING_IDS, applyKeybindings, loadTuiToml } from "./keybindings.ts";
-import type { FooterFacts, InteractionCard, ModeView, PendingMessage, SkillInfo, SubagentEntry } from "./mode.ts";
+import type { FooterFacts, InteractionCard, ModeView, PendingMessage, ProgramStatusReport, SkillInfo, SubagentEntry } from "./mode.ts";
 import type { InteractiveMode } from "./mode.ts";
 import { editorTheme } from "./theme.ts";
 
@@ -227,6 +227,9 @@ export class AltRoot implements ModeView {
 		this.#status.dispose();
 		this.#footer.dispose();
 		this.#subagentList.dispose();
+		// The program status dies with the app — a dashboard must not keep
+		// showing a dead process's last state (OSC 7501's `clear`).
+		this.tui.terminal.setProgramStatus({ app: "tabit", state: "clear" });
 		this.tui.stop();
 	}
 
@@ -282,6 +285,9 @@ export class AltRoot implements ModeView {
 		if (this.#shownStream !== stream) {
 			this.#shownStream = stream;
 			this.#mountTranscript(pane);
+			// The transcript was replaced — a selection into the old stream's
+			// rows must not survive into the new one (pi-tui 1.1.0).
+			this.tui.resetTextSelection();
 			this.editor.setText("");
 		}
 		this.#setRegion("editor");
@@ -409,6 +415,12 @@ export class AltRoot implements ModeView {
 
 	setStatus(text: string): void {
 		this.#status.set(text);
+	}
+
+	/** The mode's dedup'd report crosses to the terminal (OSC 7501 —
+	 *  ProcessTerminal no-ops where the terminal declines support). */
+	setProgramStatus(status: ProgramStatusReport): void {
+		this.tui.terminal.setProgramStatus({ app: "tabit", ...status });
 	}
 
 	setFooter(facts: FooterFacts): void {
