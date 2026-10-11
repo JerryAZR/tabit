@@ -51,6 +51,7 @@ import { SubagentList } from "./components/subagent-list.ts";
 import { TranscriptRegistry } from "./components/transcript-registry.ts";
 import { TreeCardView } from "./components/tree-card.ts";
 import { ModelPickerView } from "./model-picker.ts";
+import { ThinkingPickerView } from "./thinking-picker.ts";
 import { AuthCardView } from "./auth-card.ts";
 import { cardViewFor } from "./card-view.ts";
 import { InputController, type Region } from "./input-controller.ts";
@@ -120,6 +121,8 @@ export class AltRoot implements ModeView {
 	#treeCard: TreeCardView | undefined;
 	/** The open model picker, when it owns the dock slot. */
 	#modelPicker: ModelPickerView | undefined;
+	/** The open thinking-level picker, when it owns the dock slot. */
+	#thinkingPicker: ThinkingPickerView | undefined;
 	/** The open login/logout card, when it owns the dock slot. */
 	#authCard: AuthCardView | undefined;
 
@@ -182,6 +185,7 @@ export class AltRoot implements ModeView {
 		this.editor.onSubmit = (text: string) => mode.submit(text);
 		mode.onTree = () => this.showTree();
 		mode.onModel = () => this.showModelPicker();
+		mode.onThinking = () => this.showThinkingPicker();
 		mode.onLogin = () => this.showAuthCard("login");
 		mode.onLogout = () => this.showAuthCard("logout");
 		// The command table exists now — the dropdown can list it before
@@ -443,6 +447,7 @@ export class AltRoot implements ModeView {
 		// down after the card closes — the tree field outlived its slot.
 		this.#treeCard = undefined;
 		this.#modelPicker = undefined;
+		this.#thinkingPicker = undefined;
 		this.#authCard = undefined;
 		this.#cardSlot.clear();
 		this.#cardSlot.addChild(cardViewFor(card, (selected, text) => this.#mode?.answerCard(card.id, selected, text), streamLabel));
@@ -473,6 +478,7 @@ export class AltRoot implements ModeView {
 		// The tree takes the slot: clear any sibling owner, or its field
 		// outlives the slot it no longer renders in (the showCard lesson).
 		this.#modelPicker = undefined;
+		this.#thinkingPicker = undefined;
 		this.#authCard = undefined;
 		this.#treeCard = new TreeCardView(
 			mode.tree,
@@ -518,6 +524,7 @@ export class AltRoot implements ModeView {
 		}
 		this.#treeCard = undefined;
 		this.#authCard = undefined;
+		this.#thinkingPicker = undefined;
 		this.#modelPicker = new ModelPickerView(
 			mode.modelsCatalog,
 			mode.currentSelection,
@@ -539,6 +546,50 @@ export class AltRoot implements ModeView {
 	closeModelPicker(): void {
 		if (this.#modelPicker === undefined) return;
 		this.#modelPicker = undefined;
+		this.#cardSlot.clear();
+		this.tui.setFocus(this.editor);
+		this.#touch();
+	}
+
+	// --- thinking picker ------------------------------------------------------
+
+	/** Open the `/thinking` picker over the focused model's dial. The mode
+	 *  has already vetted the dial exists (no dial → its note, not an
+	 *  empty list); the card-slot guards are the model picker's. */
+	showThinkingPicker(): void {
+		const mode = this.#mode;
+		if (mode === undefined) return;
+		if (mode.hasOpenCard) {
+			this.addNote(undefined, "answer the open question first — the picker can wait", "warn");
+			return;
+		}
+		if (this.#thinkingPicker !== undefined) return;
+		const dial = mode.thinkingDial();
+		if (dial === undefined) return;
+		this.#treeCard = undefined;
+		this.#authCard = undefined;
+		this.#modelPicker = undefined;
+		this.#thinkingPicker = new ThinkingPickerView(
+			dial.levels,
+			dial.current,
+			{
+				onSelect: level => {
+					this.closeThinkingPicker();
+					mode.switchThinkingLevel(level);
+				},
+				onClose: () => this.closeThinkingPicker(),
+			},
+			() => this.#touch(),
+		);
+		this.#cardSlot.clear();
+		this.#cardSlot.addChild(this.#thinkingPicker);
+		this.tui.setFocus(this.#thinkingPicker);
+		this.#touch();
+	}
+
+	closeThinkingPicker(): void {
+		if (this.#thinkingPicker === undefined) return;
+		this.#thinkingPicker = undefined;
 		this.#cardSlot.clear();
 		this.tui.setFocus(this.editor);
 		this.#touch();
@@ -572,6 +623,7 @@ export class AltRoot implements ModeView {
 		}
 		this.#treeCard = undefined;
 		this.#modelPicker = undefined;
+		this.#thinkingPicker = undefined;
 		this.#authCard = new AuthCardView(
 			kind,
 			statuses,

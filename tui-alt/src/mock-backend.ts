@@ -635,7 +635,8 @@ stdin.on("line", line => {
 				type: "model_selected",
 				provider,
 				model: modelId,
-				thinking_level: null,
+				// The register write lands at receive: the dial echoes back.
+				thinking_level: frame.thinking_level === undefined ? null : frame.thinking_level,
 				context_window: row.context_window,
 				name: row.name,
 				cost: row.cost,

@@ -77,6 +77,10 @@ export interface FooterFacts {
 	model: string | undefined;
 	/** Config's display name for the model (v11) — absent means unstated. */
 	modelName: string | undefined;
+	/** The active thinking level's name — absent when unstated, null when
+	 *  the provider/model default is selected; the badge shows named
+	 *  levels only. */
+	thinkingLevel: string | null | undefined;
 	/** Context meter denominator in tokens (v11) — absent means unstated. */
 	contextWindow: number | undefined;
 	resumed: boolean;
@@ -206,7 +210,7 @@ export interface BackendLink {
 	checkout(session: string, entryId: string): void;
 	/** Switch the session's model (the `/model` picker's select).
 	 *  `model_selected` lands the resolved facts. */
-	setModel(session: string, provider: string, model: string): void;
+	setModel(session: string, provider: string, model: string, thinkingLevel?: string | null): void;
 	interactionResponse(session: string, id: string, payload: unknown): void;
 	/** Store a provider key (v21) — the re-announced catalog is the ack. */
 	login(provider: string, apiKey: string): void;
@@ -245,6 +249,7 @@ class StreamState {
 	provider: string | undefined;
 	model: string | undefined;
 	modelName: string | undefined;
+	thinkingLevel: string | null | undefined;
 	contextWindow: number | undefined;
 	path: string | undefined;
 	cwd: string | undefined;
@@ -329,6 +334,8 @@ export class InteractiveMode {
 	onQuit: (() => void) | undefined;
 	/** Set by the root: opens the model picker (`/model`). */
 	onModel: (() => void) | undefined;
+	/** Set by the root: opens the thinking-level picker (`/thinking`). */
+	onThinking: (() => void) | undefined;
 	/** Set by the root: opens the login card (`/login`). */
 	onLogin: (() => void) | undefined;
 	/** Set by the root: opens the logout card (`/logout`). */
@@ -538,6 +545,7 @@ export class InteractiveMode {
 			{ name: "login", description: "store a provider API key", kind: "command", run: () => this.onLogin?.() },
 			{ name: "logout", description: "remove a stored provider key", kind: "command", run: () => this.onLogout?.() },
 			{ name: "model", description: "switch the model", kind: "command", run: () => this.onModel?.() },
+			{ name: "thinking", description: "set the thinking level", kind: "command", run: () => this.#openThinkingPicker() },
 			{ name: "tree", description: "browse the session tree, rewind to an entry", kind: "command", run: () => this.onTree?.() },
 			{ name: "exit", description: "quit the TUI (shuts the backend down)", kind: "command", run: () => this.onQuit?.() },
 			{ name: "quit", description: "quit the TUI (shuts the backend down)", kind: "command", run: () => this.onQuit?.() },
@@ -572,6 +580,40 @@ export class InteractiveMode {
 	switchModel(provider: string, model: string): void {
 		const s = this.#focusedState();
 		if (s !== undefined && this.#unlessClosed(s, "model switch")) this.#backend.setModel(s.id, provider, model);
+	}
+
+	/** The thinking picker's select: the dial rides the `model` command —
+	 *  same provider/model, new thinking_level (null = the provider/model
+	 *  default, always a legal selection). */
+	switchThinkingLevel(level: string | null): void {
+		const s = this.#focusedState();
+		if (s === undefined || !this.#unlessClosed(s, "thinking level")) return;
+		if (s.provider === undefined || s.model === undefined) return; // selection-less: no dial
+		this.#backend.setModel(s.id, s.provider, s.model, level);
+	}
+
+	/** The focused model's thinking dial, for the picker: the announced
+	 *  level names (wire order) plus the current selection. Undefined when
+	 *  the focused stream has no selection or the model announces no dial
+	 *  — `/thinking` notes instead of opening. */
+	thinkingDial(): { levels: string[]; current: string | null | undefined } | undefined {
+		const s = this.#focusedState();
+		if (s === undefined || s.provider === undefined || s.model === undefined) return undefined;
+		const row = this.#catalog.find(p => p.id === s.provider)?.models.find(m => m.id === s.model);
+		if (row === undefined || row.thinking_levels.length === 0) return undefined;
+		return { levels: row.thinking_levels, current: s.thinkingLevel };
+	}
+
+	/** `/thinking`: open the level picker when the focused model has a
+	 *  dial; note otherwise (an empty picker would be a lie). */
+	#openThinkingPicker(): void {
+		const s = this.#focusedState();
+		if (s === undefined || !this.#unlessClosed(s, "thinking level")) return;
+		if (this.thinkingDial() === undefined) {
+			this.#view.addNote(s.id, "this model has no thinking dial", "info");
+			return;
+		}
+		this.onThinking?.();
 	}
 
 	/** The login card's confirm: store the key. Backend-level and
@@ -728,6 +770,7 @@ export class InteractiveMode {
 			cwd: s.cwd,
 			model: s.model,
 			modelName: s.modelName,
+			thinkingLevel: s.thinkingLevel,
 			contextWindow: s.contextWindow,
 			resumed: s.resumed,
 			inputTokens: s.inputTokens,
@@ -1041,6 +1084,7 @@ export class InteractiveMode {
 			// restates the resolved record, and a replay pass re-delivers
 			// completion_calls, so sums rebuild from history.
 			s.modelName = undefined;
+			s.thinkingLevel = undefined;
 			s.contextWindow = undefined;
 			s.rates = undefined;
 			s.inputTokens = 0;
@@ -1097,6 +1141,7 @@ export class InteractiveMode {
 			s.provider = event.provider;
 			s.model = event.model;
 			s.modelName = event.name;
+			s.thinkingLevel = event.thinking_level;
 			s.contextWindow = event.context_window;
 			s.rates = event.cost;
 			this.#emitFooter(s);

@@ -46,8 +46,8 @@ class FakeBackend implements BackendLink {
 	checkout(session: string, entryId: string): void {
 		this.sent.push({ kind: "checkout", session, entryId });
 	}
-	setModel(session: string, provider: string, model: string): void {
-		this.sent.push({ kind: "model", session, provider, model });
+	setModel(session: string, provider: string, model: string, thinkingLevel?: string | null): void {
+		this.sent.push({ kind: "model", session, provider, model, ...(thinkingLevel !== undefined ? { thinking_level: thinkingLevel } : {}) });
 	}
 	interactionResponse(session: string, id: string, payload: unknown): void {
 		this.sent.push({ kind: "interaction_response", session, id, payload });
@@ -414,14 +414,14 @@ describe("InteractiveMode", () => {
 		boot(control, feed);
 		// Static commands first — each carries its behavior.
 		const before = mode.slashCommands();
-		assert.deepStrictEqual(before.map(c => c.name), ["compact", "continue", "help", "login", "logout", "model", "tree", "exit", "quit"]);
+		assert.deepStrictEqual(before.map(c => c.name), ["compact", "continue", "help", "login", "logout", "model", "thinking", "tree", "exit", "quit"]);
 		assert.strictEqual(before.every(c => c.kind === "command"), true);
 
 		// Skills join the same table as skill-typed entries (the dropdown's
 		// type column reads the kind).
 		feed({ type: "skills_available", skills: [{ name: "my-skill", description: "d", location: "l", level: "user" }] });
 		const after = mode.slashCommands();
-		assert.strictEqual((after).length, 10);
+		assert.strictEqual((after).length, 11);
 		assert.partialDeepStrictEqual(after.find(c => c.name === "my-skill"), { kind: "skill" });
 	});
 
@@ -472,6 +472,42 @@ describe("InteractiveMode", () => {
 		feed({ type: "interaction_request", id: "ask2", ui_type: "native:select_one", payload: { title: "t", body: "b", options: [{ label: "A" }] } });
 		feed({ type: "run_finished", output: "", durable: true, started_at_ms: 1, completed_at_ms: 2 });
 		assert.strictEqual(view.closed.some(c => c.id === "ask2" && c.note === "run finished"), true);
+	});
+
+	test("the thinking picker dispatch: /thinking opens on a dial, select sends the model command with the level", () => {
+		const { backend, view, mode, feed, control } = harness();
+		boot(control, feed);
+		// The catalog announces the dial for p/m1.
+		feed({ type: "models_available", providers: [
+			{ id: "p", models: [{ id: "m1", thinking_levels: ["low", "high"], reasoning: false, input: ["text"] }] },
+			{ id: "q", models: [{ id: "m2", thinking_levels: [], reasoning: false, input: ["text"] }] },
+		] });
+		feed({ type: "model_selected", provider: "p", model: "m1", thinking_level: null });
+		assert.deepStrictEqual(mode.thinkingDial(), { levels: ["low", "high"], current: null });
+
+		let opened = 0;
+		mode.onThinking = () => opened++;
+		mode.submit("/thinking");
+		assert.strictEqual(opened, 1);
+
+		// The picker's select: the dial rides the model command (state write
+		// at receive); model_selected answers and the footer gains the suffix.
+		mode.switchThinkingLevel("high");
+		assert.deepStrictEqual(backend.sent.at(-1), { kind: "model", session: SESSION, provider: "p", model: "m1", thinking_level: "high" });
+		feed({ type: "model_selected", provider: "p", model: "m1", thinking_level: "high", name: "Model One" });
+		assert.strictEqual(view.footer?.thinkingLevel, "high");
+		// Back to the default: null crosses the wire, the suffix leaves.
+		mode.switchThinkingLevel(null);
+		assert.deepStrictEqual(backend.sent.at(-1), { kind: "model", session: SESSION, provider: "p", model: "m1", thinking_level: null });
+		feed({ type: "model_selected", provider: "p", model: "m1", thinking_level: null, name: "Model One" });
+		assert.strictEqual(view.footer?.thinkingLevel, null);
+
+		// A dial-less model: the command notes instead of opening.
+		mode.switchModel("q", "m2");
+		feed({ type: "model_selected", provider: "q", model: "m2" });
+		mode.submit("/thinking");
+		assert.strictEqual(opened, 1);
+		assert.strictEqual(view.notes.at(-1)?.text, "this model has no thinking dial");
 	});
 
 	test("the model picker dispatch: /model routes to the root, select sends the command", () => {

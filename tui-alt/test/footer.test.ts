@@ -17,6 +17,7 @@ const facts = (over: Partial<FooterFacts> = {}): FooterFacts => ({
 	cwd: undefined,
 	model: "kimi-for-coding",
 	modelName: undefined,
+	thinkingLevel: undefined,
 	contextWindow: undefined,
 	resumed: false,
 	inputTokens: 0,
@@ -60,6 +61,8 @@ describe("footer badges", () => {
 		const model = badge("model");
 		assert.strictEqual(model({ requestRender: () => {} }).id, "model");
 		assert.strictEqual(renderOne(model, { modelName: "Kimi K2.8 Preview" }), "Kimi K2.8 Preview");
+		assert.strictEqual(renderOne(model, { modelName: "Kimi K2.8 Preview", thinkingLevel: "high" }), "Kimi K2.8 Preview (high)");
+		assert.strictEqual(renderOne(model, { modelName: "Kimi K2.8 Preview", thinkingLevel: null }), "Kimi K2.8 Preview"); // the default stays bare
 		assert.strictEqual(renderOne(model), "kimi-for-coding");
 		assert.strictEqual(renderOne(model, { model: undefined }), undefined);
 	});
