@@ -195,7 +195,9 @@ function boot(
 	// The report model (v19): the backend speaks first, and the routing key
 	// arrives ON the boot's stamped session_opened — no handshake ack exists.
 	control({ type: "report", protocol_version: PROTOCOL_VERSION });
-	feed({ type: "session_opened", id: session, path: "", cwd: "", model: { provider: "p", model: "m1" }, resumed: false }, session);
+	feed({ type: "session_opened", id: session, path: "", cwd: "", resumed: false }, session);
+	// v24: the creation-time selection announcement follows session_opened.
+	feed({ type: "model_selected", provider: "p", model: "m1" }, session);
 }
 
 /** The recorded-dollars assertions: absent stays absent, present is close. */
@@ -220,8 +222,8 @@ describe("InteractiveMode", () => {
 	test("a live run: liveness on user_message, coalesced deltas, tool lifecycle, per-turn usage", async () => {
 		const { view, mode, feed, control } = harness();
 		boot(control, feed);
-		feed({ type: "session_opened", id: SESSION, path: "/w", model: { provider: "p", model: "m1" }, resumed: false });
-		feed({ type: "model_changed", provider: "p", model: "m1", thinking_level: null, context_window: 200000, name: "Model One", cost: { input: 1, output: 4, cache_read: 0.1, cache_write: 0.4 } });
+		feed({ type: "session_opened", id: SESSION, path: "/w", resumed: false });
+		feed({ type: "model_selected", provider: "p", model: "m1", thinking_level: null, context_window: 200000, name: "Model One", cost: { input: 1, output: 4, cache_read: 0.1, cache_write: 0.4 } });
 		assert.strictEqual(view.footer?.path, "/w"); // the editor's completion root
 		feed({ type: "user_message", entry_id: "e1", text: "hi" });
 		assert.strictEqual(view.footer?.running, true);
@@ -261,19 +263,19 @@ describe("InteractiveMode", () => {
 	test("the session log path fact: real path flows, ephemeral stays undefined", () => {
 		const { view, feed, control } = harness();
 		boot(control, feed);
-		feed({ type: "session_opened", id: SESSION, path: "C:\\proj\\.tabit\\s\\a.jsonl", model: { provider: "p", model: "m1" }, resumed: false });
+		feed({ type: "session_opened", id: SESSION, path: "C:\\proj\\.tabit\\s\\a.jsonl", resumed: false });
 		assert.strictEqual(view.footer?.path, "C:\\proj\\.tabit\\s\\a.jsonl"); // the log file — session UI data, not a cwd
 
 		const ephemeral = harness();
 		boot(ephemeral.control, ephemeral.feed);
-		ephemeral.feed({ type: "session_opened", id: SESSION, path: "", model: { provider: "p", model: "m1" }, resumed: false });
+		ephemeral.feed({ type: "session_opened", id: SESSION, path: "", resumed: false });
 		assert.strictEqual(ephemeral.view.footer?.path, undefined);
 	});
 
 	test("usage accounting: sums across turns and terminals, absent costs stay absent, replay re-sums after reset", async () => {
 		const { view, feed, control } = harness();
 		boot(control, feed);
-		feed({ type: "session_opened", id: SESSION, path: "/w", model: { provider: "p", model: "m1" }, resumed: false });
+		feed({ type: "session_opened", id: SESSION, path: "/w", resumed: false });
 		const usage = (i: number, o: number, c = 0, w = 0) => ({
 			input_tokens: i,
 			output_tokens: o,
@@ -296,7 +298,7 @@ describe("InteractiveMode", () => {
 
 		// A resume-style boot: facts reset, then the replay pass re-delivers
 		// the history's completion_calls through the same handler.
-		feed({ type: "session_opened", id: SESSION, path: "/w", model: { provider: "p", model: "m1" }, resumed: true });
+		feed({ type: "session_opened", id: SESSION, path: "/w", resumed: true });
 		assert.strictEqual(view.footer?.inputTokens, 0);
 		assert.strictEqual(view.footer?.cost, undefined);
 		assert.strictEqual(view.footer?.resumed, true);
@@ -401,7 +403,7 @@ describe("InteractiveMode", () => {
 		mode.submit("/continue");
 		assert.deepStrictEqual(backend.sent, [{ kind: "continue", session: SESSION }]);
 		// Session-scoped: it follows focus like every session command.
-		feed({ type: "session_opened", id: CHILD, path: "", cwd: "", model: { provider: "p", model: "m1" }, resumed: false, parent: SESSION }, CHILD);
+		feed({ type: "session_opened", id: CHILD, path: "", cwd: "", resumed: false, parent: SESSION }, CHILD);
 		mode.focusStream(CHILD);
 		mode.submit("/continue");
 		assert.deepStrictEqual(backend.sent[1], { kind: "continue", session: CHILD });
@@ -431,7 +433,7 @@ describe("InteractiveMode", () => {
 
 		// A subagent child announces itself, then its own catalog on its own
 		// stamp — it must not touch the focused (root) stream's list.
-		feed({ type: "session_opened", id: CHILD, path: "", cwd: "", model: { provider: "p", model: "m1" }, resumed: false, parent: SESSION }, CHILD);
+		feed({ type: "session_opened", id: CHILD, path: "", cwd: "", resumed: false, parent: SESSION }, CHILD);
 		feed({ type: "skills_available", skills: [{ name: "child-skill", description: "d", location: "l", level: "user" }] }, CHILD);
 		assert.deepStrictEqual(view.skills.map(s => s.name), ["commit"]);
 
@@ -444,7 +446,7 @@ describe("InteractiveMode", () => {
 
 		// v20 announces only when discovery found something — absence is
 		// unambiguous, so the next session clears until its catalog lands.
-		feed({ type: "session_opened", id: SESSION, path: "/w", model: { provider: "p", model: "m1" }, resumed: false });
+		feed({ type: "session_opened", id: SESSION, path: "/w", resumed: false });
 		assert.deepStrictEqual(view.skills, []);
 	});
 
@@ -481,9 +483,9 @@ describe("InteractiveMode", () => {
 		assert.strictEqual(opened, 1);
 		assert.strictEqual(backend.sent.length, 0); // opening is local
 
-		// The register tracks session_opened / model_changed for the ✓.
+		// The register tracks session_opened / model_selected for the ✓.
 		assert.deepStrictEqual(mode.currentSelection, { provider: "p", model: "m1" });
-		feed({ type: "model_changed", provider: "q", model: "m2", thinking_level: null });
+		feed({ type: "model_selected", provider: "q", model: "m2", thinking_level: null });
 		assert.deepStrictEqual(mode.currentSelection, { provider: "q", model: "m2" });
 
 		mode.switchModel("anthropic", "claude-opus");
@@ -565,7 +567,7 @@ describe("InteractiveMode", () => {
 	test("v23 session_closed: advisory mark, the send guard, and the sweep's three triggers", () => {
 		const { backend, view, mode, feed, control } = harness();
 		boot(control, feed);
-		feed({ type: "session_opened", id: CHILD, path: "", cwd: "", model: { provider: "p", model: "m1" }, resumed: false, parent: SESSION }, CHILD);
+		feed({ type: "session_opened", id: CHILD, path: "", cwd: "", resumed: false, parent: SESSION }, CHILD);
 		feed({ type: "user_message", entry_id: "cx", text: "child task" }, CHILD);
 		feed({ type: "message_queued", id: "q1", text: "steer the child" }, CHILD);
 
@@ -586,7 +588,7 @@ describe("InteractiveMode", () => {
 	test("v23 a focused closed stream: kept, viewing-only, the guard synthesizes errors, Esc walks up", () => {
 		const { backend, view, mode, feed, control } = harness();
 		boot(control, feed);
-		feed({ type: "session_opened", id: CHILD, path: "", cwd: "", model: { provider: "p", model: "m1" }, resumed: false, parent: SESSION }, CHILD);
+		feed({ type: "session_opened", id: CHILD, path: "", cwd: "", resumed: false, parent: SESSION }, CHILD);
 		feed({ type: "user_message", entry_id: "cx", text: "child task" }, CHILD);
 		feed({ type: "message_queued", id: "q1", text: "steer the child" }, CHILD);
 		mode.focusStream(CHILD);
@@ -632,7 +634,7 @@ describe("InteractiveMode", () => {
 	test("v23 a listed closed stream survives its close and drops when it hides", () => {
 		const { view, mode, feed, control } = harness();
 		boot(control, feed);
-		feed({ type: "session_opened", id: CHILD, path: "", cwd: "", model: { provider: "p", model: "m1" }, resumed: false, parent: SESSION }, CHILD);
+		feed({ type: "session_opened", id: CHILD, path: "", cwd: "", resumed: false, parent: SESSION }, CHILD);
 		view.listed.add(CHILD);
 		feed({ type: "session_closed", id: CHILD }, CHILD);
 		// Listed ⇒ kept, with the note and the "closed" list word.
@@ -672,7 +674,7 @@ describe("InteractiveMode", () => {
 	test("M2 focus: submit and session commands route to the focused stream", () => {
 		const { backend, mode, feed, control } = harness();
 		boot(control, feed);
-		feed({ type: "session_opened", id: CHILD, path: "", cwd: "", model: { provider: "p", model: "m1" }, resumed: false, parent: SESSION }, CHILD);
+		feed({ type: "session_opened", id: CHILD, path: "", cwd: "", resumed: false, parent: SESSION }, CHILD);
 		mode.focusStream(CHILD);
 		assert.strictEqual(mode.focusedStream, CHILD);
 		mode.submit("steer the child");
@@ -696,7 +698,7 @@ describe("InteractiveMode", () => {
 		feed({ type: "run_finished", output: "", durable: true, started_at_ms: 0, completed_at_ms: 1 });
 
 		// Idle child focused: Esc walks to the parent, no abort sent.
-		feed({ type: "session_opened", id: CHILD, path: "", cwd: "", model: { provider: "p", model: "m1" }, resumed: false, parent: SESSION }, CHILD);
+		feed({ type: "session_opened", id: CHILD, path: "", cwd: "", resumed: false, parent: SESSION }, CHILD);
 		mode.focusStream(CHILD);
 		assert.strictEqual(mode.escape(), true);
 		assert.strictEqual(mode.focusedStream, SESSION);
@@ -716,7 +718,7 @@ describe("InteractiveMode", () => {
 		feed({ type: "user_message", entry_id: "e1", text: "delegate" });
 		feed({ type: "turn_started", id: "t1", started_at_ms: 0 });
 		feed({ type: "tool_call", turn_id: "t1", name: "subagent", call_id: "c1", internal_call_id: "i1", arguments: JSON.stringify({ task: "survey the diff landscape\nsecond line" }) });
-		feed({ type: "session_opened", id: CHILD, path: "", cwd: "", model: { provider: "p", model: "m1" }, resumed: false, parent: SESSION, parent_call: "i1" }, CHILD);
+		feed({ type: "session_opened", id: CHILD, path: "", cwd: "", resumed: false, parent: SESSION, parent_call: "i1" }, CHILD);
 		assert.deepStrictEqual(
 			view.subagents.map(e => ({ stream: e.stream, title: e.title, state: e.state })),
 			[{ stream: CHILD, title: "survey the diff landscape", state: "idle" }],
@@ -748,7 +750,7 @@ describe("InteractiveMode", () => {
 		feed({ type: "user_message", entry_id: "e1", text: "go" });
 		feed({ type: "turn_started", id: "t1", started_at_ms: 0 });
 		feed({ type: "tool_call", turn_id: "t1", name: "subagent", call_id: "c1", internal_call_id: "i1", arguments: JSON.stringify({ task: "fix the parser" }) });
-		feed({ type: "session_opened", id: CHILD, path: "", cwd: "", model: { provider: "p", model: "m1" }, resumed: false, parent: SESSION, parent_call: "i1" }, CHILD);
+		feed({ type: "session_opened", id: CHILD, path: "", cwd: "", resumed: false, parent: SESSION, parent_call: "i1" }, CHILD);
 		// The root stays focused — the child's card still surfaces, labeled.
 		feed({ type: "interaction_request", id: "ask-c", ui_type: "native:select_one", payload: { title: "Allow?", body: "", options: [{ label: "yes" }] } }, CHILD);
 		assert.strictEqual(view.cards.length, 1);
@@ -761,7 +763,8 @@ describe("InteractiveMode", () => {
 	test("M2 focus switch re-emits the dock from the focused stream; the footer names a focused child", () => {
 		const { view, mode, feed, control } = harness();
 		boot(control, feed);
-		feed({ type: "session_opened", id: CHILD, path: "", cwd: "/child/dir", model: { provider: "p", model: "child-model" }, resumed: false, parent: SESSION }, CHILD);
+		feed({ type: "session_opened", id: CHILD, path: "", cwd: "/child/dir", resumed: false, parent: SESSION }, CHILD);
+		feed({ type: "model_selected", provider: "p", model: "child-model" }, CHILD);
 		mode.focusStream(CHILD);
 		assert.strictEqual(view.shownStreams.at(-1), CHILD);
 		assert.strictEqual(view.footer?.streamLabel, CHILD); // no parent_call → title fallback is the id
@@ -782,7 +785,7 @@ describe("InteractiveMode", () => {
 		// Announced, the child folds on its own stamp: the pane records the
 		// stream, the list projection gains the row, the footer's facts stay
 		// the root's.
-		feed({ type: "session_opened", id: CHILD, path: "", cwd: "", model: { provider: "p", model: "m1" }, resumed: false, parent: SESSION }, CHILD);
+		feed({ type: "session_opened", id: CHILD, path: "", cwd: "", resumed: false, parent: SESSION }, CHILD);
 		feed({ type: "user_message", entry_id: "cx", text: "child prompt" }, CHILD);
 		assert.strictEqual(view.users.length, before + 1);
 		assert.strictEqual(view.userStreams.at(-1), CHILD);
@@ -834,8 +837,8 @@ describe("InteractiveMode", () => {
 	test("compaction envelope: steps meter like turns, end delivers the context length", () => {
 		const { view, feed, control } = harness();
 		boot(control, feed);
-		feed({ type: "session_opened", id: SESSION, path: "/w", model: { provider: "p", model: "m1" }, resumed: false });
-		feed({ type: "model_changed", provider: "p", model: "m1", thinking_level: null, context_window: 200000 });
+		feed({ type: "session_opened", id: SESSION, path: "/w", resumed: false });
+		feed({ type: "model_selected", provider: "p", model: "m1", thinking_level: null, context_window: 200000 });
 		feed({ type: "completion_call", turn_id: "t1", usage: { input_tokens: 900, output_tokens: 100, total_tokens: 1000, cached_input_tokens: 0, cache_creation_input_tokens: 0 }, cost: 0.001 });
 		assert.strictEqual(view.footer?.contextUsed, 1000);
 
@@ -858,7 +861,7 @@ describe("InteractiveMode", () => {
 	test("compaction failure: error note, status restored, nothing metered", () => {
 		const { view, feed, control } = harness();
 		boot(control, feed);
-		feed({ type: "session_opened", id: SESSION, path: "/w", model: { provider: "p", model: "m1" }, resumed: false });
+		feed({ type: "session_opened", id: SESSION, path: "/w", resumed: false });
 		feed({ type: "user_message", entry_id: "e1", text: "go" });
 		feed({ type: "compaction_begin" });
 		feed({ type: "compaction_failed", message: "provider down" });
@@ -909,10 +912,10 @@ describe("InteractiveMode", () => {
 		assert.ok((view.notes.at(-1)?.text ?? "").includes("providers.toml"));
 	});
 
-	test("the zero-config boot (v21): session_opened model null, no model_changed, the teaching note warns", () => {
+	test("the zero-config boot (v21/v24): no model_selected at creation, the teaching note warns", () => {
 		const { view, feed, control } = harness();
 		control({ type: "report", protocol_version: PROTOCOL_VERSION });
-		feed({ type: "session_opened", id: SESSION, path: "", cwd: "", model: null, resumed: false });
+		feed({ type: "session_opened", id: SESSION, path: "", cwd: "", resumed: false });
 		assert.strictEqual(view.footer?.model, undefined);
 		assert.strictEqual(view.footer?.modelName, undefined);
 		// The boot's teaching note rides error { kind: model } — a warning,
@@ -924,7 +927,7 @@ describe("InteractiveMode", () => {
 		feed({ type: "run_failed", kind: "model", message: "no model selected", started_at_ms: 1, completed_at_ms: 2 });
 		assert.strictEqual(view.notes.at(-1)?.kind, "error");
 		// The first model command lands the selection; facts arrive.
-		feed({ type: "model_changed", provider: "p", model: "m1", thinking_level: null, context_window: 1000 });
+		feed({ type: "model_selected", provider: "p", model: "m1", thinking_level: null, context_window: 1000 });
 		assert.strictEqual(view.footer?.model, "m1");
 		assert.strictEqual(view.footer?.contextWindow, 1000);
 	});
@@ -932,7 +935,7 @@ describe("InteractiveMode", () => {
 	test("the session tree: chain events feed it, checkout moves the head and rides the wire, /tree dispatches", () => {
 		const { backend, mode, feed, control } = harness();
 		boot(control, feed);
-		feed({ type: "session_opened", id: SESSION, path: "/w", model: { provider: "p", model: "m1" }, resumed: false });
+		feed({ type: "session_opened", id: SESSION, path: "/w", resumed: false });
 		feed({ type: "user_message", entry_id: "e1", text: "go" });
 		feed({ type: "turn_started", id: "t1", started_at_ms: 1 });
 		feed({ type: "text_delta", turn_id: "t1", text: "Working." });
@@ -960,7 +963,7 @@ describe("InteractiveMode", () => {
 		assert.partialDeepStrictEqual(mode.slashCommands().find(c => c.name === "tree"), { kind: "command" });
 
 		// A fresh session_opened resets the tree with the session.
-		feed({ type: "session_opened", id: SESSION, path: "/w", model: { provider: "p", model: "m1" }, resumed: false });
+		feed({ type: "session_opened", id: SESSION, path: "/w", resumed: false });
 		assert.strictEqual(mode.tree.size, 0);
 	});
 });

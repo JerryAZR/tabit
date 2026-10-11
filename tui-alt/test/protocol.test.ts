@@ -158,6 +158,6 @@ describe("protocol: toWireLine", () => {
 		// The report-model version check kills mismatches; a silent bump here
 		// would strand every copy of this frontend against a backend it can't
 		// talk to.
-		assert.strictEqual(PROTOCOL_VERSION, 23);
+		assert.strictEqual(PROTOCOL_VERSION, 24);
 	});
 });

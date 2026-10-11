@@ -71,7 +71,7 @@ function harness() {
 
 /** A replayed history tall enough to overflow the 40-row screen. */
 function feedTallReplay(feed: (event: Record<string, unknown>) => void): void {
-	feed({ type: "session_opened", id: SESSION, path: "", cwd: "", model: { provider: "p", model: "m" }, resumed: true });
+	feed({ type: "session_opened", id: SESSION, path: "", cwd: "", resumed: true });
 	feed({ type: "replay_begin", total: 8 });
 	feed({ type: "user_message", entry_id: "e0", text: "the top of history" });
 	for (let i = 0; i < 8; i++) {

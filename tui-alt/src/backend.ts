@@ -141,7 +141,7 @@ export class Backend {
 		this.send({ type: "checkout", session, entry_id: entryId });
 	}
 
-	/** Switch a session's model: a state write at receive — `model_changed`
+	/** Switch a session's model: a state write at receive — `model_selected`
 	 *  answers at once (or `error { kind: "model" }` when the ref is
 	 *  unknown). No thinking_level: null is always legal (the default). */
 	setModel(session: string, provider: string, model: string): void {

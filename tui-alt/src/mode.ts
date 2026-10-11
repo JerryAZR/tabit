@@ -205,7 +205,7 @@ export interface BackendLink {
 	 *  the outcome is `checked_out` + a full replay pass. */
 	checkout(session: string, entryId: string): void;
 	/** Switch the session's model (the `/model` picker's select).
-	 *  `model_changed` lands the resolved facts. */
+	 *  `model_selected` lands the resolved facts. */
 	setModel(session: string, provider: string, model: string): void;
 	interactionResponse(session: string, id: string, payload: unknown): void;
 	/** Store a provider key (v21) — the re-announced catalog is the ack. */
@@ -564,7 +564,7 @@ export class InteractiveMode {
 	}
 
 	/** The picker's select: fire the `model` command at the FOCUSED stream
-	 *  (a state write at receive; `model_changed` answers). */
+	 *  (a state write at receive; `model_selected` answers). */
 	switchModel(provider: string, model: string): void {
 		const s = this.#focusedState();
 		if (s !== undefined && this.#unlessClosed(s, "model switch")) this.#backend.setModel(s.id, provider, model);
@@ -1021,21 +1021,19 @@ export class InteractiveMode {
 		},
 		session_opened: (s, event) => {
 			// Registration already happened (#registerStream); here the facts
-			// fold. v21: null = no selection (the zero-config boot) — footer
-			// facts stay undefined until the first model command lands one.
-			s.provider = event.model?.provider;
-			s.model = event.model?.model;
+			// fold. The selection rides its own one home (v24): the stamped
+			// model_selected that follows at every visibility — creation
+			// included. A selection-less session (the zero-config boot) gets
+			// none until the first model command lands one.
+			s.provider = undefined;
+			s.model = undefined;
 			// Empty path = ephemeral session (nothing on disk to open).
 			s.path = event.path === "" ? undefined : event.path;
 			s.cwd = event.cwd === "" ? undefined : event.cwd;
 			s.resumed = event.resumed;
-			// Per-session facts reset here. A resumed session's model_changed
-			// (leading the replay pass) restates the resolved record; a FRESH
-			// session gets no register announcement at all today (backend gap,
-			// reported 2026-10) — until then a fresh footer honestly shows the
-			// bare id and no context bar. No catalog fallback by ruling: what
-			// the wire didn't state, the footer doesn't know. The pass still
-			// re-delivers completion_calls, so sums rebuild from history.
+			// Per-session facts reset here: the model_selected that follows
+			// restates the resolved record, and a replay pass re-delivers
+			// completion_calls, so sums rebuild from history.
 			s.modelName = undefined;
 			s.contextWindow = undefined;
 			s.rates = undefined;
@@ -1087,7 +1085,7 @@ export class InteractiveMode {
 				this.#view.addNote(s.id, "session closed — viewing only; nothing more is sent", "info");
 			}
 		},
-		model_changed: (s, event) => {
+		model_selected: (s, event) => {
 			s.provider = event.provider;
 			s.model = event.model;
 			s.modelName = event.name;

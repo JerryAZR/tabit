@@ -1,5 +1,5 @@
 /**
- * The tabit frontend wire vocabulary (FRONTEND.md, protocol v20), mirrored
+ * The tabit frontend wire vocabulary (FRONTEND.md, protocol v24), mirrored
  * from `crates/tabit-protocol` as TypeScript types, plus the lenient parse
  * a hand-rolled client owes the contract: JSON.parse first, switch on
  * known `type`s to a typed union, and hand everything unrecognized back as
@@ -11,7 +11,7 @@
  * v10: `session_created` deleted (the `new_session` outcome is a stamped
  * `session_opened`), `run_failed` typed with `kind`, Unix-ms timestamps on
  * the turn brackets and run terminals, and `session_opened.parent_call`
- * pairs a child with its spawning tool call. v11: `model_changed` carries
+ * pairs a child with its spawning tool call. v11: `model_selected` carries
  * the resolved model facts (`context_window`, `name`, `cost` — optional;
  * absent means the config does not state one). v12: per-turn usage is
  * complete (`completion_call` carries the full five-field `Usage`) and
@@ -54,7 +54,7 @@
  * views stay while focused or listed.
  */
 
-export const PROTOCOL_VERSION = 23;
+export const PROTOCOL_VERSION = 24;
 
 // ---------------------------------------------------------------------------
 // Commands (frontend → backend). Fire-and-forget; outcomes arrive as
@@ -91,13 +91,6 @@ export type ClientFrame = SessionCommand;
 export type ServerControlFrame =
 	| { type: "report"; protocol_version: number }
 	| { type: "protocol_error"; message: string };
-
-export interface ModelSelection {
-	provider: string;
-	model: string;
-	thinking_level?: string | null;
-}
-
 /** One model in a `models_available` provider row (v21): the id a `model`
  *  command addresses plus the facts config states. Every optional field
  *  follows the v11 rule — absent means the config does not state it,
@@ -149,7 +142,7 @@ export interface ModelCost {
 	cache_write: number;
 }
 
-/** The resolved model-record facts a `model_changed` carries (v11): all
+/** The resolved model-record facts a `model_selected` carries (v11): all
  *  optional — absent means the config does not state one, never zero. */
 export interface ModelFacts {
 	context_window?: number;
@@ -307,10 +300,6 @@ export type SessionEvent =
 			/** The session's working directory (v16): the boot's is the
 			 *  backend's cwd, a child's is its spawn cwd. */
 			cwd: string;
-			/** Nullable (v21): null = no selection (nothing usable at this
-			 *  backend — the zero-config boot); serialized present, never
-			 *  skipped. */
-			model: ModelSelection | null;
 			resumed: boolean;
 			parent?: string;
 			/** The spawning tool call's internal id — pairs the child with the exact open tool_call. */
@@ -319,7 +308,7 @@ export type SessionEvent =
 	| { type: "models_available"; providers: AvailableProvider[] }
 	| { type: "providers_available"; providers: ProviderStatus[] }
 	| {
-			type: "model_changed";
+			type: "model_selected";
 			provider: string;
 			model: string;
 			thinking_level?: string | null;
@@ -379,7 +368,7 @@ const EVENT_TYPES = new Set([
 	"skills_available",
 	"extensions_available",
 	"session_opened",
-	"model_changed",
+	"model_selected",
 	"models_available",
 	"providers_available",
 	"native_item",

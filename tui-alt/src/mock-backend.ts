@@ -236,11 +236,13 @@ async function subagentRun(session: string): Promise<void> {
 		id: CHILD,
 		path: "",
 		cwd: process.cwd(),
-		model: { provider: "mock", model: "child-model", thinking_level: null },
 		resumed: false,
 		parent: session,
 		parent_call: "int-sub-1",
 	});
+	// v24: the creation-time selection announcement — one home, every
+	// visibility path (children are full session hosts).
+	emitEvent(CHILD, { type: "model_selected", provider: "mock", model: "child-model", thinking_level: null });
 	emitEvent(CHILD, { type: "user_message", text: "survey the diff landscape", entry_id: nextId("entry-") });
 	await runTurn(CHILD, ["The child surveyed ", "three libraries ", "and preferred none.\n"]);
 	emitEvent(CHILD, {
@@ -440,7 +442,6 @@ emitEvent(BOOT, {
 	id: BOOT,
 	path: "",
 	cwd: process.cwd(),
-	model: { provider: "mock", model: "mock-model", thinking_level: null },
 	resumed: false,
 });
 emitEvent(BOOT, {
@@ -483,7 +484,7 @@ emitNow({
 });
 announceWorld();
 emitEvent(BOOT, {
-	type: "model_changed",
+	type: "model_selected",
 	provider: "mock",
 	model: "mock-model",
 	thinking_level: null,
@@ -622,7 +623,7 @@ stdin.on("line", line => {
 		}
 		case "model": {
 			// v21 picker path: existence-only validation against the usable
-			// catalog; a known ref announces model_changed at once.
+			// catalog; a known ref announces model_selected at once.
 			const provider = String(frame.provider);
 			const modelId = String(frame.model);
 			const row = world.find(p => p.id === provider && p.auth !== "none")?.models.find(m => m.id === modelId);
@@ -631,7 +632,7 @@ stdin.on("line", line => {
 				return;
 			}
 			emitEvent(String(frame.session), {
-				type: "model_changed",
+				type: "model_selected",
 				provider,
 				model: modelId,
 				thinking_level: null,

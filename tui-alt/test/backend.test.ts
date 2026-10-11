@@ -57,7 +57,7 @@ describe("backend: the child seam over the mock", () => {
 		assert.ok((types).includes("skills_available"));
 		assert.ok((types).includes("sessions_available"));
 		assert.ok((types).includes("models_available"));
-		assert.ok((types).includes("model_changed"));
+		assert.ok((types).includes("model_selected"));
 		assert.strictEqual(types[types.length - 1], "replay_end");
 		backend.shutdown();
 		const exit = await exitPromise;
