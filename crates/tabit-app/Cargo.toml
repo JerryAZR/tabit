@@ -14,16 +14,16 @@ serde = { workspace = true, features = ["derive"] }
 sha2 = { workspace = true }
 toml = { workspace = true }
 tracing = { workspace = true }
-tabit-engine = { path = "../tabit-engine", version = "0.1.0", default-features = false }
+tabit-engine = { path = "../tabit-engine", version = "0.2.0", default-features = false }
 # The tool-result cargo shapes extension proxies build.
-tabit-providers = { path = "../tabit-providers", version = "0.1.0", default-features = false }
+tabit-providers = { path = "../tabit-providers", version = "0.2.0", default-features = false }
 serde_json = { workspace = true }
-tabit-config = { path = "../tabit-config", version = "0.1.0" }
-tabit-ext = { path = "../tabit-ext", version = "0.1.0" }
-tabit-gate = { path = "../tabit-gate", version = "0.1.0" }
-tabit-protocol = { path = "../tabit-protocol", version = "0.1.0" }
-tabit-session = { path = "../tabit-session", version = "0.1.0" }
-tabit-tools = { path = "../tabit-tools", version = "0.1.0" }
+tabit-config = { path = "../tabit-config", version = "0.2.0" }
+tabit-ext = { path = "../tabit-ext", version = "0.2.0" }
+tabit-gate = { path = "../tabit-gate", version = "0.2.0" }
+tabit-protocol = { path = "../tabit-protocol", version = "0.2.0" }
+tabit-session = { path = "../tabit-session", version = "0.2.0" }
+tabit-tools = { path = "../tabit-tools", version = "0.2.0" }
 tokio = { workspace = true, features = ["rt", "macros"] }
 tokio-util = { version = "0.7", default-features = false }
 
@@ -31,7 +31,7 @@ tokio-util = { version = "0.7", default-features = false }
 httpmock = { workspace = true }
 # The gate hook's tests drive the engine's hook context double
 # (the same dev-feature split tabit-session uses).
-tabit-engine = { path = "../tabit-engine", version = "0.1.0", default-features = false, features = ["test-utils"] }
+tabit-engine = { path = "../tabit-engine", version = "0.2.0", default-features = false, features = ["test-utils"] }
 
 [lints]
 workspace = true

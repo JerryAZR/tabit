@@ -19,9 +19,9 @@ rustdoc-args = ["--cfg", "docsrs"]
 workspace = true
 
 [dependencies]
-tabit-providers = { path = "../tabit-providers", version = "0.1.0", default-features = false }
-tabit-engine = { path = "../tabit-engine", version = "0.1.0", optional = true, default-features = false }
-tabit-derive = { path = "../tabit-derive", version = "0.1.0", optional = true }
+tabit-providers = { path = "../tabit-providers", version = "0.2.0", default-features = false }
+tabit-engine = { path = "../tabit-engine", version = "0.2.0", optional = true, default-features = false }
+tabit-derive = { path = "../tabit-derive", version = "0.2.0", optional = true }
 
 [features]
 default = ["tabit-providers/default", "agent", "derive", "rustls"]
@@ -37,10 +37,10 @@ reqwest-middleware-rustls = ["tabit-providers/reqwest-middleware-rustls"]
 reqwest-middleware-native-tls = ["tabit-providers/reqwest-middleware-native-tls"]
 
 [dev-dependencies]
-tabit-providers = { path = "../tabit-providers", version = "0.1.0", default-features = false, features = [
+tabit-providers = { path = "../tabit-providers", version = "0.2.0", default-features = false, features = [
     "test-utils",
 ] }
-tabit-engine = { path = "../tabit-engine", version = "0.1.0", default-features = false, features = [
+tabit-engine = { path = "../tabit-engine", version = "0.2.0", default-features = false, features = [
     "test-utils",
 ] }
 tabit-log = { path = "../tabit-log" }
