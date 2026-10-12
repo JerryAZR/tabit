@@ -129,9 +129,10 @@ also accepts BMP~~ — **trimmed 2026-10**: the sniff table is the door's
 four formats exactly (PNG/JPEG/GIF/WebP).
 
 Chips share item 3's blocker (the editor's marker machinery is private)
-and its deferral. The catalog's per-model `input` modalities (v21) tell
-us whether the bound model accepts images at all — an early-warning UI
-can come later.
+and its deferral. ~~The catalog's per-model `input` modalities could
+drive a pasting-into-a-text-only-model warning~~ — **ruled out
+2026-10**: the backend intentionally sends images to non-vision models
+(most providers OCR them); no warning UI.
 
 ## 5. M2: child streams / focus switching — landed
 
@@ -144,9 +145,33 @@ discarded on switch); the region stack (transcript — editor — list) on
 alt+↑/↓ plus empty-editor ↓; the subagent list as the first widget over
 the projection seam (running always listed, idle hidden after 60s);
 view-independent cards labeled with their stream; the footer's stream
-badge. Remaining from the design's stated limits: the parent's tool card
-could gain a live `↳ <current tool>` line (the frames already fold);
-full no-effect-↓ semantics await a pi-tui public accessor.
+badge. The design's stated leftovers live in **Parked** below.
+
+## Parked (non-critical QoL; owner-ruled 2026-10)
+
+**Doable anytime** — no external blocker:
+
+- **Expanded views for user messages**: v25's `user_message.expanded`
+  (the model-visible fold) is folded nowhere — the transcript renders
+  the authored text. The later shape: a message block expands (the
+  Ctrl+O law's extension to user blocks) to show the fold.
+- **Per-child abort**: the 2026-10 Esc ruling made Esc navigation-only
+  for non-root streams, so only the root's abort exists (it cascades).
+  If the want materializes: a deliberate subagent-list row key,
+  designed then.
+- **Thinking-level cycle key**: `/thinking`'s picker landed; pi's ctrl+t
+  is our tree's. Add a binding only if the slash proves slow in use.
+- **The parent tool card's live `↳ <current tool>` line** (item 5's
+  leftover): the child's frames already fold into state — pure
+  rendering.
+
+**Waiting for pi-tui support**:
+
+- **Skill chips** (item 3): needs the editor's marker machinery public
+  (`registerChip(label, expansion)`) — upstreamable or carried in a
+  fork. The slash-tag interim works.
+- **No-effect-↓ in the editor** (item 5's leftover): needs a pi-tui
+  public accessor for the editor's emptiness/cursor state.
 
 ## 6. Merge-back hygiene (at the end)
 
