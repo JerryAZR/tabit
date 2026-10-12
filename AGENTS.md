@@ -57,10 +57,12 @@ docs carry the cross-cutting contracts:
 
 ## Design rules
 
-1. **API abstraction only — no model catalog.** No model-name
-   constants, no model-name-keyed branching anywhere. Users supply
-   provider endpoints, model ids, and parameters via their own config;
-   the framework passes them through.
+1. **API abstraction only — the binary ships no provider or model
+   knowledge.** No model-name constants, no name-keyed branching
+   anywhere. Provider and model knowledge enter at runtime: user
+   config, extension fragments, the downloaded catalog (PROVIDERS.md).
+   The two dialect engines are the whole of provider support;
+   deviations are observed first, then named (the quirk seam).
 2. **Front/back split.** Provider backends (wire clients, streaming,
    auth) stay strictly decoupled from front-facing logic (agents,
    sessions, tools, user config). Front-facing code never grows

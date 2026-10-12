@@ -48,7 +48,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let options = AppOptions::default();
     let config = TabitConfig::from_toml_str(PROVIDERS, Path::new("providers.toml"))?;
     let auth = AuthConfig::default();
-    let (registry, launchable) = world_registry(&options, config, Arc::new(auth))?;
+    let (registry, launchable) = world_registry(&options, config, None, Arc::new(auth))?;
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;

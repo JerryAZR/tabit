@@ -119,10 +119,13 @@ log decision, parked here.
 
 ### Config / registry follow-ups
 
-- **Dynamic model listing — deferred** (2026-09): `/v1/models`
-  returns ids only, not useful enough to ship. Recorded direction:
-  the provider catalog (curated per-model metadata) could ship as an
-  extension instead of core machinery.
+- **Dynamic model listing — dropped** (2026-09 ruling, confirmed
+  2026-10): `/v1/models` returns ids only. The recorded direction
+  landed differently (PROVIDERS.md): the model catalog is a
+  DOWNLOADED artifact (generated externally, refreshed by the
+  catalog manager) — the remaining piece is the generator itself
+  (its own project thread), plus the built-in mirror list's real
+  coordinates when it ships.
 - **Config reload — the `reload` command** (2026-10): an additive
   first cut — re-read config/auth, new keys and providers appear, the
   model catalog re-announces (`models_available`, FRONTEND.md §6).

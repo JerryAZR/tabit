@@ -469,6 +469,22 @@ impl ModelRegistry {
         if let Some(client) = lock(&self.inner.clients).get(provider_id) {
             return Ok(client.clone());
         }
+        // The quirk seam (PROVIDERS.md): the table parses into the
+        // engine's typed Quirks — currently an empty vocabulary, so
+        // any key errors loudly here rather than being silently
+        // ignored. When a quirk lands, it reaches the engine through
+        // this construction.
+        if let Some(quirks) = &provider.quirks
+            && let Some(key) = quirks.keys().next()
+        {
+            return Err(SessionError::Config {
+                message: format!(
+                    "provider `{provider_id}`: unknown quirk `{key}` for {} \
+                     (the quirk vocabulary is empty — no quirks exist yet)",
+                    provider.api
+                ),
+            });
+        }
         let client = match provider.api {
             WireApi::AnthropicMessages => ProviderClient::Anthropic(
                 anthropic::Client::builder()

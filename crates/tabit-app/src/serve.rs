@@ -107,6 +107,7 @@ fn json_reject(reason: String) -> ! {
 pub fn serve_json_stdio(
     options: &AppOptions,
     config: Result<TabitConfig, String>,
+    config_path: Option<std::path::PathBuf>,
     auth: Result<AuthConfig, String>,
 ) -> ! {
     // A broken config file is a graceful wire rejection carrying the
@@ -123,7 +124,8 @@ pub fn serve_json_stdio(
     // The extension world's data half (settings, scan, fragment
     // merge, skills, registry); a settings failure is a plain
     // startup failure.
-    let (registry, launchable) = match world_registry(options, config, Arc::new(auth)) {
+    let (registry, launchable) = match world_registry(options, config, config_path, Arc::new(auth))
+    {
         Ok(world) => world,
         Err(detail) => json_startup_failure(&detail),
     };

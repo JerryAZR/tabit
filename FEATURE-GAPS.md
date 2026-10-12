@@ -32,9 +32,11 @@ pi's minimal set. For later review and ruling; nothing here is approved work.
    fork-copy op and no summary on checkout.
 4. **Session export.** pi: self-contained HTML export, JSONL import, gist
    share. tabit: the log file is the only artifact.
-5. **Model listing on the wire.** Provider listing clients exist and are
-   cassette-tested, but no protocol command exposes them — FRONTEND.md
-   assumes the frontend reads the user's config to build a picker.
+5. **Model listing on the wire.** Resolved differently (2026-10,
+   PROVIDERS.md): the picker rides the downloaded catalog +
+   `models_available`; live listing was ruled out (ids only, no
+   context windows). The listing clients remain — their consumer is
+   the catalog generator, not the session.
 
 ## Tier 2 — pi models it in the backend; tabit doesn't (smaller)
 

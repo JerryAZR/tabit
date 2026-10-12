@@ -690,3 +690,28 @@ fn key_source_is_none_for_an_unknown_provider() {
         "unknown ids never cross the wire"
     );
 }
+
+#[test]
+fn a_quirk_key_errors_loudly_at_client_construction() {
+    let registry = registry_with(
+        r#"
+[providers.local]
+base_url = "http://127.0.0.1:1234/v1"
+api = "openai-completions"
+quirks = { nope = true }
+
+[[providers.local.models]]
+id = "m"
+"#,
+        r#"
+[providers.local]
+api_key = "dummy"
+"#,
+    );
+    let err = registry
+        .build("local", "m", "test-cache-key")
+        .expect_err("a quirk key must not be silently ignored");
+    let msg = err.to_string();
+    assert!(msg.contains("unknown quirk `nope`"), "{msg}");
+    assert!(msg.contains("openai-completions"), "{msg}");
+}

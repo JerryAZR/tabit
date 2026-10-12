@@ -2,7 +2,8 @@
 
 The provider-support design: standard dialects only, a downloaded
 model catalog, and the seams that replace provider-specific code.
-**Status: design under review — nothing here is implemented.**
+**Status: implemented (core side), except where marked.** The
+generator is a separate project thread.
 Owner rulings this design encodes (2026-10):
 
 - **Rule 1 stands, sharpened — the binary ships zero provider
@@ -122,9 +123,21 @@ against the standard engines like any config.
 ids only — no context windows, no costs — not useful enough to ship.
 A provider the downloaded catalog doesn't know (a local server, a
 user-declared endpoint) gets its models from `providers.toml` exactly
-as before. The catalog's merge semantics: a listed model keeps
-user-declared metadata verbatim; generated data *fills* new ids and
-*annotates* unset fields, never overriding a set field.
+as before.
+
+**Merge granularity (as implemented).** A provider the config already
+has merges at MODEL granularity: catalog models fill in under it, and
+a model id the config declares wins WHOLE. The design's finer
+"annotates unset fields" rule died on a real ambiguity: post-parse, an
+explicit `reasoning = false` is indistinguishable from an absent key,
+so field-level annotation needs a value-level config pipeline — not
+worth it. Whole-model wins are explainable and sufficient: with the
+catalog providing full entries, a sparse user entry is the user's own
+choice (delete the entry to get the catalog's).
+
+**The built-in mirror list is empty until the generator ships** its
+coordinates — with no `catalog.urls` configured the channel is inert
+(a documented constant, not a fallback).
 
 ## The generator (interface settled; implementation elsewhere)
 

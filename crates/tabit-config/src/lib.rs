@@ -104,7 +104,7 @@ pub use auth::{AuthConfig, AuthEntry, default_path as auth_default_path};
 pub use error::ConfigError;
 pub use model::{Cost, InputModality, Model, SamplingParams};
 pub use provider::Provider;
-pub use settings::{ExtensionsSettings, SettingsConfig};
+pub use settings::{CatalogSettings, ExtensionsSettings, SettingsConfig};
 pub use wire::WireApi;
 
 use serde::Deserialize;
@@ -242,10 +242,17 @@ impl TabitConfig {
     /// silent fallthrough — and a parse error in an existing file is
     /// an error either way.
     pub fn load_default() -> Result<Self, ConfigError> {
+        Self::load_default_located().map(|(config, _path)| config)
+    }
+
+    /// [`load_default`](Self::load_default), plus the path of the file
+    /// actually read (`None` on a bare machine) — the catalog
+    /// manager's auto file lands next to it (PROVIDERS.md).
+    pub fn load_default_located() -> Result<(Self, Option<PathBuf>), ConfigError> {
         let candidates = default_config_paths();
         for path in &candidates {
             if path.is_file() {
-                return Self::load(path);
+                return Self::load(path).map(|config| (config, Some(path.clone())));
             }
         }
         // Nothing exists. A bare machine (no explicit pointer set)
@@ -254,7 +261,7 @@ impl TabitConfig {
         if std::env::var_os("TABIT_CONFIG").is_none()
             && std::env::var_os("TABIT_CONFIG_EXTRA").is_none()
         {
-            return Ok(Self::default());
+            return Ok((Self::default(), None));
         }
         Err(ConfigError::NotFound { paths: candidates })
     }
