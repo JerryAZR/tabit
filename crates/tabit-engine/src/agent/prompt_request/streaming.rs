@@ -121,7 +121,10 @@ pub enum MultiTurnStreamItem {
     ///     MultiTurnStreamItem::CompletionCall(completion_call) => {
     ///         // Zero-valued usage means the provider reported no metrics.
     ///         if completion_call.usage.has_values() {
-    ///             let context_tokens = completion_call.usage.input_tokens;
+    ///             // The usage legs are disjoint (see `completion::Usage`):
+    ///             // the context the next request re-reads is input + cached.
+    ///             let context_tokens = completion_call.usage.input_tokens
+    ///                 + completion_call.usage.cached_input_tokens;
     ///         }
     ///     }
     ///     _ => {}

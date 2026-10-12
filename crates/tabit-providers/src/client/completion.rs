@@ -70,6 +70,7 @@ mod tests {
             temperature: None,
             max_tokens: None,
             tool_choice: None,
+            thinking_level: None,
             additional_params: None,
         }
     }

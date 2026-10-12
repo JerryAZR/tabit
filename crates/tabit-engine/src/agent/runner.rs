@@ -192,6 +192,7 @@ pub struct AgentRunner {
     pub(crate) static_context: Vec<Document>,
     pub(crate) temperature: Option<f64>,
     pub(crate) max_tokens: Option<u64>,
+    pub(crate) thinking_level: Option<String>,
     pub(crate) additional_params: Option<serde_json::Value>,
     pub(crate) tool_server_handle: ToolServerHandle,
     /// Typed context cloned freshly for every tool dispatch.
@@ -269,6 +270,7 @@ impl AgentRunner {
             static_context: agent.static_context.clone(),
             temperature: agent.temperature,
             max_tokens: agent.max_tokens,
+            thinking_level: agent.thinking_level.clone(),
             additional_params: agent.additional_params.clone(),
             tool_server_handle: agent.tool_server_handle.clone(),
             tool_context: ToolContext::new(),

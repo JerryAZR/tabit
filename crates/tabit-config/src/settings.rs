@@ -28,6 +28,37 @@ pub struct SettingsConfig {
     /// The built-in permission gate (`tabit-gate`): on by default,
     /// any layer may turn it off.
     pub gate: GateSettings,
+    /// The model catalog channel (PROVIDERS.md).
+    pub catalog: CatalogSettings,
+}
+
+/// The model catalog channel's settings (PROVIDERS.md): the manager
+/// downloads a generated catalog and merges it as
+/// `providers.auto.toml`.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct CatalogSettings {
+    /// Whether the channel runs at all. `true` unless a layer says
+    /// otherwise — the one network posture the catalog adds is
+    /// read-only and failure-soft, and this is the explicit opt-out.
+    pub auto_update: bool,
+    /// How long a downloaded catalog is fresh, in hours.
+    pub ttl_hours: u64,
+    /// The ordered mirror list (first success wins). Empty means the
+    /// built-in defaults (PROVIDERS.md); setting it REPLACES the
+    /// defaults — the explicit-pointer rule, never a silent
+    /// fallthrough.
+    pub urls: Vec<String>,
+}
+
+impl Default for CatalogSettings {
+    fn default() -> Self {
+        Self {
+            auto_update: true,
+            ttl_hours: 24,
+            urls: Vec::new(),
+        }
+    }
 }
 
 /// Extension host settings.

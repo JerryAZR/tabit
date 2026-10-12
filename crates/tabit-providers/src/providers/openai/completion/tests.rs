@@ -1,3 +1,45 @@
+#[test]
+fn thinking_level_realizes_as_reasoning_effort() {
+    let base = crate::completion::CompletionRequest {
+        model: None,
+        preamble: None,
+        chat_history: OneOrMany::one(crate::completion::Message::from("Hi")),
+        documents: Vec::new(),
+        tools: Vec::new(),
+        temperature: None,
+        max_tokens: None,
+        tool_choice: None,
+        thinking_level: None,
+        additional_params: None,
+    };
+    let build = |level: Option<&str>| {
+        let request = crate::completion::CompletionRequest {
+            thinking_level: level.map(str::to_string),
+            ..base.clone()
+        };
+        crate::providers::openai::completion::CompletionRequest::try_from((
+            "some-model".to_string(),
+            request,
+        ))
+    };
+
+    assert_eq!(
+        build(Some("high")).expect("high converts").reasoning_effort,
+        Some("high".to_string())
+    );
+    assert_eq!(
+        build(Some("off")).expect("off converts").reasoning_effort,
+        None,
+        "this dialect's off is the omitted field"
+    );
+    assert_eq!(
+        build(None).expect("no level converts").reasoning_effort,
+        None
+    );
+    let err = build(Some("bogus")).expect_err("bogus is not a level");
+    assert!(err.to_string().contains("bogus"), "{err}");
+}
+
 /// Boundary-minted tool ids (`tool-{index}`, from id-less streamed calls)
 /// replay to the chat wire as a self-consistent pair: the assistant
 /// message's `tool_calls[].id` and the tool result's `tool_call_id` carry
@@ -100,6 +142,7 @@ fn request_with_multi_block_tool_result() -> CoreCompletionRequest {
         temperature: None,
         max_tokens: None,
         tool_choice: None,
+        thinking_level: None,
         additional_params: None,
     }
 }
@@ -265,6 +308,7 @@ fn orphan_tool_result_history_fails_request_conversion() {
         temperature: None,
         max_tokens: None,
         tool_choice: None,
+        thinking_level: None,
         additional_params: None,
     };
 
@@ -334,6 +378,7 @@ fn test_openai_request_uses_request_model_override() {
         temperature: None,
         max_tokens: None,
         tool_choice: None,
+        thinking_level: None,
         additional_params: None,
     };
 
@@ -361,6 +406,7 @@ fn test_openai_request_uses_default_model_when_override_unset() {
         temperature: None,
         max_tokens: None,
         tool_choice: None,
+        thinking_level: None,
         additional_params: None,
     };
 
@@ -397,6 +443,7 @@ fn additional_params_function_tools_merge_and_native_tools_stay() {
         temperature: None,
         max_tokens: None,
         tool_choice: None,
+        thinking_level: None,
         additional_params: Some(serde_json::json!({
             "tools": [
                 {
@@ -446,6 +493,7 @@ fn additional_params_function_tools_merge_and_native_tools_stay() {
     // the serialized body carries the merged list under `tools` with no
     // flattened collision.
     let request = crate::completion::CompletionRequest {
+        thinking_level: None,
         additional_params: Some(serde_json::json!({
             "tools": [
                 {
@@ -554,6 +602,7 @@ fn openai_chat_direct_request_keeps_documents_after_system_messages() {
         temperature: None,
         max_tokens: None,
         tool_choice: None,
+        thinking_level: None,
         additional_params: None,
     };
 
@@ -690,6 +739,7 @@ fn test_max_tokens_is_forwarded_to_request() {
         temperature: None,
         max_tokens: Some(4096),
         tool_choice: None,
+        thinking_level: None,
         additional_params: None,
     };
 
@@ -717,6 +767,7 @@ fn test_max_tokens_omitted_when_none() {
         temperature: None,
         max_tokens: None,
         tool_choice: None,
+        thinking_level: None,
         additional_params: None,
     };
 
@@ -747,6 +798,7 @@ fn request_conversion_errors_when_all_messages_are_filtered() {
         temperature: None,
         max_tokens: None,
         tool_choice: None,
+        thinking_level: None,
         additional_params: None,
     };
 
@@ -1229,6 +1281,7 @@ fn core_request(history: Vec<message::Message>) -> CoreCompletionRequest {
         temperature: None,
         max_tokens: None,
         tool_choice: None,
+        thinking_level: None,
         additional_params: None,
     }
 }
@@ -2056,6 +2109,7 @@ async fn completion_logs_request_and_response_bodies_at_trace_level() {
 #[test]
 fn malformed_additional_params_tools_fail_loudly() {
     let request = crate::completion::CompletionRequest {
+        thinking_level: None,
         additional_params: Some(serde_json::json!({"tools": "not-an-array"})),
         model: None,
         preamble: None,
@@ -2083,6 +2137,7 @@ fn malformed_additional_params_tools_fail_loudly() {
     );
 
     let request = crate::completion::CompletionRequest {
+        thinking_level: None,
         additional_params: Some(serde_json::json!({
             "tools": [
                 {"type": "function", "function": {"description": "no name"}}

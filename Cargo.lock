@@ -2945,7 +2945,11 @@ name = "tabit-app"
 version = "0.1.0"
 dependencies = [
  "futures",
+ "httpmock",
+ "reqwest",
+ "serde",
  "serde_json",
+ "sha2",
  "tabit-config",
  "tabit-engine",
  "tabit-ext",
@@ -2956,6 +2960,8 @@ dependencies = [
  "tabit-tools",
  "tokio",
  "tokio-util",
+ "toml",
+ "tracing",
 ]
 
 [[package]]

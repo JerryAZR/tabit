@@ -46,7 +46,10 @@ use tabit_app::{install_root, mount_world, serve_json_stdio, setup_guide, world_
 
 fn run() -> Result<i32, String> {
     let args = parse_args()?;
-    let config = TabitConfig::load_default().map_err(|e| e.to_string());
+    let (config, config_path) = match TabitConfig::load_default_located() {
+        Ok((config, path)) => (Ok(config), path),
+        Err(detail) => (Err(detail.to_string()), None),
+    };
     let auth = AuthConfig::load_default().map_err(|e| e.to_string());
 
     // Sanctioned crash (AGENTS.md doctrine): parse rejects modeless
@@ -118,7 +121,7 @@ fn run() -> Result<i32, String> {
             println!("uninstalled {name}");
             Ok(0)
         }
-        Mode::Json => serve_json_stdio(&args.options(), config, auth),
+        Mode::Json => serve_json_stdio(&args.options(), config, config_path, auth),
         Mode::Print => {
             let config = config.map_err(|e| setup_guide(&e))?;
             let auth = auth.map_err(|e| e.to_string())?;
@@ -126,7 +129,8 @@ fn run() -> Result<i32, String> {
             // 2026-09-27): an installed package exists in every mode.
             // The runtime is the boot's and the run's one serving
             // runtime — the supervisor's watchers outlive the boot.
-            let (registry, launchable) = world_registry(&args.options(), config, Arc::new(auth))?;
+            let (registry, launchable) =
+                world_registry(&args.options(), config, config_path, Arc::new(auth))?;
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()

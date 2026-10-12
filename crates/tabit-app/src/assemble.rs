@@ -403,6 +403,7 @@ pub fn extension_root(args: &AppOptions) -> Option<PathBuf> {
 pub fn world_registry(
     args: &AppOptions,
     config: tabit_config::TabitConfig,
+    config_path: Option<std::path::PathBuf>,
     auth: std::sync::Arc<tabit_config::AuthConfig>,
 ) -> Result<(ModelRegistry, Launchable), String> {
     // Settings (the extension disable list's layers): absence is
@@ -426,6 +427,20 @@ pub fn world_registry(
     let mut warnings = Vec::new();
     for (name, dir) in &launchable.packages {
         merge_fragment_into(&mut merged, name, dir, &user_ids, &mut warnings);
+    }
+    // The downloaded catalog merges last (PROVIDERS.md: user config >
+    // extension fragments > providers.auto.toml), and a background
+    // refresh keeps it fresh — best-effort: no runtime (a sync
+    // caller), no mirrors configured yet, a concurrent refresher, or
+    // a dead channel all just skip.
+    if let Some(auto_path) = crate::catalog::auto_path(config_path.as_deref()) {
+        crate::catalog::merge_auto(&mut merged, &auto_path, &mut warnings);
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            let catalog_settings = settings.catalog.clone();
+            handle.spawn(async move {
+                crate::catalog::refresh(&catalog_settings, &auto_path).await;
+            });
+        }
     }
     for warning in &warnings {
         eprintln!("warning: {warning}");

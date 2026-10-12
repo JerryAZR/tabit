@@ -76,8 +76,9 @@ buffers the response, and answers a `select_one` card from stdin.
 
 ```rust
 let options = AppOptions { tools: Some("read".into()), ..Default::default() };
-// config by value; auth as Arc
-let (registry, launchable) = world_registry(&options, config, Arc::new(auth))?;
+// config by value; its source path (locates the catalog's auto file
+// beside it — PROVIDERS.md); auth as Arc
+let (registry, launchable) = world_registry(&options, config, config_path, Arc::new(auth))?;
 let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
 let mounted = mount_world(launchable, &runtime);
 let (session, notes) = assemble(&options, &registry, &store, ContinueMiss::Fail, Some(mounted.clone()))?;
@@ -94,7 +95,7 @@ executable with `--json` child-role flags (the "no exceptions"
 ruling). Two ways to make that correct in your app:
 
 1. Dispatch the child role in your `main` to
-   `tabit_app::serve_json_stdio(&options, config_result, auth_result)`
+   `tabit_app::serve_json_stdio(&options, config_result, config_path, auth_result)`
    — your binary then speaks the frozen wire exactly as `tabit-core`
    does, and self-spawn just works. The function never returns; it
    owns the process exit (rejection frames and the served code).

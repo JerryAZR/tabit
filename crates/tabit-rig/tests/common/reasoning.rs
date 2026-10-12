@@ -92,6 +92,7 @@ pub(crate) async fn run_reasoning_roundtrip_streaming_with_final<M, F>(
     };
 
     let request = completion::CompletionRequest {
+        thinking_level: None,
         preamble: Some(agent.preamble.clone()),
         chat_history: OneOrMany::one(turn1_prompt.clone()),
         documents: vec![],
@@ -172,6 +173,7 @@ pub(crate) async fn run_reasoning_roundtrip_streaming_with_final<M, F>(
     };
 
     let request2 = completion::CompletionRequest {
+        thinking_level: None,
         preamble: Some(agent.preamble.clone()),
         chat_history: OneOrMany::many(vec![turn1_prompt, turn1_assistant, turn2_prompt])
             .expect("non-empty"),
@@ -222,6 +224,7 @@ where
     };
 
     let request = completion::CompletionRequest {
+        thinking_level: None,
         preamble: Some(agent.preamble.clone()),
         chat_history: OneOrMany::one(turn1_prompt.clone()),
         documents: vec![],
@@ -266,6 +269,7 @@ where
     };
 
     let request2 = completion::CompletionRequest {
+        thinking_level: None,
         preamble: Some(agent.preamble.clone()),
         chat_history: OneOrMany::many(vec![turn1_prompt, turn1_assistant, turn2_prompt])
             .expect("non-empty"),

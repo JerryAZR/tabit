@@ -30,6 +30,7 @@
 )]
 
 pub mod assemble;
+pub(crate) mod catalog;
 pub mod extensions;
 pub mod gate;
 pub mod options;

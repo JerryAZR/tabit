@@ -9,6 +9,11 @@ description = "The tabit composition root: the opinionated assembly (toolset, ex
 
 [dependencies]
 futures = { workspace = true }
+reqwest = { workspace = true, features = ["rustls"] }
+serde = { workspace = true, features = ["derive"] }
+sha2 = { workspace = true }
+toml = { workspace = true }
+tracing = { workspace = true }
 tabit-engine = { path = "../tabit-engine", version = "0.1.0", default-features = false }
 # The tool-result cargo shapes extension proxies build.
 tabit-providers = { path = "../tabit-providers", version = "0.1.0", default-features = false }
@@ -23,6 +28,7 @@ tokio = { workspace = true, features = ["rt", "macros"] }
 tokio-util = { version = "0.7", default-features = false }
 
 [dev-dependencies]
+httpmock = { workspace = true }
 # The gate hook's tests drive the engine's hook context double
 # (the same dev-feature split tabit-session uses).
 tabit-engine = { path = "../tabit-engine", version = "0.1.0", default-features = false, features = ["test-utils"] }

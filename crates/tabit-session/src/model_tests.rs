@@ -13,12 +13,8 @@ api = "openai-completions"
 
 [[providers.local.models]]
 id = "m"
+thinking_levels = ["off", "high"]
 
-[[providers.local.models.thinking_levels]]
-name = "off"
-
-[[providers.local.models.thinking_levels]]
-name = "high"
 "#,
             Path::new("providers.toml"),
         )

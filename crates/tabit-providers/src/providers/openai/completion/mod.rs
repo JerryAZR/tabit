@@ -1231,17 +1231,24 @@ impl From<Usage> for crate::completion::Usage {
 
 impl Usage {
     /// Normalize this provider usage payload into rig's [`crate::completion::Usage`].
+    ///
+    /// The wire's `prompt_tokens` INCLUDES cache reads
+    /// (`prompt_tokens_details.cached_tokens` is a subset); the shared
+    /// usage record is disjoint (see [`crate::completion::Usage`]), so
+    /// uncached input is the difference.
     pub fn to_normalized(&self) -> crate::completion::Usage {
+        let cached = self
+            .prompt_tokens_details
+            .as_ref()
+            .map(|d| d.cached_tokens as u64)
+            .unwrap_or(0);
         let mut usage = crate::providers::internal::completion_usage(
-            self.prompt_tokens as u64,
+            (self.prompt_tokens as u64).saturating_sub(cached),
             self.completion_tokens
                 .unwrap_or_else(|| self.total_tokens.saturating_sub(self.prompt_tokens))
                 as u64,
             self.total_tokens as u64,
-            self.prompt_tokens_details
-                .as_ref()
-                .map(|d| d.cached_tokens as u64)
-                .unwrap_or(0),
+            cached,
         );
         usage.reasoning_tokens = self
             .completion_tokens_details
@@ -1487,6 +1494,9 @@ pub struct CompletionRequest {
     pub temperature: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u64>,
+    /// The thinking level, natively (`reasoning_effort`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
     #[serde(flatten)]
     pub additional_params: Option<serde_json::Value>,
 }
@@ -1546,8 +1556,29 @@ impl TryFrom<OpenAIRequestParams> for CompletionRequest {
             max_tokens,
             additional_params,
             tool_choice,
+            thinking_level,
             ..
         } = req;
+
+        // The thinking level, natively. This dialect's `off` is the
+        // omitted field; a level outside the documented enum is a
+        // loud build error (PROVIDERS.md).
+        let reasoning_effort = match thinking_level.as_deref() {
+            None | Some("off") => None,
+            Some(level) => Some(
+                crate::completion::ThinkingLevel::parse(level)
+                    .map(|parsed| parsed.as_str().to_string())
+                    .ok_or_else(|| {
+                        CompletionError::RequestError(
+                            format!(
+                                "unknown thinking level `{level}` for openai-completions \
+                                 (supported: off, minimal, low, medium, high, xhigh, max)"
+                            )
+                            .into(),
+                        )
+                    })?,
+            ),
+        };
 
         let mut partial_history = Vec::new();
         partial_history.extend(chat_history);
@@ -1667,6 +1698,7 @@ impl TryFrom<OpenAIRequestParams> for CompletionRequest {
             tool_choice,
             temperature,
             max_tokens,
+            reasoning_effort,
             additional_params,
         };
 
