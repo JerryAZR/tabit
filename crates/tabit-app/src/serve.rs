@@ -124,12 +124,9 @@ pub fn serve_json_stdio(
     // The extension world's data half (settings, scan, fragment
     // merge, skills, registry); a settings failure is a plain
     // startup failure.
-    let (registry, launchable) = match world_registry(options, config, config_path, Arc::new(auth))
-    {
-        Ok(world) => world,
-        Err(detail) => json_startup_failure(&detail),
-    };
-    let registry = Arc::new(registry);
+    // The runtime comes FIRST: world_registry spawns the catalog
+    // refresh onto the ambient runtime (Handle::try_current), so the
+    // runtime must exist and be entered before the world builds.
     let runtime = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -137,6 +134,13 @@ pub fn serve_json_stdio(
         Ok(runtime) => runtime,
         Err(error) => json_startup_failure(&error.to_string()),
     };
+    let _runtime_guard = runtime.enter();
+    let (registry, launchable) = match world_registry(options, config, config_path, Arc::new(auth))
+    {
+        Ok(world) => world,
+        Err(detail) => json_startup_failure(&detail),
+    };
+    let registry = Arc::new(registry);
     // The extension host boots and every handshake resolves BEFORE
     // the session assembly: tools exist at session build (the
     // byte-stability law), and the cost is the slowest single

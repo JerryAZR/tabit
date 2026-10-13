@@ -96,6 +96,12 @@ fn stage_child_config(tag: &str, server: &MockServer) -> PathBuf {
         server.port()
     );
     std::fs::write(&config_path, toml).expect("write child config");
+    // The catalog refresh stays out of tests (rule 5: offline) —
+    // the child's settings layer carries the knob.
+    let settings_path = dir.join("child-settings.toml");
+    std::fs::write(&settings_path, "[catalog]\nauto_update = false\n")
+        .expect("write child settings");
+    unsafe { std::env::set_var("TABIT_SETTINGS", &settings_path) };
     config_path
 }
 
@@ -359,6 +365,7 @@ async fn a_subprocess_child_announces_streams_and_answers_over_the_real_binary()
     #[allow(unsafe_code, clippy::missing_safety_doc)]
     unsafe {
         std::env::remove_var("TABIT_CONFIG");
+        std::env::remove_var("TABIT_SETTINGS");
     }
 }
 
@@ -516,6 +523,7 @@ async fn aborting_the_parent_returns_promptly_and_the_child_flushes_its_terminal
     #[allow(unsafe_code, clippy::missing_safety_doc)]
     unsafe {
         std::env::remove_var("TABIT_CONFIG");
+        std::env::remove_var("TABIT_SETTINGS");
     }
 }
 
@@ -622,6 +630,7 @@ async fn a_preamble_override_replaces_the_preamble_and_appends_the_context() {
     #[allow(unsafe_code, clippy::missing_safety_doc)]
     unsafe {
         std::env::remove_var("TABIT_CONFIG");
+        std::env::remove_var("TABIT_SETTINGS");
     }
 }
 
@@ -717,6 +726,7 @@ async fn the_forwarded_blacklist_shapes_the_childs_toolset() {
     #[allow(unsafe_code, clippy::missing_safety_doc)]
     unsafe {
         std::env::remove_var("TABIT_CONFIG");
+        std::env::remove_var("TABIT_SETTINGS");
     }
 }
 
@@ -968,6 +978,7 @@ id = "m"
     #[allow(unsafe_code, clippy::missing_safety_doc)]
     unsafe {
         std::env::remove_var("TABIT_CONFIG");
+        std::env::remove_var("TABIT_SETTINGS");
     }
 }
 
@@ -1213,6 +1224,7 @@ async fn a_followup_continues_the_same_child_session_across_runs() {
     #[allow(unsafe_code, clippy::missing_safety_doc)]
     unsafe {
         std::env::remove_var("TABIT_CONFIG");
+        std::env::remove_var("TABIT_SETTINGS");
     }
 }
 
@@ -1377,6 +1389,7 @@ async fn a_parked_subagent_lives_five_idle_turns_then_collects() {
     #[allow(unsafe_code, clippy::missing_safety_doc)]
     unsafe {
         std::env::remove_var("TABIT_CONFIG");
+        std::env::remove_var("TABIT_SETTINGS");
     }
 }
 
@@ -1477,5 +1490,6 @@ async fn a_failed_followup_reaps_the_child_and_the_next_address_is_the_expiry() 
     #[allow(unsafe_code, clippy::missing_safety_doc)]
     unsafe {
         std::env::remove_var("TABIT_CONFIG");
+        std::env::remove_var("TABIT_SETTINGS");
     }
 }

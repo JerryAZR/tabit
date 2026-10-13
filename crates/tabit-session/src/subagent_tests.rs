@@ -210,6 +210,13 @@ async fn a_childs_first_frames_reach_the_node_fan() {
     )
     .expect("the offline provider fragment");
     unsafe { std::env::set_var("TABIT_CONFIG", dir.join("providers.toml")) };
+    // The catalog refresh stays out of tests (rule 5: offline).
+    std::fs::write(
+        dir.join("settings.toml"),
+        "[catalog]\nauto_update = false\n",
+    )
+    .expect("settings");
+    unsafe { std::env::set_var("TABIT_SETTINGS", dir.join("settings.toml")) };
 
     let node = std::sync::Arc::new(tabit_wire::node::Node::new("test"));
     let seen: std::sync::Arc<std::sync::Mutex<Vec<String>>> =
@@ -309,6 +316,13 @@ id = \"dead\"
     )
     .expect("the offline provider fragment");
     unsafe { std::env::set_var("TABIT_CONFIG", dir.join("providers.toml")) };
+    // The catalog refresh stays out of tests (rule 5: offline).
+    std::fs::write(
+        dir.join("settings.toml"),
+        "[catalog]\nauto_update = false\n",
+    )
+    .expect("settings");
+    unsafe { std::env::set_var("TABIT_SETTINGS", dir.join("settings.toml")) };
 
     let node = std::sync::Arc::new(tabit_wire::node::Node::new("test"));
     let parts = std::sync::Arc::new(super::SubagentParts {

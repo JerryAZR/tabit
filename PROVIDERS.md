@@ -135,13 +135,24 @@ worth it. Whole-model wins are explainable and sufficient: with the
 catalog providing full entries, a sparse user entry is the user's own
 choice (delete the entry to get the catalog's).
 
-**The built-in mirror list is empty until the generator ships** its
-coordinates — with no `catalog.urls` configured the channel is inert
-(a documented constant, not a fallback).
+**The built-in mirror list ships the generator's coordinates**
+(`catalog.rs::BUILTIN_MIRRORS`): jsDelivr first (reliable from China),
+GitHub raw second. An empty `catalog.urls` means the built-ins; a
+configured list REPLACES them — the explicit-pointer rule, never a
+silent fallthrough. The generator publishes a `catalog` branch: the
+default list at the root, variant lists (cn, global, openrouter) in
+subdirectories — a subdirectory is just another base URL, so a
+variant is chosen by pointing `catalog.urls` at it (single-select;
+multi-list union was discussed and deferred as unneeded).
 
-## The generator (interface settled; implementation elsewhere)
+## The generator
 
-What it must provide — the contract the core side consumes:
+Lives at `~/Projects/agents/tabit-catalog` (own repo, own CI cadence;
+deps `tabit-config` from crates.io and round-trips every artifact
+through `TabitConfig::from_toml_str` before stamping — the consumer
+is the schema authority). Its CI publishes the `catalog` branch on
+push and daily. What it provides — the contract the core side
+consumes:
 
 - `latest.toml`: `{ version, sha256, min_schema }`; the artifact
   `catalog-<version>.toml`.
@@ -167,7 +178,7 @@ publication) is designed in the generator's project space, not here.
   for duplicated per-model blocks (the owner's glm thinking blocks
   were the exhibit).
 - `thinking_levels`: plain strings (above).
-- `catalog_urls`, `catalog.auto_update`, cache TTL: new config keys.
+- `[catalog]` settings: `urls` (empty = the built-in mirrors), `auto_update`, `ttl_hours`.
 
 ## Validation: how sync is enforced locally
 

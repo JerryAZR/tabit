@@ -165,15 +165,6 @@ async fn auto_update_off_is_a_noop() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-#[tokio::test]
-async fn an_empty_mirror_list_is_inert() {
-    let dir = temp_dir("empty");
-    let auto = dir.join("providers.auto.toml");
-    refresh(&settings(Vec::new()), &auto).await;
-    assert!(!auto.exists());
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
 #[test]
 fn merge_auto_fills_models_under_a_declared_provider() {
     let mut config = TabitConfig::from_toml_str(
@@ -255,5 +246,23 @@ fn a_corrupt_auto_file_warns_and_is_skipped() {
 
     assert_eq!(warnings.len(), 1, "one warning: {warnings:?}");
     assert!(config.providers.is_empty());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+#[ignore = "live channel check — run manually"]
+async fn live_jsdelivr_channel_end_to_end() {
+    let dir = temp_dir("live");
+    let auto = dir.join("providers.auto.toml");
+    // An empty list means the built-in mirrors (jsDelivr, then
+    // GitHub raw) — this checks the shipped coordinates themselves.
+    refresh(&settings(Vec::new()), &auto).await;
+    let written = std::fs::read_to_string(&auto).expect("the auto file landed");
+    assert!(written.contains("[[providers."), "{written}");
+    let mut config = TabitConfig::default();
+    let mut warnings = Vec::new();
+    merge_auto(&mut config, &auto, &mut warnings);
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert!(config.providers.len() > 10, "{}", config.providers.len());
     let _ = std::fs::remove_dir_all(&dir);
 }

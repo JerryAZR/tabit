@@ -241,7 +241,11 @@ fn write_disabled(path: &Path, names: &[&str]) {
         .map(|name| format!("\"{name}\""))
         .collect::<Vec<_>>()
         .join(", ");
-    std::fs::write(path, format!("[extensions]\ndisabled = [{list}]\n")).expect("settings");
+    std::fs::write(
+        path,
+        format!("[extensions]\ndisabled = [{list}]\n\n[catalog]\nauto_update = false\n"),
+    )
+    .expect("settings");
 }
 
 fn stage(tag: &str, behaviors: &[(&str, &str)]) -> Stage {
@@ -266,6 +270,9 @@ fn stage(tag: &str, behaviors: &[(&str, &str)]) -> Stage {
     // No settings file: the default world — packages mount by
     // default; tests that disable write the list themselves.
     let settings = dir.join("settings.toml");
+    // The catalog refresh stays out of tests (rule 5: offline);
+    // tests that rewrite this file keep the knob.
+    std::fs::write(&settings, "[catalog]\nauto_update = false\n").expect("settings");
     let home = dir.join("home");
     std::fs::create_dir_all(&home).expect("redirected home");
     let work = dir.join("work");
@@ -1068,7 +1075,11 @@ fn the_builtin_gate_asks_on_a_risky_bash_and_a_block_skips() {
 #[test]
 fn a_disabled_gate_mounts_nowhere() {
     let stage = stage("gate-off", &[]);
-    std::fs::write(&stage.settings, "[gate]\nenabled = false\n").expect("settings");
+    std::fs::write(
+        &stage.settings,
+        "[gate]\nenabled = false\n\n[catalog]\nauto_update = false\n",
+    )
+    .expect("settings");
     // Turn 2's needle is a fragment of the REAL bash output (git's
     // non-repo error) — the ungated run's tool result is what tells
     // turn 2 apart from turn 1, whose mock excludes it.

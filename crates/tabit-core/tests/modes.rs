@@ -72,6 +72,12 @@ fn sse_answer(text: &str) -> String {
 /// leak in; `--list` boots nothing and takes no root.
 fn run_in(dir: &Path, config: &Path, args: &[&str]) -> (Option<i32>, String, String) {
     let mut argv: Vec<String> = Vec::new();
+    // The catalog refresh stays out of tests (rule 5: offline).
+    std::fs::write(
+        dir.join("test-settings.toml"),
+        "[catalog]\nauto_update = false\n",
+    )
+    .expect("settings");
     if !args.contains(&"--list") {
         let empty_root = dir.join("no-extensions");
         std::fs::create_dir_all(&empty_root).expect("empty extension root");
@@ -83,6 +89,7 @@ fn run_in(dir: &Path, config: &Path, args: &[&str]) -> (Option<i32>, String, Str
         .args(&argv)
         .current_dir(dir)
         .env("TABIT_CONFIG", config)
+        .env("TABIT_SETTINGS", dir.join("test-settings.toml"))
         .output()
         .expect("spawn tabit-core");
     (
@@ -473,6 +480,10 @@ fn json_child(dir: &Path, home: &Path, config: Option<&Path>, args: &[&str]) -> 
     if let Some(config) = config {
         command.env("TABIT_CONFIG", config);
     }
+    // The catalog refresh stays out of tests (rule 5: offline).
+    let settings = dir.join("test-settings.toml");
+    std::fs::write(&settings, "[catalog]\nauto_update = false\n").expect("settings");
+    command.env("TABIT_SETTINGS", &settings);
     let mut child = command.spawn().expect("spawn tabit-core");
     let stdin = child.stdin.take().expect("piped stdin");
     let stdout = child.stdout.take().expect("piped stdout");
@@ -755,6 +766,12 @@ fn the_debug_log_switch_writes_the_trace() {
     let dir = config.parent().expect("config dir").to_path_buf();
     let empty_root = dir.join("no-extensions");
     std::fs::create_dir_all(&empty_root).expect("empty extension root");
+    // The catalog refresh stays out of tests (rule 5: offline).
+    std::fs::write(
+        dir.join("test-settings.toml"),
+        "[catalog]\nauto_update = false\n",
+    )
+    .expect("settings");
 
     let run = |debug_value: &std::path::Path| {
         Command::new(env!("CARGO_BIN_EXE_tabit-core"))
@@ -766,6 +783,7 @@ fn the_debug_log_switch_writes_the_trace() {
             ])
             .current_dir(&dir)
             .env("TABIT_CONFIG", &config)
+            .env("TABIT_SETTINGS", dir.join("test-settings.toml"))
             .env("TABIT_DEBUG_LOG", debug_value)
             .output()
             .expect("spawn tabit-core")

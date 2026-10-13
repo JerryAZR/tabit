@@ -29,6 +29,14 @@ const SUPPORTED_SCHEMA: u32 = 1;
 
 /// The pointer file every mirror serves.
 const LATEST: &str = "latest.toml";
+/// The built-in mirror list (PROVIDERS.md): jsDelivr first (reliable
+/// from China), GitHub raw second. An empty `catalog.urls` means this
+/// list; a configured list REPLACES it — the explicit-pointer rule,
+/// never a silent fallthrough.
+const BUILTIN_MIRRORS: &[&str] = &[
+    "https://cdn.jsdelivr.net/gh/JerryAZR/tabit-catalog@catalog",
+    "https://raw.githubusercontent.com/JerryAZR/tabit-catalog/catalog",
+];
 
 /// The state sidecar next to the auto file: what we have and when we
 /// got it. Freshness is the fetched-at stamp, not the file's mtime
@@ -95,12 +103,6 @@ pub(crate) async fn refresh(settings: &CatalogSettings, auto_path: &Path) {
     if !settings.auto_update {
         return;
     }
-    if settings.urls.is_empty() {
-        // No mirrors configured: the channel is inert until the
-        // generator ships its coordinates (PROVIDERS.md); the
-        // built-in default list lands with it.
-        return;
-    }
     let state_path = state_path(auto_path);
     let state = read_state(&state_path);
     if let Some(state) = &state {
@@ -140,7 +142,12 @@ async fn download(
 ) -> Result<String, String> {
     let client = reqwest::Client::new();
     let mut failures = Vec::new();
-    for base in &settings.urls {
+    let urls: Vec<&str> = if settings.urls.is_empty() {
+        BUILTIN_MIRRORS.to_vec()
+    } else {
+        settings.urls.iter().map(String::as_str).collect()
+    };
+    for base in urls {
         match try_mirror(&client, base, auto_path, state_path, state).await {
             Ok(outcome) => return Ok(format!("{base}: {outcome}")),
             Err(reason) => failures.push(format!("{base}: {reason}")),

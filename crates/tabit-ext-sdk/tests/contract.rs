@@ -459,6 +459,10 @@ async fn the_child_example_spawns_observes_and_settles() {
     )
     .expect("the offline provider fragment");
     unsafe { std::env::set_var("TABIT_CONFIG", &isolated_config) };
+    // The catalog refresh stays out of tests (rule 5: offline).
+    let offline_settings = isolated_config.with_file_name("settings.toml");
+    std::fs::write(&offline_settings, "[catalog]\nauto_update = false\n").expect("settings");
+    unsafe { std::env::set_var("TABIT_SETTINGS", &offline_settings) };
 
     let root = test_dir("child-ext");
     install(&root, "child-ext", env!("CARGO_BIN_EXE_child-ext"));

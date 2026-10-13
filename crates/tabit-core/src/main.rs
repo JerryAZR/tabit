@@ -129,12 +129,15 @@ fn run() -> Result<i32, String> {
             // 2026-09-27): an installed package exists in every mode.
             // The runtime is the boot's and the run's one serving
             // runtime — the supervisor's watchers outlive the boot.
-            let (registry, launchable) =
-                world_registry(&args.options(), config, config_path, Arc::new(auth))?;
+            // It exists before the world builds: world_registry spawns
+            // the catalog refresh onto the ambient runtime.
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
                 .map_err(|e| e.to_string())?;
+            let _runtime_guard = runtime.enter();
+            let (registry, launchable) =
+                world_registry(&args.options(), config, config_path, Arc::new(auth))?;
             let mounted = mount_world(launchable, &runtime);
             print_mode(&args, &registry, Some(&mounted), &runtime)
         }
