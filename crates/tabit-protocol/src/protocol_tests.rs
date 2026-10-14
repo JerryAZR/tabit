@@ -369,6 +369,16 @@ fn server_control_frames_round_trip_and_stay_distinct_from_events() {
     };
     assert_eq!(round_trip(&error), error);
 
+    // v26: the catalog channel's transient boot frame.
+    let checking = ServerControlFrame::CatalogStatus {
+        state: crate::CatalogState::Checking,
+    };
+    assert_eq!(round_trip(&checking), checking);
+    assert_eq!(
+        serde_json::to_string(&checking).expect("serialize"),
+        r#"{"type":"catalog_status","state":"checking"}"#
+    );
+
     // The umbrella parses either kind of server line.
     let line = serde_json::to_string(&error).expect("serialize");
     let frame: ServerFrame = serde_json::from_str(&line).expect("umbrella");

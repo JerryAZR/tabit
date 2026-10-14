@@ -704,6 +704,9 @@ fn install_path_then_boot_serves_the_package() {
 /// The raw backend spawn the journey test needs: an arbitrary root
 /// and config, not the stage helper's own.
 fn spawn_raw(work: &Path, extensions_root: &Path, config: &Path, home: &Path) -> Backend {
+    // The catalog refresh stays out of tests (rule 5: offline).
+    let settings = config.with_file_name("settings.toml");
+    std::fs::write(&settings, "[catalog]\nauto_update = false\n").expect("settings");
     let mut command = Command::new(env!("CARGO_BIN_EXE_tabit-core"));
     command
         .arg("--json")
@@ -713,6 +716,7 @@ fn spawn_raw(work: &Path, extensions_root: &Path, config: &Path, home: &Path) ->
         .current_dir(work)
         .env("TABIT_CONFIG", config)
         .env("TABIT_AUTH", config.with_file_name("auth.toml"))
+        .env("TABIT_SETTINGS", settings)
         .env("USERPROFILE", home)
         .env("HOME", home);
     finish_spawn(command)

@@ -139,6 +139,12 @@ fn run() -> Result<i32, String> {
                 .map_err(|e| e.to_string())?;
             let _runtime_guard = runtime.enter();
             let mut boot = world_scan(&args.options(), config, config_path, Arc::new(auth))?;
+            if boot.checking_catalog() {
+                // The bounded wait in build_registry — say why boot
+                // may take a moment (the wire's catalog_status frame
+                // is the JSON mode's equivalent).
+                eprintln!("checking the model catalog…");
+            }
             let mounted = mount_world(boot.take_launchable(), &runtime);
             // The catalog refresh overlapped the handshakes; the
             // bounded wait here is usually zero.

@@ -40,8 +40,8 @@ pub use events::{
     SessionEvent, ToolResultStatus,
 };
 pub use model::{
-    AvailableModel, AvailableProvider, Cost, ModelFacts, ModelSelection, ProviderAuth,
-    ProviderStatus,
+    AvailableModel, AvailableProvider, CatalogChannelStatus, CatalogState, Cost, ModelFacts,
+    ModelSelection, ProviderAuth, ProviderStatus,
 };
 pub use protocol::command_tags;
 pub use protocol::{

@@ -29,6 +29,11 @@ use serde::{Deserialize, Serialize};
 /// `user_message.text` becomes the authored text (was: the fold),
 /// and `user_message.expanded` carries the full model-visible fold
 /// when door expansions touched the message (absent otherwise).
+/// v26: the catalog channel's boot status — a transient
+/// `catalog_status` control frame when a network check is in
+/// flight (the boot bounded-waits on it, PROVIDERS.md), and the
+/// resolved state + version riding `providers_available`'s new
+/// `catalog` block (re-announced with it on every world change).
 /// v24: the uniform model announcement —
 /// `model_changed` is renamed `model_selected` (it announces the
 /// current selection, initial or switched) and is now emitted at
@@ -56,7 +61,7 @@ use serde::{Deserialize, Serialize};
 /// compaction — the `compact` command and its event family (reshaped
 /// in v15 into the
 /// `compaction_begin`/`compaction_step`/`compaction_end` envelope).
-pub const PROTOCOL_VERSION: u32 = 25;
+pub const PROTOCOL_VERSION: u32 = 26;
 
 /// Which session produced an event. The stamp is the session id
 /// itself (v3: the `"main"` alias is retired — one name per session);
@@ -381,6 +386,15 @@ pub enum ServerControlFrame {
     Report {
         /// The protocol version this child speaks.
         protocol_version: u32,
+    },
+    /// Boot status: a catalog network check is in flight (v26) — the
+    /// boot may take a moment (bounded: the pointer and artifact
+    /// budgets, PROVIDERS.md). Emitted only when the network is
+    /// actually involved; the RESOLVED state rides
+    /// `providers_available`'s catalog block.
+    CatalogStatus {
+        /// Always `checking` on this frame.
+        state: crate::model::CatalogState,
     },
     /// A line the edge could not turn into a command. The connection
     /// stays open.

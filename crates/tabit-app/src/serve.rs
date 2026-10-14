@@ -141,6 +141,17 @@ pub fn serve_json_stdio(
         Ok(boot) => boot,
         Err(detail) => json_startup_failure(&detail),
     };
+    // The catalog check is in flight: tell the frontend the boot may
+    // take a moment (bounded by the pointer+artifact budgets). The
+    // resolved state rides providers_available's catalog block.
+    if boot.checking_catalog() {
+        println!(
+            "{}",
+            tabit_protocol::to_wire_line(&tabit_protocol::ServerControlFrame::CatalogStatus {
+                state: tabit_protocol::CatalogState::Checking,
+            })
+        );
+    }
     // The extension host boots and every handshake resolves BEFORE
     // the session assembly: tools exist at session build (the
     // byte-stability law), and the cost is the slowest single

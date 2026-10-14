@@ -257,7 +257,7 @@ async fn the_models_catalog_announces_once_unstamped_after_the_extension_catalog
         .into_builder(store.clone())
         .create("C:/w")
         .expect("session");
-    let registry = crate::ModelRegistry::new(
+    let registry = crate::ModelRegistry::new_with_catalog_status(
         std::sync::Arc::new(
             tabit_config::TabitConfig::from_toml_str(
                 r#"
@@ -283,6 +283,9 @@ id = "l1"
             .expect("config"),
         ),
         std::sync::Arc::new(tabit_config::AuthConfig::default()),
+        crate::CatalogStatus::Updated {
+            version: "20261014-886d930945".to_string(),
+        },
     );
     let data = SessionHostData {
         extensions: tabit_protocol::ExtensionsCatalog {
@@ -309,6 +312,7 @@ id = "l1"
     let mut extensions_at = None;
     let mut announced = Vec::new();
     let mut providers_announced = Vec::new();
+    let mut catalog_blocks = Vec::new();
     for (index, frame) in frames.iter().enumerate() {
         match &frame.event {
             SessionEvent::ExtensionsAvailable { .. } => extensions_at = Some(index),
@@ -316,9 +320,12 @@ id = "l1"
                 assert_eq!(frame.stream, None, "backend-level: no stream stamp");
                 announced.push((index, providers));
             }
-            SessionEvent::ProvidersAvailable { providers } => {
+            SessionEvent::ProvidersAvailable {
+                providers, catalog, ..
+            } => {
                 assert_eq!(frame.stream, None, "backend-level: no stream stamp");
                 providers_announced.push((index, providers));
+                catalog_blocks.push(catalog);
             }
             _ => {}
         }
@@ -370,6 +377,14 @@ id = "l1"
             ("locked", tabit_protocol::ProviderAuth::None),
         ],
         "every configured provider, usable or not, with its key source"
+    );
+    // v26: the registry's boot status rides the same frame.
+    assert_eq!(
+        catalog_blocks.as_slice(),
+        [&tabit_protocol::CatalogChannelStatus {
+            state: tabit_protocol::CatalogState::Updated,
+            version: Some("20261014-886d930945".to_string()),
+        }]
     );
     std::fs::remove_dir_all(store.dir()).ok();
 }
@@ -481,7 +496,7 @@ id = "s1"
     let announced: Vec<&Vec<tabit_protocol::ProviderStatus>> = frames
         .iter()
         .filter_map(|frame| match &frame.event {
-            SessionEvent::ProvidersAvailable { providers } => {
+            SessionEvent::ProvidersAvailable { providers, .. } => {
                 assert_eq!(frame.stream, None, "backend-level: no stream stamp");
                 Some(providers)
             }
@@ -5031,7 +5046,7 @@ fn catalogs(frames: &[EventFrame]) -> CatalogPair {
     let providers = frames
         .iter()
         .filter_map(|frame| match &frame.event {
-            SessionEvent::ProvidersAvailable { providers } => {
+            SessionEvent::ProvidersAvailable { providers, .. } => {
                 assert_eq!(frame.stream, None, "backend-level: no stream stamp");
                 Some(providers.iter().map(|p| (p.id.clone(), p.auth)).collect())
             }
