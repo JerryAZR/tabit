@@ -77,6 +77,35 @@ fn state_path(auto_path: &Path) -> PathBuf {
     auto_path.with_file_name("providers.auto.state.toml")
 }
 
+/// What a refresh attempt concluded — boot reports this (the wire's
+/// catalog status, PROVIDERS.md).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum RefreshOutcome {
+    /// Checked; the cache is already current (the pointer's version
+    /// is the cache's) — the state re-stamps, the TTL restarts.
+    Fresh { version: String },
+    /// A new artifact verified and installed; a boot that awaited
+    /// the refresh merges it immediately.
+    Updated { version: String },
+    /// No new data this boot: every mirror failed, a newer
+    /// min_schema, a concurrent refresher holds the lock, or the
+    /// pointer phase ran over budget. The LAST cache merges.
+    Offline { reason: String },
+}
+
+/// The cache's version when it is within TTL, else None — the sync
+/// pre-check that lets boot announce "checking" only when the
+/// network is actually involved (the refresh re-checks under the
+/// lock).
+pub(crate) fn cache_fresh(settings: &CatalogSettings, auto_path: &Path) -> Option<String> {
+    let state = read_state(&state_path(auto_path))?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0);
+    (now.saturating_sub(state.fetched_at) < settings.ttl_hours * 3600).then_some(state.version)
+}
+
 /// Merge the last downloaded catalog under the config (boot path).
 /// A missing auto file is the normal first-run case; a corrupt one
 /// warns and is skipped — the generated file is replaceable by
@@ -94,26 +123,21 @@ pub(crate) fn merge_auto(config: &mut TabitConfig, auto_path: &Path, warnings: &
     }
 }
 
-/// Refresh the catalog when stale: the background task boot spawns.
-/// Best-effort — every failure mode is a silent-ish skip (the boot
-/// log carries the reason); the LAST cache is always the fallback.
-/// Never blocks boot; a concurrent refresher (another session) holds
-/// the lock and this one skips — the winner just wrote fresh data.
-pub(crate) async fn refresh(settings: &CatalogSettings, auto_path: &Path) {
+/// Refresh the catalog when stale. Budgets (PROVIDERS.md): the
+/// pointer phase is internally bounded (`pointer_budget_ms` — a
+/// 100-byte fetch that cannot land in time means the artifact would
+/// not either); the artifact phase is NOT internally bounded — the
+/// boot's patience is the outer timeout in `build_registry`, and on
+/// expiry the detached task keeps downloading and installs for the
+/// next boot.
+pub(crate) async fn refresh(settings: &CatalogSettings, auto_path: &Path) -> RefreshOutcome {
     if !settings.auto_update {
-        return;
+        return RefreshOutcome::Offline {
+            reason: "auto_update is off".to_string(),
+        };
     }
-    let state_path = state_path(auto_path);
-    let state = read_state(&state_path);
-    if let Some(state) = &state {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|duration| duration.as_secs())
-            .unwrap_or(0);
-        let fresh_for = settings.ttl_hours * 3600;
-        if now.saturating_sub(state.fetched_at) < fresh_for {
-            return;
-        }
+    if let Some(version) = cache_fresh(settings, auto_path) {
+        return RefreshOutcome::Fresh { version };
     }
 
     // Serialize concurrent refreshers. The OS releases the claim on
@@ -124,92 +148,143 @@ pub(crate) async fn refresh(settings: &CatalogSettings, auto_path: &Path) {
         .ok()
         .and_then(|file| file.try_lock().ok().map(|()| file));
     let Some(_lock) = lock else {
-        return;
+        return RefreshOutcome::Offline {
+            reason: "a concurrent refresher holds the lock".to_string(),
+        };
     };
 
-    match download(settings, auto_path, &state_path, state.as_ref()).await {
-        Ok(outcome) => tracing::debug!("catalog refresh: {outcome}"),
-        Err(reason) => tracing::debug!("catalog refresh skipped: {reason}"),
+    let urls: Vec<String> = if settings.urls.is_empty() {
+        BUILTIN_MIRRORS.iter().map(ToString::to_string).collect()
+    } else {
+        settings.urls.clone()
+    };
+    let client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_millis(750))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
+    let pointer_phase = fetch_pointer(&client, &urls);
+    let pointer = match tokio::time::timeout(
+        std::time::Duration::from_millis(settings.pointer_budget_ms),
+        pointer_phase,
+    )
+    .await
+    {
+        Ok(Ok(found)) => found,
+        Ok(Err(reason)) => return RefreshOutcome::Offline { reason },
+        Err(_) => {
+            return RefreshOutcome::Offline {
+                reason: format!("pointer over budget ({}ms)", settings.pointer_budget_ms),
+            };
+        }
+    };
+    let outcome = apply_pointer(&client, &urls, pointer, auto_path).await;
+    match &outcome {
+        RefreshOutcome::Offline { reason } => {
+            tracing::debug!("catalog refresh: {reason}");
+        }
+        outcome => tracing::debug!("catalog refresh: {outcome:?}"),
     }
+    outcome
 }
 
-/// One refresh attempt over the mirror list, first success wins.
-async fn download(
-    settings: &CatalogSettings,
-    auto_path: &Path,
-    state_path: &Path,
-    state: Option<&CatalogState>,
-) -> Result<String, String> {
-    let client = reqwest::Client::new();
+/// The pointer phase: the first mirror whose `latest.toml` fetches
+/// and parses wins.
+async fn fetch_pointer(
+    client: &reqwest::Client,
+    urls: &[String],
+) -> Result<(usize, Latest), String> {
     let mut failures = Vec::new();
-    let urls: Vec<&str> = if settings.urls.is_empty() {
-        BUILTIN_MIRRORS.to_vec()
-    } else {
-        settings.urls.iter().map(String::as_str).collect()
-    };
-    for base in urls {
-        match try_mirror(&client, base, auto_path, state_path, state).await {
-            Ok(outcome) => return Ok(format!("{base}: {outcome}")),
-            Err(reason) => failures.push(format!("{base}: {reason}")),
+    for (index, base) in urls.iter().enumerate() {
+        let base = base.trim_end_matches('/');
+        match get(client, &format!("{base}/{LATEST}")).await {
+            Ok(raw) => {
+                let raw = String::from_utf8(raw)
+                    .map_err(|err| format!("{base}: pointer not UTF-8: {err}"))?;
+                match toml::from_str::<Latest>(&raw) {
+                    Ok(latest) => return Ok((index, latest)),
+                    Err(err) => failures.push(format!("{base}: bad pointer: {err}")),
+                }
+            }
+            Err(reason) => failures.push(reason),
         }
     }
     Err(format!("every mirror failed ({})", failures.join("; ")))
 }
 
-/// One mirror: pointer, version compare, artifact, checksum, atomic
-/// install.
-async fn try_mirror(
+/// The pointer's ruling: restamp when the version is the cache's,
+/// else fetch + verify + install the artifact — the pointer's mirror
+/// first, the rest as fallback. Unbounded (the boot detaches past
+/// its patience; the install still lands for next boot).
+async fn apply_pointer(
     client: &reqwest::Client,
-    base: &str,
+    urls: &[String],
+    pointer: (usize, Latest),
     auto_path: &Path,
-    state_path: &Path,
-    state: Option<&CatalogState>,
-) -> Result<String, String> {
-    let base = base.trim_end_matches('/');
-    let latest_raw = get(client, &format!("{base}/{LATEST}")).await?;
-    let latest_raw =
-        String::from_utf8(latest_raw).map_err(|err| format!("pointer not UTF-8: {err}"))?;
-    let latest: Latest =
-        toml::from_str(&latest_raw).map_err(|err| format!("bad pointer: {err}"))?;
+) -> RefreshOutcome {
+    let (won, latest) = pointer;
     if latest.min_schema > SUPPORTED_SCHEMA {
-        return Err(format!(
-            "catalog needs schema >= {} (this client speaks {SUPPORTED_SCHEMA})",
-            latest.min_schema
-        ));
+        return RefreshOutcome::Offline {
+            reason: format!(
+                "catalog needs schema >= {} (this client speaks {SUPPORTED_SCHEMA})",
+                latest.min_schema
+            ),
+        };
     }
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_secs())
         .unwrap_or(0);
+    let state = read_state(&state_path(auto_path));
     if state.is_some_and(|state| state.version == latest.version) {
         // Same catalog, fresh stamp — the TTL restarts.
-        write_state(
-            state_path,
+        let _ = write_state(
+            &state_path(auto_path),
             &CatalogState {
-                version: latest.version,
+                version: latest.version.clone(),
                 fetched_at: now,
             },
-        )?;
-        return Ok("already current".to_string());
+        );
+        return RefreshOutcome::Fresh {
+            version: latest.version,
+        };
     }
-    let artifact = get(client, &format!("{base}/catalog-{}.toml", latest.version)).await?;
-    let digest = sha2::Sha256::digest(&artifact);
-    let digest = digest
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>();
-    if digest != latest.sha256 {
-        return Err("checksum mismatch".to_string());
+    // The pointer's mirror first, then the rest in order.
+    let order: Vec<&String> = urls.iter().skip(won).chain(urls.iter().take(won)).collect();
+    let mut failures = Vec::new();
+    for base in order {
+        let base = base.trim_end_matches('/');
+        match get(client, &format!("{base}/catalog-{}.toml", latest.version)).await {
+            Ok(artifact) => {
+                let digest = sha2::Sha256::digest(&artifact)
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect::<String>();
+                if digest != latest.sha256 {
+                    failures.push(format!("{base}: checksum mismatch"));
+                    continue;
+                }
+                return match install(auto_path, &latest.version, &artifact) {
+                    Ok(()) => {
+                        let _ = write_state(
+                            &state_path(auto_path),
+                            &CatalogState {
+                                version: latest.version.clone(),
+                                fetched_at: now,
+                            },
+                        );
+                        RefreshOutcome::Updated {
+                            version: latest.version,
+                        }
+                    }
+                    Err(reason) => RefreshOutcome::Offline { reason },
+                };
+            }
+            Err(reason) => failures.push(reason),
+        }
     }
-    install(auto_path, &latest.version, &artifact)?;
-    write_state(
-        state_path,
-        &CatalogState {
-            version: latest.version.clone(),
-            fetched_at: now,
-        },
-    )?;
-    Ok(format!("installed {}", latest.version))
+    RefreshOutcome::Offline {
+        reason: format!("artifact: every mirror failed ({})", failures.join("; ")),
+    }
 }
 
 async fn get(client: &reqwest::Client, url: &str) -> Result<Vec<u8>, String> {

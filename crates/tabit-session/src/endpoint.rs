@@ -1222,7 +1222,11 @@ impl Lifecycle {
     fn refresh_world(&self, core: &LifecycleCore, auth: tabit_config::AuthConfig) {
         let registry = {
             let current = lock(&core.world).registry();
-            crate::registry::ModelRegistry::new(current.config().clone(), Arc::new(auth))
+            crate::registry::ModelRegistry::new_with_catalog_status(
+                current.config().clone(),
+                Arc::new(auth),
+                current.catalog_status().clone(),
+            )
         };
         // The swap bumps the cell's generation — how a session build
         // racing this refresh (the `new_session`/`open_session`

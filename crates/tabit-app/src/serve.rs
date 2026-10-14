@@ -12,7 +12,9 @@ use std::sync::Arc;
 use tabit_config::{AuthConfig, TabitConfig};
 use tabit_session::{SessionHost, SessionHostWiring, SessionStore};
 
-use crate::assemble::{ContinueMiss, assemble, host_data, host_node, mount_world, world_registry};
+use crate::assemble::{
+    ContinueMiss, assemble, build_registry, host_data, host_node, mount_world, world_scan,
+};
 use crate::options::AppOptions;
 
 /// The first-run setup guide, for the config errors that remain
@@ -124,7 +126,7 @@ pub fn serve_json_stdio(
     // The extension world's data half (settings, scan, fragment
     // merge, skills, registry); a settings failure is a plain
     // startup failure.
-    // The runtime comes FIRST: world_registry spawns the catalog
+    // The runtime comes FIRST: world_scan spawns the catalog
     // refresh onto the ambient runtime (Handle::try_current), so the
     // runtime must exist and be entered before the world builds.
     let runtime = match tokio::runtime::Builder::new_current_thread()
@@ -135,12 +137,10 @@ pub fn serve_json_stdio(
         Err(error) => json_startup_failure(&error.to_string()),
     };
     let _runtime_guard = runtime.enter();
-    let (registry, launchable) = match world_registry(options, config, config_path, Arc::new(auth))
-    {
-        Ok(world) => world,
+    let mut boot = match world_scan(options, config, config_path, Arc::new(auth)) {
+        Ok(boot) => boot,
         Err(detail) => json_startup_failure(&detail),
     };
-    let registry = Arc::new(registry);
     // The extension host boots and every handshake resolves BEFORE
     // the session assembly: tools exist at session build (the
     // byte-stability law), and the cost is the slowest single
@@ -165,7 +165,10 @@ pub fn serve_json_stdio(
             frontend,
         )
     });
-    let mounted = mount_world(launchable, &runtime);
+    let mounted = mount_world(boot.take_launchable(), &runtime);
+    // The catalog refresh (spawned in world_scan) has overlapped the
+    // handshakes; the bounded wait here is usually zero.
+    let registry = Arc::new(build_registry(boot, &runtime));
     // Assemble failures (a session unreadable, an explicit `--model`
     // naming a ref config does not know) fail the startup with
     // the plain reason (the report, an unstamped `error`, exit 1) —

@@ -15,7 +15,8 @@ use std::path::Path;
 use std::sync::Arc;
 
 use tabit_app::{
-    AppOptions, ContinueMiss, assemble, host_data, host_node, mount_world, world_registry,
+    AppOptions, ContinueMiss, assemble, build_registry, host_data, host_node, mount_world,
+    world_scan,
 };
 use tabit_config::{AuthConfig, TabitConfig};
 use tabit_protocol::SessionCommand;
@@ -48,11 +49,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let options = AppOptions::default();
     let config = TabitConfig::from_toml_str(PROVIDERS, Path::new("providers.toml"))?;
     let auth = AuthConfig::default();
-    let (registry, launchable) = world_registry(&options, config, None, Arc::new(auth))?;
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
-    let mounted = mount_world(launchable, &runtime);
+    let _runtime_guard = runtime.enter();
+    let mut boot = world_scan(&options, config, None, Arc::new(auth))?;
+    let mounted = mount_world(boot.take_launchable(), &runtime);
+    let registry = build_registry(boot, &runtime);
     let store = SessionStore::project_default();
     let (session, notes): (Session, Vec<String>) = assemble(
         &options,

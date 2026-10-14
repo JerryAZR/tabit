@@ -400,20 +400,53 @@ pub fn extension_root(args: &AppOptions) -> Option<PathBuf> {
 /// existing in one mode and not the other). The boot half is
 /// [`mount_world`], kept separate so the JSON edge can mount its
 /// wire structure between them.
-pub fn world_registry(
+///
+/// Phase one ([`world_scan`]) does everything local and SPAWNS the
+/// catalog refresh; phase two ([`build_registry`]) runs AFTER
+/// [`mount_world`] so the network wait overlaps the extension
+/// handshakes — boot pays `max(0, refresh − handshake time)`,
+/// usually zero.
+pub struct WorldBoot {
+    launchable: Option<Launchable>,
+    merged: tabit_config::TabitConfig,
+    auth: std::sync::Arc<tabit_config::AuthConfig>,
+    catalog: tabit_config::CatalogSettings,
+    auto_path: Option<std::path::PathBuf>,
+    cached_version: Option<String>,
+    refresh: Option<tokio::task::JoinHandle<crate::catalog::RefreshOutcome>>,
+    disabled: bool,
+}
+
+impl WorldBoot {
+    /// The extension world, handed to `mount_world`.
+    #[allow(clippy::expect_used)] // taken once by the boot's two-phase construction
+    pub fn take_launchable(&mut self) -> Launchable {
+        self.launchable.take().expect("launchable taken once")
+    }
+
+    /// Whether a catalog network check is in flight — the backend
+    /// announces "checking" only when the network is actually
+    /// involved (the TTL-fresh path is silent and instant).
+    pub fn checking_catalog(&self) -> bool {
+        self.refresh.is_some()
+    }
+}
+
+/// Phase one: the local world plus the catalog refresh spawn. One
+/// scan feeds every consumer — launch, the providers fragment merge,
+/// the skills tables — so they cannot disagree (the same one-scan
+/// law as the catalog).
+pub fn world_scan(
     args: &AppOptions,
     config: tabit_config::TabitConfig,
     config_path: Option<std::path::PathBuf>,
     auth: std::sync::Arc<tabit_config::AuthConfig>,
-) -> Result<(ModelRegistry, Launchable), String> {
+) -> Result<WorldBoot, String> {
     // Settings (the extension disable list's layers): absence is
     // normal — a bare machine disables nothing, packages mount by
     // default — while a broken file is a loud startup failure.
     let settings = tabit_config::SettingsConfig::load_default().map_err(|e| e.to_string())?;
     let disabled = settings.disabled_extensions();
-    // One scan feeds every consumer — launch, the providers fragment
-    // merge, the skills tables — so they cannot disagree (the same
-    // one-scan law as the catalog).
     let found = extension_root(args)
         .as_deref()
         .map(tabit_ext::manifest::scan)
@@ -428,23 +461,38 @@ pub fn world_registry(
     for (name, dir) in &launchable.packages {
         merge_fragment_into(&mut merged, name, dir, &user_ids, &mut warnings);
     }
-    // The downloaded catalog merges last (PROVIDERS.md: user config >
-    // extension fragments > providers.auto.toml), and a background
-    // refresh keeps it fresh — best-effort: no runtime (a sync
-    // caller), no mirrors configured yet, a concurrent refresher, or
-    // a dead channel all just skip.
-    if let Some(auto_path) = crate::catalog::auto_path(config_path.as_deref()) {
-        crate::catalog::merge_auto(&mut merged, &auto_path, &mut warnings);
-        if let Ok(handle) = tokio::runtime::Handle::try_current() {
-            let catalog_settings = settings.catalog.clone();
-            handle.spawn(async move {
-                crate::catalog::refresh(&catalog_settings, &auto_path).await;
-            });
-        }
-    }
     for warning in &warnings {
         eprintln!("warning: {warning}");
     }
+
+    // The catalog refresh spawns FIRST (it needs only settings and
+    // the config path) and is awaited LAST (build_registry, after
+    // the extension handshakes) — the network hides behind the
+    // slowest boot phase.
+    let catalog_settings = settings.catalog();
+    let auto_path = crate::catalog::auto_path(config_path.as_deref());
+    let plan = catalog_plan(
+        args.parent.is_some(),
+        &catalog_settings,
+        auto_path.as_deref(),
+    );
+    let channel_disabled = matches!(plan, CatalogPlan::Disabled);
+    let mut refresh = None;
+    let mut cached_version = None;
+    match plan {
+        CatalogPlan::Check(path) => {
+            if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                let task_settings = catalog_settings.clone();
+                let task_path = path.clone();
+                refresh = Some(handle.spawn(async move {
+                    crate::catalog::refresh(&task_settings, &task_path).await
+                }));
+            }
+        }
+        CatalogPlan::Cached { version } => cached_version = version,
+        CatalogPlan::Disabled => {}
+    }
+
     // The skills tables: the extension walker produces what the
     // packages ship, with their original paths, and the process's
     // one catalog folds them under the ladder — seeded before any
@@ -452,10 +500,117 @@ pub fn world_registry(
     // filesystem writes: the entries' locations ARE the packages'
     // paths.
     seed_extension_skills(extension_skills_catalog(&launchable.packages));
-    Ok((
-        ModelRegistry::new(std::sync::Arc::new(merged), auth),
-        launchable,
-    ))
+    Ok(WorldBoot {
+        launchable: Some(launchable),
+        merged,
+        auth,
+        catalog: catalog_settings,
+        auto_path,
+        cached_version,
+        refresh,
+        disabled: channel_disabled,
+    })
+}
+
+/// The catalog decision for this boot (the one place the ruling
+/// lives): the channel is disabled without a config path or with
+/// `auto_update` off; a child session (spawned with a parent) never
+/// refreshes — the parent's boot owns the network; a cache within
+/// TTL merges without a check; only a stale or absent cache goes to
+/// the network.
+pub(crate) enum CatalogPlan {
+    Check(std::path::PathBuf),
+    Cached { version: Option<String> },
+    Disabled,
+}
+
+pub(crate) fn catalog_plan(
+    is_child: bool,
+    settings: &tabit_config::CatalogSettings,
+    auto_path: Option<&std::path::Path>,
+) -> CatalogPlan {
+    let Some(path) = auto_path else {
+        return CatalogPlan::Disabled;
+    };
+    if !settings.auto_update {
+        return CatalogPlan::Disabled;
+    }
+    if is_child {
+        return CatalogPlan::Cached { version: None };
+    }
+    match crate::catalog::cache_fresh(settings, path) {
+        Some(version) => CatalogPlan::Cached {
+            version: Some(version),
+        },
+        None => CatalogPlan::Check(path.to_path_buf()),
+    }
+}
+
+/// Phase two: await the refresh within the boot budget (the pointer
+/// and artifact budgets plus slack; over budget the task detaches
+/// and keeps downloading — `pending`, applies next boot), merge the
+/// catalog cache (freshly installed or last known), and build the
+/// registry stamped with the outcome.
+pub fn build_registry(boot: WorldBoot, runtime: &tokio::runtime::Runtime) -> ModelRegistry {
+    let WorldBoot {
+        mut merged,
+        auth,
+        catalog,
+        auto_path,
+        cached_version,
+        refresh,
+        disabled,
+        ..
+    } = boot;
+    let status = if disabled {
+        tabit_session::CatalogStatus::Disabled
+    } else if let Some(handle) = refresh {
+        let budget = std::time::Duration::from_millis(
+            catalog.pointer_budget_ms + catalog.artifact_budget_ms + 100,
+        );
+        match runtime.block_on(tokio::time::timeout(budget, handle)) {
+            Ok(Ok(crate::catalog::RefreshOutcome::Fresh { version })) => {
+                tabit_session::CatalogStatus::Fresh {
+                    version: Some(version),
+                }
+            }
+            Ok(Ok(crate::catalog::RefreshOutcome::Updated { version })) => {
+                tabit_session::CatalogStatus::Updated { version }
+            }
+            Ok(Ok(crate::catalog::RefreshOutcome::Offline { reason })) => {
+                tracing::debug!("catalog refresh: {reason}");
+                tabit_session::CatalogStatus::Offline {
+                    version: cached_version,
+                }
+            }
+            Ok(Err(joined)) => {
+                // A JoinError is our bug (the refresh task panicked)
+                // — the sanctioned crash, not a failure to absorb.
+                #[allow(clippy::panic)]
+                {
+                    panic!("catalog refresh task failed: {joined}");
+                }
+            }
+            Err(_) => tabit_session::CatalogStatus::Pending,
+        }
+    } else {
+        // No check this boot: within TTL, a child session, or a sync
+        // caller without a runtime.
+        tabit_session::CatalogStatus::Cached {
+            version: cached_version,
+        }
+    };
+    // The downloaded catalog merges last (PROVIDERS.md: user config >
+    // extension fragments > providers.auto.toml) — AFTER the awaited
+    // refresh, so a completed update applies to THIS boot.
+    if let Some(path) = &auto_path {
+        let mut warnings = Vec::new();
+        crate::catalog::merge_auto(&mut merged, path, &mut warnings);
+        for warning in &warnings {
+            eprintln!("warning: {warning}");
+        }
+    }
+    ModelRegistry::new_with_catalog_status(std::sync::Arc::new(merged), auth, status)
 }
 
 /// The extension world, boot half: launch + handshakes + the tool

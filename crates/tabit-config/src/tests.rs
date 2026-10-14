@@ -1315,3 +1315,31 @@ fn the_write_refuses_a_malformed_file_without_clobbering_it() {
     );
     std::fs::remove_dir_all(&dir).ok();
 }
+
+#[test]
+fn catalog_settings_layer_replaces_only_when_present() {
+    use crate::SettingsConfig;
+    // A layer WITH a [catalog] table takes effect (the absorb
+    // regression: the field was silently dropped, so no settings
+    // file's [catalog] ever applied).
+    let with: SettingsConfig =
+        toml::from_str("[catalog]\nauto_update = false\npointer_budget_ms = 50\n")
+            .expect("catalog settings parse");
+    assert!(!with.catalog().auto_update);
+    assert_eq!(with.catalog().pointer_budget_ms, 50);
+    // Defaults fill the rest.
+    assert_eq!(with.catalog().artifact_budget_ms, 2500);
+
+    // Layering: a present [catalog] replaces; an absent one leaves
+    // the lower layer's intact.
+    let mut base = SettingsConfig::default();
+    base.absorb(with.clone());
+    assert!(!base.catalog().auto_update, "the present layer applies");
+    let without: SettingsConfig = toml::from_str("[gate]\nenabled = false\n").expect("parse");
+    base.absorb(without);
+    assert!(
+        !base.catalog().auto_update,
+        "a layer without [catalog] does not clobber"
+    );
+    assert!(!base.gate.enabled, "the other field still absorbed");
+}

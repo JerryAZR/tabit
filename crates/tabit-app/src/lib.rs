@@ -37,8 +37,8 @@ pub mod options;
 pub mod serve;
 
 pub use assemble::{
-    ContinueMiss, Launchable, assemble, core_tools, extension_root, host_data, host_node,
-    install_root, mount_world, world_registry,
+    ContinueMiss, Launchable, WorldBoot, assemble, build_registry, core_tools, extension_root,
+    host_data, host_node, install_root, mount_world, world_scan,
 };
 pub use gate::PermissionGate;
 pub use options::{AppOptions, parse_model};

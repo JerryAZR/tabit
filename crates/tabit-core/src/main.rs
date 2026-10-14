@@ -42,7 +42,9 @@ use tabit_session::SessionStore;
 
 use crate::cli::{Mode, mode_of, parse_args};
 use crate::print::{list_sessions, print_mode};
-use tabit_app::{install_root, mount_world, serve_json_stdio, setup_guide, world_registry};
+use tabit_app::{
+    build_registry, install_root, mount_world, serve_json_stdio, setup_guide, world_scan,
+};
 
 fn run() -> Result<i32, String> {
     let args = parse_args()?;
@@ -136,9 +138,11 @@ fn run() -> Result<i32, String> {
                 .build()
                 .map_err(|e| e.to_string())?;
             let _runtime_guard = runtime.enter();
-            let (registry, launchable) =
-                world_registry(&args.options(), config, config_path, Arc::new(auth))?;
-            let mounted = mount_world(launchable, &runtime);
+            let mut boot = world_scan(&args.options(), config, config_path, Arc::new(auth))?;
+            let mounted = mount_world(boot.take_launchable(), &runtime);
+            // The catalog refresh overlapped the handshakes; the
+            // bounded wait here is usually zero.
+            let registry = build_registry(boot, &runtime);
             print_mode(&args, &registry, Some(&mounted), &runtime)
         }
     }
