@@ -25,20 +25,25 @@ frontend that ships primary.
 
 ### The frontend (the active item)
 
-**TUI: the Node route (ruled 2026-09; survey on branch `tui/research`).**
-The claurst ratatui harvest stays dead (GPL) and a Rust-native TUI
-stays deferred. The terminal frontend rides the JS ecosystem: **the
-omp fork of pi-tui (`@oh-my-pi/pi-tui`, MIT — Mario Zechner's own
-next-gen line) under Bun**, spawning `tabit-core --json` as a child
-(zero backend changes — the stdio edge the json mode already rides),
-distributed via npm as per-platform optional packages (esbuild
-pattern; no postinstall) carrying a Bun-compiled standalone TUI exe
-plus the cargo-built core. Single repo, single tag, single version:
+**TUI: the Node route (ruled 2026-09; pivot landed 2026-10 on branch
+`tui/tabit-tui-alt`).** The claurst ratatui harvest stays dead (GPL)
+and a Rust-native TUI stays deferred. The terminal frontend rides the
+JS ecosystem: **stock pi-tui (`@earendil-works/pi-tui`) on plain
+Node ≥ 24.2** — type-stripped TypeScript in dev, no build step (the
+omp fork and the Bun runtime were the surveyed first plan; the fork
+deleted the alt-screen machinery this frontend IS, so stock-on-Node
+became the route) — spawning `tabit-core --json` as a child (zero
+backend changes — the stdio edge the json mode already rides).
+Distribution: **`tabit-agent` on npm** — the app as a single-file
+esbuild bundle (bin `tabit`; Node refuses type-stripping under
+node_modules, so sources can't ship), the cargo release core riding in
+per-platform optional packages (`tabit-agent-<platform>`, esbuild
+pattern; no postinstall; matrix win-x64 + linux-x64 first,
+darwin-arm64 after a mac test).
+One version line for the bundle — TUI and core changes bump it alike:
 the lockstepped pair is the strict protocol handshake made atomic.
-Fallback ladder: stock pi-tui on plain Node, then opentui (its
-Node ≥ 26.4 engines floor breaks the one-line install today). Next
-step: the walking-slice spike on Windows Terminal before product
-commitment; the TUI enters the monorepo (`tui/`) when it graduates.
+crates.io stays the backend-only channel (`cargo install tabit-core`).
+The TUI enters the monorepo (`tui/`) at merge-back.
 
 The GUI is **not planned** — the egui tree was deleted 2026-09 (the
 paused frontend's sync twin kept surfacing as the exception on every

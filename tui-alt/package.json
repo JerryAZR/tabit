@@ -1,0 +1,36 @@
+{
+	"type": "module",
+	"name": "tabit-agent",
+	"version": "0.1.0",
+	"description": "tabit: the alt-screen terminal frontend for the tabit agent stack — bundles the lockstepped tabit-core backend via platform packages",
+	"license": "MIT",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/JerryAZR/tabit.git",
+		"directory": "tui-alt"
+	},
+	"main": "./src/cli.ts",
+	"bin": {
+		"tabit": "./src/cli.ts"
+	},
+	"engines": {
+		"node": ">=24.2"
+	},
+	"files": [
+		"src",
+		"!src/mock-backend.ts"
+	],
+	"scripts": {
+		"check": "tsc --noEmit",
+		"test": "node --test test/*.test.ts"
+	},
+	"dependencies": {
+		"@earendil-works/pi-tui": "1.1.0",
+		"human-id": "^4.2.1"
+	},
+	"devDependencies": {
+		"@types/node": "^24.0.0",
+		"esbuild": "^0.28.2",
+		"typescript": "7.0.2"
+	}
+}
