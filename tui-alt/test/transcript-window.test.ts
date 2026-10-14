@@ -60,7 +60,7 @@ const fakeBackend = new Proxy({}, { get: () => () => {} }) as unknown as Backend
 
 function harness() {
 	const terminal = new FakeTerminal();
-	const root = new AltRoot(terminal);
+	const root = new AltRoot("0.0.0-test", terminal);
 	const mode = new InteractiveMode(fakeBackend, root);
 	root.bind(mode, () => {});
 	root.tui.start();

@@ -50,6 +50,7 @@ import { UserBlock } from "./components/user-block.ts";
 import { SubagentList } from "./components/subagent-list.ts";
 import { TranscriptRegistry } from "./components/transcript-registry.ts";
 import { TreeCardView } from "./components/tree-card.ts";
+import { HeroBlock } from "./components/hero-block.ts";
 import { ModelPickerView } from "./model-picker.ts";
 import { ThinkingPickerView } from "./thinking-picker.ts";
 import { AuthCardView } from "./auth-card.ts";
@@ -59,7 +60,7 @@ import { log } from "./log.ts";
 import { AtPathCompletionProvider } from "./path-completion.ts";
 import { pasteClipboardIntoEditor, platformClipboardReader } from "./paste-image.ts";
 import { APP_KEYBINDING_IDS, applyKeybindings, loadTuiToml } from "./keybindings.ts";
-import type { FooterFacts, InteractionCard, ModeView, PendingMessage, ProgramStatusReport, SkillInfo, SubagentEntry } from "./mode.ts";
+import type { FooterFacts, HeroFacts, InteractionCard, ModeView, PendingMessage, ProgramStatusReport, SkillInfo, SubagentEntry } from "./mode.ts";
 import type { InteractiveMode } from "./mode.ts";
 import { editorTheme } from "./theme.ts";
 
@@ -72,6 +73,9 @@ interface StreamPane {
 	chat: Container;
 	blocks: TranscriptRegistry;
 	scroll: ScrollView;
+	/** The boot hero (a fresh root's landing page) — created by the first
+	 *  setHero for the pane. */
+	hero?: HeroBlock;
 }
 
 function makePane(): StreamPane {
@@ -114,6 +118,7 @@ export class AltRoot implements ModeView {
 	readonly #panes = new Map<string, StreamPane>();
 	#rootStream: string | undefined;
 	#shownStream: string | undefined;
+	readonly #version: string;
 	#region: Region = "editor";
 	#mode: InteractiveMode | undefined;
 	#input: InputController | undefined;
@@ -126,7 +131,8 @@ export class AltRoot implements ModeView {
 	/** The open login/logout card, when it owns the dock slot. */
 	#authCard: AuthCardView | undefined;
 
-	constructor(terminal?: Terminal) {
+	constructor(version: string, terminal?: Terminal) {
+		this.#version = version;
 		this.tui = new TuiAltScreen(terminal ?? new ProcessTerminal(), false, undefined, {
 			mouse: true,
 			scrollToEndIndicator: () => " ↓  jump to latest ",
@@ -421,6 +427,19 @@ export class AltRoot implements ModeView {
 	 *  ProcessTerminal no-ops where the terminal declines support). */
 	setProgramStatus(status: ProgramStatusReport): void {
 		this.tui.terminal.setProgramStatus({ app: "tabit", ...status });
+	}
+
+	/** The boot hero: one block per fresh root pane, updated as facts
+	 *  land. Created lazily at the first emit — a fresh pane's first
+	 *  content in practice (the summary notes the hero replaces are
+	 *  suppressed upstream). */
+	setHero(facts: HeroFacts): void {
+		const pane = this.#paneFor(facts.sessionId);
+		if (pane.hero === undefined) {
+			pane.hero = new HeroBlock(this.#version, () => this.#touch());
+			pane.chat.addChild(pane.hero);
+		}
+		pane.hero.setFacts(facts);
 	}
 
 	setFooter(facts: FooterFacts): void {

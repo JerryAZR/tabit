@@ -45,7 +45,7 @@
 import { log } from "./log.ts";
 import { SessionTree } from "./session-tree.ts";
 import { PROTOCOL_VERSION } from "./protocol.ts";
-import type { AvailableProvider, ModelCost, ParsedServerFrame, ProviderStatus, ServerControlFrame, SessionEvent, Usage } from "./protocol.ts";
+import type { AvailableExtension, AvailableProvider, ModelCost, ParsedServerFrame, ProviderStatus, ServerControlFrame, SessionEvent, Usage } from "./protocol.ts";
 
 export interface PendingMessage {
 	id: string;
@@ -194,6 +194,21 @@ export interface ModeView {
 	/** The program-status report (OSC 7501, pi-tui 1.1.0) — dedup'd by
 	 *  the mode; the view adds `app` and crosses to the terminal. */
 	setProgramStatus(status: ProgramStatusReport): void;
+	/** The boot hero's facts (a FRESH root session's landing page —
+	 *  emitted as its facts fold; the view owns identity/version). */
+	setHero(facts: HeroFacts): void;
+}
+
+/** The hero's sections — wire facts only; every section optional, an
+ *  absent one renders no line. */
+export interface HeroFacts {
+	sessionId: string;
+	cwd: string | undefined;
+	sessionsOnDisk: number | undefined;
+	model: { name: string; provider: string; contextWindow: number | undefined; thinkingLevel: string | null | undefined } | undefined;
+	skills: string[] | undefined;
+	models: { models: number; providers: number } | undefined;
+	extensions: { names: string[]; dead: number } | undefined;
 }
 
 /** pi-tui's ProgramStatus, mirrored (the mode stays pi-tui-free) minus
@@ -746,6 +761,12 @@ export class InteractiveMode {
 	 *  don't cross. */
 	#restingStatus: ProgramStatusReport = { state: "idle" };
 	#lastProgramStatusJson: string | undefined;
+	/** The hero shows on a FRESH root (a resumed boot's replay dominates);
+	 *  a landing page, re-emitted as its facts fold — no freeze (owner
+	 *  ruling: the footer is the truth surface). */
+	#heroActive = false;
+	#sessionsOnDisk: number | undefined;
+	#extensionsSeen: AvailableExtension[] | undefined;
 
 	#reportProgramStatus(): void {
 		let status: ProgramStatusReport;
@@ -761,6 +782,40 @@ export class InteractiveMode {
 		if (json === this.#lastProgramStatusJson) return;
 		this.#lastProgramStatusJson = json;
 		this.#view.setProgramStatus(status);
+	}
+
+	/** The hero's current facts, re-emitted from every fold that feeds a
+	 *  section. No-op when the root is resumed (or not yet announced). */
+	#emitHero(): void {
+		if (!this.#heroActive || this.#root === undefined) return;
+		const root = this.#streams.get(this.#root);
+		if (root === undefined) return;
+		this.#view.setHero({
+			sessionId: root.id,
+			cwd: root.cwd,
+			sessionsOnDisk: this.#sessionsOnDisk,
+			model:
+				root.model === undefined
+					? undefined
+					: {
+							name: root.modelName ?? root.model,
+							provider: root.provider ?? "",
+							contextWindow: root.contextWindow,
+							thinkingLevel: root.thinkingLevel,
+						},
+			skills: root.skills.length === 0 ? undefined : root.skills.map(skill => skill.name),
+			models:
+				this.#catalog.length === 0
+					? undefined
+					: { models: this.#catalog.reduce((n, p) => n + p.models.length, 0), providers: this.#catalog.length },
+			extensions:
+				this.#extensionsSeen === undefined || this.#extensionsSeen.length === 0
+					? undefined
+					: {
+							names: this.#extensionsSeen.filter(ext => ext.status === "alive").map(ext => ext.name),
+							dead: this.#extensionsSeen.filter(ext => ext.status === "dead").length,
+						},
+		});
 	}
 
 	#handleControl(frame: ServerControlFrame): void {
@@ -903,9 +958,15 @@ export class InteractiveMode {
 	#handleGlobal(event: SessionEvent): void {
 		switch (event.type) {
 			case "sessions_available":
+				this.#sessionsOnDisk = event.sessions.length;
+				if (this.#heroActive) {
+					this.#emitHero();
+					return;
+				}
 				this.#view.addNote(undefined, `${event.sessions.length} session(s) on disk`, "info");
 				return;
 			case "extensions_available":
+				this.#extensionsSeen = event.extensions;
 				for (const ext of event.extensions) {
 					if (ext.status === "dead") this.#view.addNote(undefined, `extension ${ext.name} is dead: ${ext.reason ?? "unknown reason"}`, "error");
 				}
@@ -916,6 +977,12 @@ export class InteractiveMode {
 						"warn",
 					);
 				}
+				// The inventory line is the hero's on a fresh boot; problems
+				// (dead, conflicts) stay notes everywhere.
+				if (this.#heroActive) {
+					this.#emitHero();
+					return;
+				}
 				this.#view.addNote(undefined, `${event.extensions.length} extension(s) loaded`, "info");
 				return;
 			case "models_available":
@@ -925,6 +992,10 @@ export class InteractiveMode {
 				// follows in the same act with the full key-source picture.
 				this.#catalog = event.providers;
 				if (event.providers.length === 0) return;
+				if (this.#heroActive) {
+					this.#emitHero();
+					return;
+				}
 				{
 					const models = event.providers.reduce((n, p) => n + p.models.length, 0);
 					this.#view.addNote(undefined, `${models} model(s) across ${event.providers.length} provider(s)`, "info");
@@ -1110,7 +1181,11 @@ export class InteractiveMode {
 			// completion shows the FOCUSED stream's.
 			s.skills = event.skills.map(skill => ({ name: skill.name, description: skill.description ?? "" }));
 			if (s.id === this.#focused) this.#view.setSkills(s.skills);
-			this.#view.addNote(s.id, `${event.skills.length} skill(s) loaded: ${event.skills.map(skill => skill.name).join(", ")}`, "info");
+			if (this.#heroActive && s.id === this.#root) {
+				this.#emitHero();
+			} else {
+				this.#view.addNote(s.id, `${event.skills.length} skill(s) loaded: ${event.skills.map(skill => skill.name).join(", ")}`, "info");
+			}
 		},
 		session_opened: (s, event) => {
 			// Registration already happened (#registerStream); here the facts
@@ -1143,6 +1218,9 @@ export class InteractiveMode {
 			// must not survive into this one.
 			s.skills = [];
 			if (s.id === this.#focused) this.#view.setSkills(s.skills);
+			// The hero's law: a FRESH root (boot or new_session) gets the
+			// landing page; a resume's replay dominates instead.
+			this.#heroActive = event.parent === undefined && !event.resumed;
 			if (event.parent === undefined) {
 				// A new root (boot or new_session) replaced the session: the
 				// tree card's fold starts over. Children stay in the map (the
@@ -1151,6 +1229,7 @@ export class InteractiveMode {
 				// Boot facts have landed — the connection is no longer
 				// "connecting".
 				this.#emitFocusedState();
+				this.#emitHero();
 			}
 			// A child's delegation renders as its tool_call card on the
 			// PARENT's transcript (the subagent renderer's call line carries
@@ -1189,6 +1268,7 @@ export class InteractiveMode {
 			s.contextWindow = event.context_window;
 			s.rates = event.cost;
 			this.#emitFooter(s);
+			this.#emitHero();
 		},
 		// --- interactions ------------------------------------------------------------------
 		interaction_request: (s, event) => {

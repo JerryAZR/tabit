@@ -9,7 +9,7 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 
-import { InteractiveMode, type ProgramStatusReport, type BackendLink, type FooterFacts, type InteractionCard, type ModeView, type PendingMessage, type SkillInfo, type SubagentEntry } from "../src/mode.ts";
+import { InteractiveMode, type HeroFacts, type ProgramStatusReport, type BackendLink, type FooterFacts, type InteractionCard, type ModeView, type PendingMessage, type SkillInfo, type SubagentEntry } from "../src/mode.ts";
 import { parseServerFrame, PROTOCOL_VERSION, type ParsedServerFrame } from "../src/protocol.ts";
 
 const SESSION = "0199aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -146,6 +146,10 @@ class RecordingView implements ModeView {
 	}
 	setPending(pending: PendingMessage[]): void {
 		this.pending = pending;
+	}
+	hero: HeroFacts | undefined;
+	setHero(facts: HeroFacts): void {
+		this.hero = facts;
 	}
 	setProgramStatus(status: ProgramStatusReport): void {
 		this.programStatuses.push(status);
@@ -548,6 +552,32 @@ describe("InteractiveMode", () => {
 		feed({ type: "user_message", entry_id: "e2", text: "again" });
 		feed({ type: "run_aborted", output: "", started_at_ms: 0, completed_at_ms: 1 });
 		assert.deepStrictEqual(view.programStatuses.at(-1), { state: "idle" });
+	});
+
+	test("the boot hero: facts emit on a fresh root (notes suppressed), never on a resume", () => {
+		const { view, feed, control } = harness();
+		boot(control, feed); // fresh root: resumed false
+		assert.ok(view.hero !== undefined);
+		assert.strictEqual(view.hero?.sessionId, SESSION);
+
+		// Sections fill as the catalogs fold; the summary notes are suppressed.
+		feed({ type: "sessions_available", sessions: [{ id: "a", created_at: "", entry_count: 1, path: "/p", cwd: "/w" }] });
+		feed({ type: "models_available", providers: [{ id: "p", models: [{ id: "m1", thinking_levels: [], reasoning: false, input: ["text"] }] }] });
+		feed({ type: "skills_available", skills: [{ name: "commit", description: "d", location: "l", level: "user" }] });
+		assert.strictEqual(view.hero?.sessionsOnDisk, 1);
+		assert.deepStrictEqual(view.hero?.models, { models: 1, providers: 1 });
+		assert.deepStrictEqual(view.hero?.skills, ["commit"]);
+		assert.deepStrictEqual(view.notes.filter(n => n.text.includes("on disk") || n.text.includes("skill(s) loaded") || n.text.includes("across")), []);
+
+		// A resume: no hero, the notes stand.
+		const resumed = harness();
+		resumed.control({ type: "report", protocol_version: PROTOCOL_VERSION });
+		resumed.feed({ type: "session_opened", id: SESSION, path: "/w", cwd: "/w", resumed: true }, SESSION);
+		resumed.feed({ type: "sessions_available", sessions: [] });
+		resumed.feed({ type: "skills_available", skills: [{ name: "commit", description: "d", location: "l", level: "user" }] });
+		assert.strictEqual(resumed.view.hero, undefined);
+		assert.ok(resumed.view.notes.some(n => n.text.includes("session(s) on disk")));
+		assert.ok(resumed.view.notes.some(n => n.text.includes("skill(s) loaded")));
 	});
 
 	test("the model picker dispatch: /model routes to the root, select sends the command", () => {

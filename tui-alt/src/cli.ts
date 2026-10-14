@@ -169,7 +169,7 @@ async function main(): Promise<void> {
 	log(`starting backend: ${resolved.bin} ${(resolved.args ?? ["--json", "--continue"]).join(" ")}`);
 	const debugEnv = applyDebugFlag(argv);
 
-	const root = new AltRoot();
+	const root = new AltRoot(pkg.version);
 	let mode: InteractiveMode | undefined;
 
 	const die = (message: string, code: number): never => {
