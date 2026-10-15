@@ -2862,6 +2862,97 @@ async fn a_never_selected_session_records_no_model_change_and_resumes_selection_
     Ok(())
 }
 
+#[tokio::test]
+async fn set_thinking_level_on_a_selection_less_session_is_a_named_error()
+-> Result<(), SessionError> {
+    // A selection-less session (the zero-config boot) has nothing to
+    // re-level: the loud, named error, not a silent no-op.
+    let store = temp_store("level-selectionless");
+    let mut session =
+        SessionBuilder::new(store.clone(), test_config(), test_auth(), None)?.create("C:/w")?;
+    assert_eq!(session.selection(), None, "selection-less from birth");
+    let error = session
+        .set_thinking_level(Some("high"))
+        .expect_err("nothing to re-level");
+    match error {
+        SessionError::Config { message } => {
+            assert!(message.contains("no model selected"), "{message}");
+        }
+        other => panic!("expected a config error, got {other:?}"),
+    }
+    std::fs::remove_dir_all(store.dir()).ok();
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_parked_continue_over_an_empty_conversation_is_a_zero_event_completion()
+-> Result<(), SessionError> {
+    // The continue intent with nothing to continue: the pump takes the
+    // parked intent, sees the empty conversation, and completes without
+    // opening a run (a selection-less session proves no run opened —
+    // one would fail at the model door).
+    let store = temp_store("continue-empty");
+    let mut session =
+        SessionBuilder::new(store.clone(), test_config(), test_auth(), None)?.create("C:/w")?;
+    session.mailbox_handle().continue_run();
+    let mut events = Vec::new();
+    let summary = session.pump(&mut |event| events.push(event)).await;
+    assert!(
+        matches!(summary.outcome, RunOutcome::Completed),
+        "a no-op continue completes: {:?}",
+        summary.outcome
+    );
+    assert!(
+        summary.events.is_empty() && events.is_empty(),
+        "zero events — nothing to continue"
+    );
+    std::fs::remove_dir_all(store.dir()).ok();
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_zero_max_turns_is_rejected_at_every_assembly_door() -> Result<(), SessionError> {
+    // The engine's entry contract (every outer loop runs at least one
+    // turn) enforced at the builder — through create AND resume.
+    let store = temp_store("zero-max-turns");
+    let result = SessionBuilder::new(store.clone(), test_config(), test_auth(), None)?
+        .max_turns(0)
+        .create("C:/w");
+    let error = match result {
+        Err(error) => error,
+        Ok(_) => panic!("a zero budget is rejected"),
+    };
+    match error {
+        SessionError::Config { message } => {
+            assert!(message.contains("max_turns"), "{message}");
+        }
+        other => panic!("expected a config error, got {other:?}"),
+    }
+
+    // The resume door: a real file to open, the same rejection.
+    let mut session = Factory::new(vec![text_turn("hi")])
+        .into_builder(store.clone())
+        .create("C:/w")?;
+    session.prompt("hello").await;
+    let path = file_path(&session).to_path_buf();
+    drop(session);
+    let result = SessionBuilder::new(store.clone(), test_config(), test_auth(), None)?
+        .max_turns(0)
+        .resume(&path, "C:/w");
+    let error = match result {
+        Err(error) => error,
+        Ok(_) => panic!("a zero budget is rejected at resume too"),
+    };
+    match error {
+        SessionError::Config { message } => {
+            assert!(message.contains("max_turns"), "{message}");
+        }
+        other => panic!("expected a config error, got {other:?}"),
+    }
+    std::fs::remove_dir_all(store.dir()).ok();
+    Ok(())
+}
+
 // --- the world refresh (login/logout's session half) ---
 
 /// One keyed provider on a dead local port (not keyless): buildable

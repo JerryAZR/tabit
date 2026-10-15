@@ -100,6 +100,76 @@ async fn a_model_prompt_without_interaction_still_serves_and_asks_dismiss() {
 }
 
 #[tokio::test]
+async fn a_prompt_without_any_selection_is_a_named_error() {
+    // The selection-less session's door: no `model` in the request,
+    // no fallback on the capability — a graceful, named error (never
+    // a crash), and nothing is billed.
+    let ledger = Arc::new(std::sync::Mutex::new(UsageLedger::new()));
+    let services = ExtensionServices::new(factory(), config(), None, ledger.clone());
+    let error = services
+        .model_prompt("x", prompt("anything"))
+        .await
+        .expect_err("no selection anywhere");
+    assert!(error.contains("no model selected"), "{error}");
+    assert!(
+        tabit_log::lock::lock(&ledger).total_usage().total_tokens == 0,
+        "nothing billed for a prompt that never opened"
+    );
+}
+
+#[tokio::test]
+async fn a_stream_failure_surfaces_as_the_calls_error() {
+    // The completion's in-stream error is the prompt's error — no
+    // partial text, no billing.
+    let failing: crate::session::ModelFactory = Arc::new(|_, _, _| {
+        Ok(ModelHandle::new(MockCompletionModel::from_stream_turns(
+            vec![vec![
+                MockStreamEvent::text("half a"),
+                MockStreamEvent::error("the wire broke"),
+            ]],
+        )))
+    });
+    let ledger = Arc::new(std::sync::Mutex::new(UsageLedger::new()));
+    let services = ExtensionServices::new(
+        failing,
+        config(),
+        ModelSelection::new("mock", "m"),
+        ledger.clone(),
+    );
+    let error = services
+        .model_prompt("x", prompt("anything"))
+        .await
+        .expect_err("the stream error surfaces");
+    assert!(error.contains("the wire broke"), "{error}");
+    assert!(
+        tabit_log::lock::lock(&ledger).total_usage().total_tokens == 0,
+        "nothing billed for a failed completion"
+    );
+}
+
+#[tokio::test]
+async fn a_completion_without_a_response_is_an_error() {
+    // The empty-completion guard: the stream closed having produced
+    // no text and no usage — an error, not an empty Ok.
+    let silent: crate::session::ModelFactory = Arc::new(|_, _, _| {
+        Ok(ModelHandle::new(MockCompletionModel::from_stream_turns(
+            vec![vec![MockStreamEvent::final_response_with_total_tokens(0)]],
+        )))
+    });
+    let services = ExtensionServices::new(
+        silent,
+        config(),
+        ModelSelection::new("mock", "m"),
+        Arc::new(std::sync::Mutex::new(UsageLedger::new())),
+    );
+    let error = services
+        .model_prompt("x", prompt("anything"))
+        .await
+        .expect_err("an empty completion is an error");
+    assert!(error.contains("without a response"), "{error}");
+}
+
+#[tokio::test]
 async fn a_bad_model_reference_errors_without_billing() {
     let ledger = Arc::new(std::sync::Mutex::new(UsageLedger::new()));
     let services = ExtensionServices::new(

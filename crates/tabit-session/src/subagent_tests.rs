@@ -150,6 +150,43 @@ async fn a_completed_child_without_a_final_answer_says_so() {
 }
 
 #[tokio::test]
+async fn a_tool_allow_list_crosses_into_the_child_spec() {
+    // spawn_subprocess's allow arm: the list crosses into the spec
+    // (the argv mapping itself — `--tools a,b` next to the deny
+    // list's `--without` — is pinned at tabit-wire's
+    // `the_command_line_is_the_child_role_cli`; ChildSpec exposes no
+    // argv read, so here the arm executes and the spec still reaches
+    // spawn whole).
+    let parts = std::sync::Arc::new(super::SubagentParts {
+        node: std::sync::Arc::new(tabit_wire::node::Node::new("test")),
+        exe: std::path::PathBuf::from("Z:/does-not-exist/tabit-child.exe"),
+        tool_allow: Some(vec!["read".to_string(), "bash".to_string()]),
+        tool_deny: vec!["edit".to_string()],
+        max_turns: 4,
+        extensions: std::path::PathBuf::new(),
+    });
+    let ctx = super::SpawnContext::new(
+        parts,
+        std::sync::Arc::new(crate::subagent_pool::SubagentPool::new()),
+        "parent-session".to_string(),
+        tabit_protocol::ModelSelection::new("p", "m"),
+        std::path::PathBuf::from("."),
+    );
+    let result = ctx
+        .spawn_subprocess()
+        .cwd(std::path::PathBuf::from("."))
+        .model(tabit_protocol::ModelSelection::new("p", "m"))
+        .max_turns(4)
+        .ephemeral(true)
+        .spawn()
+        .await;
+    let Err(error) = result else {
+        panic!("the executable does not exist — the spawn must fail");
+    };
+    assert!(error.contains("tabit-child.exe"), "{error}");
+}
+
+#[tokio::test]
 async fn a_missing_executable_fails_the_spawn_with_the_exe_named() {
     // The bridge's spawn error carries the executable path — the
     // operator's first question is which binary failed to start.

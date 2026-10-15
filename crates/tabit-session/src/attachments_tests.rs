@@ -204,6 +204,29 @@ fn an_image_with_a_text_extension_attaches_by_sniffing() {
 }
 
 #[test]
+fn a_gif_attaches_by_magic_bytes() {
+    // The sniff table's GIF arm: magic bytes decide (the name carries
+    // no image extension), the decoded image passes the caps check,
+    // and an under-cap image crosses byte-identical.
+    let dir = temp_dir("gif");
+    let img = image::RgbImage::from_pixel(8, 6, image::Rgb([30, 200, 30]));
+    let mut bytes = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgb8(img)
+        .write_to(&mut bytes, image::ImageFormat::Gif)
+        .expect("encode gif");
+    let gif = bytes.into_inner();
+    assert!(gif.starts_with(b"GIF8"), "the fixture carries GIF magic");
+    let path = plant(&dir, "animation.bin", &gif);
+    let expanded = expand_attachments(Message::user(format!("<attachment path=\"{path}\"/>")));
+    let parts = parts(&expanded);
+    assert_eq!(parts.len(), 3, "text, label, image: {parts:?}");
+    let (data, media) = image_of(&parts[2]).expect("the image part");
+    assert_eq!(media, &Some(ImageMediaType::GIF));
+    assert_eq!(decode_base64(data), gif, "under-cap: byte-identical");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn an_over_pixel_cap_image_is_downscaled_to_jpeg_under_both_caps() {
     let dir = temp_dir("downscale");
     let png = solid_png(3000, 2000);

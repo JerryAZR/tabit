@@ -570,6 +570,67 @@ fn auth_load_default_missing_file_is_empty_not_an_error() {
 }
 
 #[test]
+fn auth_default_path_honors_tabit_auth_env() {
+    // The one resolution the login/logout writes and load_default
+    // reads: the env leg hands the pointer back verbatim.
+    let _guard = OVERRIDE_ENV_LOCK.lock().expect("env lock");
+    let path = std::env::temp_dir().join("tabit-config-tests/somewhere-auth.toml");
+    // SAFETY: serialized by OVERRIDE_ENV_LOCK.
+    unsafe {
+        std::env::set_var("TABIT_AUTH", &path);
+    }
+    let resolved = crate::auth_default_path();
+    // SAFETY: see above.
+    unsafe {
+        std::env::remove_var("TABIT_AUTH");
+    }
+    assert_eq!(resolved, Some(path));
+}
+
+#[test]
+fn login_write_fails_loudly_on_broken_toml_without_clobbering_it() {
+    // Distinct from `the_write_refuses_a_malformed_file_...` (valid
+    // TOML, wrong shape): a file that is not TOML at all fails the
+    // document read as ConfigError::Parse — the same error the load
+    // path reports — and the file is never touched.
+    let dir = auth_dir("broken-toml");
+    let path = dir.join("auth.toml");
+    std::fs::write(&path, "[providers.x\n").expect("seed");
+    let error = AuthConfig::set_api_key(&path, "p", "k").expect_err("broken toml fails");
+    match &error {
+        ConfigError::Parse { path: named, .. } => assert_eq!(named, &path),
+        other => panic!("expected a parse error, got {other:?}"),
+    }
+    assert_eq!(
+        std::fs::read_to_string(&path).expect("read"),
+        "[providers.x\n",
+        "the file is untouched"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn login_write_fails_when_the_temp_path_is_blocked() {
+    // The atomic write's open arm: a DIRECTORY sitting at
+    // `<path>.tmp` fails the temp-file open portably (Windows and
+    // Unix alike) — the write errors as Io naming the temp path, no
+    // auth file materializes, and the cleanup's best-effort sweep
+    // leaves the blocker alone.
+    let dir = auth_dir("temp-blocked");
+    let path = dir.join("auth.toml");
+    let temp = dir.join("auth.toml.tmp");
+    std::fs::create_dir_all(&temp).expect("a directory blocks the temp path");
+    let error = AuthConfig::set_api_key(&path, "p", "k").expect_err("the open must fail");
+    match &error {
+        ConfigError::Io { path: named, .. } => assert_eq!(named, &temp),
+        other => panic!("expected an io error, got {other:?}"),
+    }
+    assert!(!path.exists(), "nothing was written");
+    assert!(temp.is_dir(), "the blocker is not the write's to remove");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn model_defaults_inherit_field_by_field() {
     let raw = r#"
 [providers.p]
@@ -633,6 +694,43 @@ model_defaults = "nope"
         err.to_string().contains("model_defaults: must be a table"),
         "{err}"
     );
+}
+
+#[test]
+fn model_defaults_skip_non_table_providers_and_models() {
+    // The value-level merge walks only tables; a non-table entry is
+    // left for the deserialize pass to reject loudly.
+    let err = TabitConfig::from_toml_str("[providers]\nfoo = 5\n", Path::new("t.toml"));
+    assert!(
+        matches!(err, Err(ConfigError::Parse { .. })),
+        "a non-table provider errors at deserialize: {err:?}"
+    );
+
+    // A non-table model entry with defaults present: the merge skips
+    // it, deserialize names it.
+    let raw = r#"
+[providers.p]
+base_url = "https://example.com"
+api = "openai-completions"
+model_defaults = { reasoning = true }
+models = ["bare"]
+"#;
+    let err = TabitConfig::from_toml_str(raw, Path::new("t.toml"));
+    assert!(
+        matches!(err, Err(ConfigError::Parse { .. })),
+        "a non-table model errors at deserialize: {err:?}"
+    );
+
+    // Defaults with no models array at all: the merge has nothing to
+    // walk and the config loads.
+    let raw = r#"
+[providers.p]
+base_url = "https://example.com"
+api = "openai-completions"
+model_defaults = { reasoning = true }
+"#;
+    let config = parse(raw);
+    assert!(config.provider("p").expect("provider").models.is_empty());
 }
 
 #[test]

@@ -35,18 +35,19 @@ pub(crate) fn user_text(message: &Message) -> String {
 /// `message_queued` and `messages_discarded` hand this back — the
 /// salvaged draft carries no expansion, so re-sending re-expands
 /// exactly once.
-#[allow(clippy::panic, clippy::expect_used)] // sanctioned crash: the door admits text-only user messages (the wire's `message` command is text-only)
+#[allow(clippy::panic)] // sanctioned crash: the door admits text-only user messages (the wire's `message` command is text-only)
 pub(crate) fn authored_text(message: &Message) -> String {
     let Message::User { content } = message else {
         panic!("authored_text: a queued message is always a user message");
     };
-    content
-        .iter()
-        .find_map(|part| match part {
-            UserContent::Text(text) => Some(text.text.clone()),
-            _ => None,
-        })
-        .expect("authored_text: the door's one-text-part guarantee")
+    // Every caller (the mailbox's acknowledgment, both door scans)
+    // sees part[0] as the authored text — the door admits text-only
+    // messages and expansion only appends, so scanning past a
+    // non-text prefix is unrepresentable.
+    let Some(UserContent::Text(text)) = content.iter().next() else {
+        panic!("authored_text: part[0] is the authored text by the first-part law");
+    };
+    text.text.clone()
 }
 
 /// The one `user_message` event assembly (v25): the AUTHORED text
