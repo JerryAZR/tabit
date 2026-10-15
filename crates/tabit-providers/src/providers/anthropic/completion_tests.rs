@@ -30,10 +30,12 @@ fn thinking_level_realizes_as_adaptive_thinking_with_effort() {
         })
     };
 
-    let body =
-        serde_json::to_value(build(Some("high")).expect("high converts")).expect("serialize");
-    assert_eq!(body["thinking"]["type"], "adaptive");
-    assert_eq!(body["output_config"]["effort"], "high");
+    for level in ["low", "medium", "high", "xhigh", "max"] {
+        let body =
+            serde_json::to_value(build(Some(level)).expect("level converts")).expect("serialize");
+        assert_eq!(body["thinking"]["type"], "adaptive", "level {level}");
+        assert_eq!(body["output_config"]["effort"], level, "level {level}");
+    }
 
     let body = serde_json::to_value(build(Some("off")).expect("off converts")).expect("serialize");
     assert_eq!(body["thinking"]["type"], "disabled");
@@ -1064,6 +1066,29 @@ fn test_prompt_caching_errors_when_tool_cache_control_ttl_order_is_invalid() {
     })
     .unwrap_err();
 
+    assert!(err.to_string().contains("ttl `1h`"));
+}
+
+#[test]
+fn test_prompt_caching_errors_when_message_cache_control_ttl_order_is_invalid() {
+    // Pin the messages-content leg of the ttl-order validation: a 1h marker
+    // on message content after a shorter (default 5-minute) marker is a
+    // request error, same shape as the tools and system legs.
+    let system = vec![SystemContent::Text {
+        text: "System prompt".to_string(),
+        cache_control: Some(CacheControl::ephemeral()),
+    }];
+    let messages = vec![Message {
+        role: Role::User,
+        content: OneOrMany::one(Content::Text {
+            text: "Prompt".to_string(),
+            citations: Vec::new(),
+            cache_control: Some(CacheControl::ephemeral_1h()),
+        }),
+    }];
+
+    let err = validate_cache_control_ttl_order(&system, &messages, &[], None)
+        .expect_err("a 1h message marker after a 5-minute marker must error");
     assert!(err.to_string().contains("ttl `1h`"));
 }
 

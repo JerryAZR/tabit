@@ -517,6 +517,19 @@ mod tests {
         ));
     }
 
+    /// A discriminator value needing unescaping (an owned `String`) routes
+    /// through `visit_string` rather than `visit_str`; the decoded value
+    /// dispatches exactly like a borrowed one.
+    #[test]
+    fn tagged_escaped_type_value_dispatches_on_the_unescaped_string() {
+        let event =
+            classify_tagged_frame::<TestEvent>(r#"{"type":"future.\u0065vent"}"#, "type", known);
+        assert!(matches!(
+            event,
+            WireEvent::Unknown { event_type, .. } if event_type == "future.event"
+        ));
+    }
+
     #[test]
     fn tagged_invalid_json_is_corrupt() {
         let event = classify_tagged_frame::<TestEvent>("{not json", "type", known);

@@ -2017,6 +2017,93 @@ mod tests {
         assert!(!task.is_woken(), "still no busy waking");
     }
 
+    /// A re-pause after a resume re-parks the stale wait: `wait_for` reads
+    /// the channel's *current* value at poll time, so the earlier resume's
+    /// notification does not release a stream that is paused again. A later
+    /// resume then releases it normally.
+    #[tokio::test]
+    async fn a_re_pause_after_resume_re_parks_the_stale_wait() {
+        let stream = StreamingCompletionResponse::stream(
+            TEST_PROVIDER,
+            to_stream_result(stream! {
+                yield Ok(RawStreamingChoice::Message("hello".to_string()));
+            }),
+        );
+        let pause_control = stream.pause_control.paused_tx.clone();
+        pause_control.send(true).expect("pause");
+
+        let mut task = tokio_test::task::spawn(stream);
+        assert!(task.poll_next().is_pending(), "the paused poll parks");
+
+        // Resume and re-pause before the task is polled again: the parked
+        // wait observed the resume, but the re-pause holds.
+        pause_control.send(false).expect("resume");
+        pause_control.send(true).expect("re-pause");
+        assert!(task.is_paused(), "the re-pause holds");
+        assert!(
+            task.poll_next().is_pending(),
+            "the stale wait re-parks on the current (paused) value"
+        );
+
+        pause_control.send(false).expect("resume");
+        assert!(matches!(
+            task.poll_next(),
+            Poll::Ready(Some(Ok(StreamedAssistantContent::Text(text)))) if text.text == "hello"
+        ));
+    }
+
+    /// A resume racing the paused branch completes the parked wait: when the
+    /// resume lands between the `is_paused` read and the wait's poll, the
+    /// wait resolves on the resumed value and the stream yields its pending
+    /// item instead of parking forever on a notification already sent (the
+    /// race the branch comment documents). The window is real but narrow, so
+    /// a spinner thread drives pause/resume flips while the stream is
+    /// polled; the assertion itself is deterministic — every resume path
+    /// releases the pending item.
+    #[tokio::test]
+    async fn a_resume_racing_the_paused_branch_completes_the_parked_wait() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let stream = StreamingCompletionResponse::stream(
+            TEST_PROVIDER,
+            to_stream_result(stream! {
+                yield Ok(RawStreamingChoice::Message("hello".to_string()));
+            }),
+        );
+        let pause_control = stream.pause_control.paused_tx.clone();
+        pause_control.send(true).expect("pause");
+
+        let mut task = tokio_test::task::spawn(stream);
+        assert!(task.poll_next().is_pending(), "the paused poll parks");
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let spinner = std::thread::spawn({
+            let stop = Arc::clone(&stop);
+            move || {
+                while !stop.load(Ordering::Relaxed) {
+                    let _ = pause_control.send(false);
+                    let _ = pause_control.send(true);
+                }
+            }
+        });
+
+        let mut released = None;
+        for _ in 0..1_000_000 {
+            if let Poll::Ready(Some(item)) = task.poll_next() {
+                released = Some(item);
+                break;
+            }
+        }
+        stop.store(true, Ordering::Relaxed);
+        spinner.join().expect("spinner thread joins");
+
+        let Some(Ok(StreamedAssistantContent::Text(text))) = released else {
+            panic!("a resume must release the parked stream");
+        };
+        assert_eq!(text.text, "hello");
+    }
+
     /// A `Keep`-mode end that cannot finalize leaves the call open, and a
     /// later name fragment can still complete it — the end itself yields
     /// nothing, so the consumer sees no partial call.

@@ -523,6 +523,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn recording_client_records_multipart_requests_and_responds() {
+        let client = RecordingHttpClient::new("multipart body");
+        let response = client
+            .send_multipart::<Bytes>(multipart_request())
+            .await
+            .expect("multipart send should succeed");
+        assert_eq!(response.status(), http::StatusCode::OK);
+        let body = response.into_body().await.expect("body resolves");
+        assert_eq!(body, Bytes::from_static(b"multipart body"));
+        assert_eq!(client.requests().len(), 1);
+        assert_eq!(client.requests()[0].uri, "http://recording.test/multipart");
+    }
+
+    /// A sequenced client whose queue is empty has no scripted multipart
+    /// response: the send fails loudly, but the request is still recorded.
+    #[tokio::test]
+    async fn sequenced_client_multipart_without_a_scripted_response_fails() {
+        let client = SequencedHttpClient::new([]);
+        let error = client
+            .send_multipart::<Bytes>(multipart_request())
+            .await
+            .err()
+            .expect("an empty queue has no multipart response");
+        assert!(matches!(
+            error,
+            http_client::Error::InvalidStatusCode(http::StatusCode::NOT_IMPLEMENTED)
+        ));
+        assert_eq!(
+            client.requests().len(),
+            1,
+            "the multipart request is still recorded"
+        );
+    }
+
+    #[tokio::test]
     async fn recording_client_rejects_streaming_requests() {
         let client = RecordingHttpClient::new("body");
         let error = client

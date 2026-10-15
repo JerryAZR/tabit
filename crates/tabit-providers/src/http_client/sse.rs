@@ -288,6 +288,38 @@ mod tests {
     use std::collections::VecDeque;
     use std::sync::{Arc, Mutex};
 
+    /// Payloads past 2 KiB are cut at a char boundary (never mid-codepoint)
+    /// and carry the size marker; shorter payloads pass through borrowed.
+    #[test]
+    fn truncate_for_log_caps_at_a_char_boundary_with_a_size_marker() {
+        let short = "x".repeat(2048);
+        assert!(
+            matches!(truncate_for_log(&short), std::borrow::Cow::Borrowed(_)),
+            "at-cap payloads stay borrowed"
+        );
+
+        let long_ascii = "x".repeat(3000);
+        let truncated = truncate_for_log(&long_ascii);
+        assert_eq!(truncated.len(), 2048 + "…[+952 bytes]".len());
+        assert!(truncated.ends_with("…[+952 bytes]"));
+
+        // A multibyte codepoint straddling the cap: the cut backs off to the
+        // boundary, so the kept prefix is valid UTF-8 by construction and the
+        // byte count includes the dropped codepoint.
+        let mut long_multibyte = "x".repeat(2047);
+        long_multibyte.push('é'); // 2 bytes, straddling offset 2048
+        long_multibyte.push_str(&"y".repeat(100));
+        let truncated = truncate_for_log(&long_multibyte);
+        assert!(
+            truncated.starts_with(&"x".repeat(2047)),
+            "the cut backs off the straddling codepoint"
+        );
+        assert!(
+            truncated.ends_with("…[+102 bytes]"),
+            "the marker counts every dropped byte: {truncated:?}"
+        );
+    }
+
     /// A scripted outcome for the `send_streaming` attempt.
     enum MockOutcome {
         Response {

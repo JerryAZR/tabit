@@ -2944,6 +2944,132 @@ mod tests {
         );
     }
 
+    /// The non-open-index guard names the delta's wire tag; exercise the
+    /// remaining delta kinds so every `wire_tag` arm is pinned against the
+    /// guard message.
+    #[test]
+    fn delta_without_an_open_block_fails_the_stream_for_each_kind() {
+        let cases = [
+            (
+                r#"{"type":"content_block_delta","index":7,"delta":{"type":"text_delta","text":"hi"}}"#,
+                "text_delta",
+            ),
+            (
+                r#"{"type":"content_block_delta","index":7,"delta":{"type":"thinking_delta","thinking":"..."}}"#,
+                "thinking_delta",
+            ),
+            (
+                r#"{"type":"content_block_delta","index":7,"delta":{"type":"signature_delta","signature":"sig"}}"#,
+                "signature_delta",
+            ),
+            (
+                r#"{"type":"content_block_delta","index":7,"delta":{"type":"citations_delta","citation":{"type":"char_location","cited_text":"The grass is green.","document_index":0,"document_title":"Example","start_char_index":0,"end_char_index":20}}}"#,
+                "citations_delta",
+            ),
+        ];
+
+        for (frame, tag) in cases {
+            let event: StreamingEvent = serde_json::from_str(frame).unwrap();
+            let mut adapter = AnthropicAdapter::default();
+
+            let Some(Err(error)) = handle_event(&mut adapter, &event) else {
+                panic!("a {tag} delta for a non-open index must be an error");
+            };
+            assert_eq!(
+                error.to_string(),
+                format!(
+                    "ProviderError: malformed stream: content_block_delta ({tag}) for index 7 \
+                     has no open content block"
+                )
+            );
+            assert!(
+                adapter.failed,
+                "the guard must fail the stream for the {tag} delta"
+            );
+        }
+    }
+
+    /// An `input_json_delta` routed to an open block that is not a tool-use
+    /// block (here thinking) is a protocol violation: it fails the stream
+    /// naming the delta, the index, and the open block's kind.
+    #[test]
+    fn input_json_delta_on_a_thinking_block_fails_the_stream() {
+        let event: StreamingEvent = serde_json::from_str(
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"x\":"}}"#,
+        )
+        .unwrap();
+        let mut adapter = AnthropicAdapter::default();
+        open_thinking_block(&mut adapter, 0);
+
+        let Some(Err(error)) = handle_event(&mut adapter, &event) else {
+            panic!("an input_json delta on a thinking block must be an error");
+        };
+        assert_eq!(
+            error.to_string(),
+            "ProviderError: malformed stream: content_block_delta (input_json_delta) for index 0 \
+             arrived for an open thinking content block"
+        );
+        assert!(adapter.failed, "the guard must fail the stream");
+    }
+
+    /// A `signature_delta` routed to an open block that is not a thinking
+    /// block (here text) is a protocol violation: it fails the stream naming
+    /// the delta, the index, and the open block's kind.
+    #[test]
+    fn signature_delta_on_a_text_block_fails_the_stream() {
+        let event: StreamingEvent = serde_json::from_str(
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"sig"}}"#,
+        )
+        .unwrap();
+        let mut adapter = AnthropicAdapter::default();
+        open_text_block(&mut adapter, 0);
+
+        let Some(Err(error)) = handle_event(&mut adapter, &event) else {
+            panic!("a signature delta on a text block must be an error");
+        };
+        assert_eq!(
+            error.to_string(),
+            "ProviderError: malformed stream: content_block_delta (signature_delta) for index 0 \
+             arrived for an open text content block"
+        );
+        assert!(adapter.failed, "the guard must fail the stream");
+    }
+
+    /// A request whose `additional_params.tools` payload is invalid fails the
+    /// body build before any network I/O: `stream()` must surface the build
+    /// error rather than open a request against the wire.
+    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+    #[tokio::test]
+    async fn stream_fails_when_additional_params_tools_payload_is_invalid() {
+        use crate::client::CompletionClient;
+        use crate::completion::CompletionModel as _;
+        use crate::providers::anthropic::Client;
+        use crate::test_utils::MockStreamingClient;
+
+        let sse_bytes = bytes::Bytes::from_static(b"data: {\"type\":\"ping\"}\n\n");
+        let client = Client::builder()
+            .api_key("test-key")
+            .http_client(MockStreamingClient { sse_bytes })
+            .build()
+            .expect("build client");
+        let model = client.completion_model("claude-sonnet-4-6");
+        let request = model
+            .completion_request("hello")
+            .max_tokens(64)
+            .additional_params(json!({ "tools": "not-an-array" }))
+            .build();
+
+        let Err(error) = crate::completion::CompletionModel::stream(&model, request).await else {
+            panic!("an invalid additional_params.tools payload must fail stream()");
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("Invalid Anthropic `additional_params.tools` payload"),
+            "unexpected error: {error}"
+        );
+    }
+
     /// A `content_block_stop` for a non-open index is a protocol violation:
     /// it fails the stream naming the index and the event.
     #[test]

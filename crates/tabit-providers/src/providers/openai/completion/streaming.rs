@@ -1827,4 +1827,219 @@ mod tests {
             .or_else(|| delta.refusal.filter(|r| !r.is_empty()));
         assert!(text.is_none(), "an empty refusal contributes no text");
     }
+
+    /// A request that fails to build (here malformed `additional_params.tools`)
+    /// must surface as an error from `stream()` before any network I/O.
+    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+    #[tokio::test]
+    async fn stream_fails_when_the_request_body_cannot_be_built() {
+        use crate::client::CompletionClient;
+        use crate::completion::CompletionModel;
+        use crate::providers::openai::CompletionsClient;
+        use crate::test_utils::MockStreamingClient;
+
+        let client = CompletionsClient::builder()
+            .api_key("test-key")
+            .http_client(MockStreamingClient {
+                sse_bytes: sse_bytes_from_data_lines(["[DONE]"]),
+            })
+            .build()
+            .expect("build client");
+        let model = client.completion_model("gpt-4o-mini");
+        let request = model
+            .completion_request("hello")
+            .additional_params(json!({ "tools": "not-an-array" }))
+            .build();
+
+        let error = match CompletionModel::stream(&model, request).await {
+            Err(error) => error,
+            Ok(_) => panic!("an unbuildable request body must fail stream()"),
+        };
+        assert!(
+            error.to_string().contains("`additional_params.tools`"),
+            "the error names the payload: {error}"
+        );
+    }
+
+    /// A chat-completions dialect whose provider rejects
+    /// `stream_options.include_usage` (and already reports usage on the final
+    /// chunk): `STREAM_INCLUDE_USAGE = false` must keep `stream_options` off
+    /// the wire while `stream: true` is still merged in.
+    mod no_stream_usage_dialect {
+        use super::*;
+        use crate::client::{BearerAuth, ClientBuilder, DebugExt, Provider, ProviderBuilder};
+        use crate::http_client::{LazyBody, MultipartForm, Response, StreamingResponse};
+        use crate::wasm_compat::WasmCompatSend;
+        use bytes::Bytes;
+        use std::future::{self, Future};
+        use std::sync::{Arc, Mutex};
+
+        #[derive(Debug, Default, Clone, Copy)]
+        pub(super) struct NoStreamUsageExt;
+
+        #[derive(Debug, Default, Clone, Copy)]
+        pub(super) struct NoStreamUsageExtBuilder;
+
+        impl Provider for NoStreamUsageExt {
+            type Builder = NoStreamUsageExtBuilder;
+            const VERIFY_PATH: &'static str = "/";
+        }
+
+        impl ProviderBuilder for NoStreamUsageExtBuilder {
+            type Extension<H>
+                = NoStreamUsageExt
+            where
+                H: HttpClientExt;
+            type ApiKey = BearerAuth;
+
+            const BASE_URL: &'static str = "https://no-stream-usage.invalid";
+
+            fn build<H>(
+                _builder: &ClientBuilder<Self, Self::ApiKey, H>,
+            ) -> http_client::Result<NoStreamUsageExt>
+            where
+                H: HttpClientExt,
+            {
+                Ok(NoStreamUsageExt)
+            }
+        }
+
+        impl DebugExt for NoStreamUsageExt {}
+
+        impl OpenAICompatibleProvider for NoStreamUsageExt {
+            const PROVIDER_NAME: &'static str = "no-stream-usage";
+            const STREAM_INCLUDE_USAGE: bool = false;
+
+            type StreamingUsage = Usage;
+            type Response = crate::providers::openai::completion::CompletionResponse;
+        }
+
+        /// A streaming double that records each request body before serving
+        /// its scripted bytes: `MockStreamingClient` serves bytes but does
+        /// not record, and the recording doubles in `test_utils::http`
+        /// reject streaming requests.
+        #[derive(Debug, Clone, Default)]
+        pub(super) struct RecordingStreamingClient {
+            sse_bytes: Bytes,
+            bodies: Arc<Mutex<Vec<Vec<u8>>>>,
+        }
+
+        impl RecordingStreamingClient {
+            pub(super) fn new(sse_bytes: Bytes) -> Self {
+                Self {
+                    sse_bytes,
+                    bodies: Arc::new(Mutex::new(Vec::new())),
+                }
+            }
+
+            pub(super) fn bodies(&self) -> Vec<Vec<u8>> {
+                self.bodies.lock().expect("bodies lock").clone()
+            }
+        }
+
+        impl HttpClientExt for RecordingStreamingClient {
+            fn send<T, U>(
+                &self,
+                _req: Request<T>,
+            ) -> impl Future<Output = http_client::Result<Response<LazyBody<U>>>>
+            + WasmCompatSend
+            + 'static
+            where
+                T: Into<Bytes> + WasmCompatSend,
+                U: From<Bytes> + WasmCompatSend + 'static,
+            {
+                future::ready(Err(http_client::Error::InvalidStatusCode(
+                    http::StatusCode::NOT_IMPLEMENTED,
+                )))
+            }
+
+            fn send_multipart<U>(
+                &self,
+                _req: Request<MultipartForm>,
+            ) -> impl Future<Output = http_client::Result<Response<LazyBody<U>>>>
+            + WasmCompatSend
+            + 'static
+            where
+                U: From<Bytes> + WasmCompatSend + 'static,
+            {
+                future::ready(Err(http_client::Error::InvalidStatusCode(
+                    http::StatusCode::NOT_IMPLEMENTED,
+                )))
+            }
+
+            fn send_streaming<T>(
+                &self,
+                req: Request<T>,
+            ) -> impl Future<Output = http_client::Result<StreamingResponse>> + WasmCompatSend
+            where
+                T: Into<Bytes> + WasmCompatSend,
+            {
+                let sse_bytes = self.sse_bytes.clone();
+                let bodies = Arc::clone(&self.bodies);
+                async move {
+                    let (_parts, body) = req.into_parts();
+                    let bytes: Bytes = body.into();
+                    bodies.lock().expect("bodies lock").push(bytes.to_vec());
+
+                    let byte_stream =
+                        futures::stream::iter(vec![Ok::<Bytes, http_client::Error>(sse_bytes)]);
+                    let boxed_stream: http_client::sse::BoxedStream = Box::pin(byte_stream);
+
+                    Response::builder()
+                        .status(http::StatusCode::OK)
+                        .header(http::header::CONTENT_TYPE, "text/event-stream")
+                        .body(boxed_stream)
+                        .map_err(http_client::Error::Protocol)
+                }
+            }
+        }
+
+        #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+        #[tokio::test]
+        async fn dialect_without_stream_usage_omits_stream_options() {
+            use futures::StreamExt;
+
+            let backend = RecordingStreamingClient::new(sse_bytes_from_data_lines([
+                r#"{"choices":[{"delta":{"content":"hi"}}]}"#,
+                r#"{"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}"#,
+                "[DONE]",
+            ]));
+            let client = crate::client::Client::<NoStreamUsageExt, reqwest::Client>::builder()
+                .api_key("test-key")
+                .http_client(backend.clone())
+                .build()
+                .expect("client should build over a scripted backend");
+            let model = GenericCompletionModel::new(client, "gpt-4o-mini");
+            let request = CompletionRequest {
+                model: None,
+                preamble: None,
+                chat_history: crate::OneOrMany::one(crate::message::Message::user("hello")),
+                documents: vec![],
+                tools: vec![],
+                temperature: None,
+                max_tokens: Some(64),
+                tool_choice: None,
+                thinking_level: None,
+                additional_params: None,
+            };
+
+            let mut stream = match model.raw_stream(request).await {
+                Ok(stream) => stream,
+                Err(error) => panic!("stream should open: {error}"),
+            };
+            while let Some(item) = stream.next().await {
+                item.expect("stream item should be ok");
+            }
+
+            let bodies = backend.bodies();
+            assert_eq!(bodies.len(), 1, "exactly one request should be sent");
+            let body: serde_json::Value =
+                serde_json::from_slice(&bodies[0]).expect("request body should be JSON");
+            assert_eq!(body["stream"], json!(true));
+            assert!(
+                body.get("stream_options").is_none(),
+                "a STREAM_INCLUDE_USAGE=false dialect must not request usage chunks: {body}"
+            );
+        }
+    }
 }

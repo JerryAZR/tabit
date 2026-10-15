@@ -1110,9 +1110,28 @@ impl<M: CompletionModel> CompletionRequestBuilder<M> {
 
 #[cfg(test)]
 mod tests {
-    use super::{CompletionResponse, FinishReason, Usage};
+    use super::{CompletionResponse, FinishReason, ThinkingLevel, Usage};
     use crate::OneOrMany;
     use crate::message::AssistantContent;
+
+    /// The level vocabulary is a closed set: every variant's canonical
+    /// spelling parses back to itself, and anything else is rejected
+    /// (PROVIDERS.md — the d4b7a33 pin).
+    #[test]
+    fn thinking_level_spellings_round_trip_exhaustively() {
+        for level in [
+            ThinkingLevel::Off,
+            ThinkingLevel::Minimal,
+            ThinkingLevel::Low,
+            ThinkingLevel::Medium,
+            ThinkingLevel::High,
+            ThinkingLevel::Xhigh,
+            ThinkingLevel::Max,
+        ] {
+            assert_eq!(ThinkingLevel::parse(level.as_str()), Some(level));
+        }
+        assert_eq!(ThinkingLevel::parse("bogus"), None);
+    }
 
     fn tool_call_choice() -> OneOrMany<AssistantContent> {
         OneOrMany::one(AssistantContent::tool_call(

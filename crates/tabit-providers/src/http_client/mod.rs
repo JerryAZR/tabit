@@ -529,6 +529,140 @@ mod tests {
         );
     }
 
+    #[test]
+    fn retry_delay_too_long_delegates_the_non_success_accessors() {
+        let mut headers = HeaderMap::new();
+        headers.insert("retry-after", HeaderValue::from_static("120"));
+        let err = Error::RetryDelayTooLong {
+            source: Box::new(Error::NonSuccessResponse {
+                status: StatusCode::TOO_MANY_REQUESTS,
+                message: "slow down".to_string(),
+                headers,
+            }),
+            requested: Duration::from_secs(120),
+            cap: Duration::from_secs(60),
+        };
+
+        assert_eq!(
+            err.non_success_status(),
+            Some(StatusCode::TOO_MANY_REQUESTS)
+        );
+        assert_eq!(err.non_success_body(), Some("slow down"));
+        assert_eq!(
+            err.non_success_headers()
+                .and_then(|headers| headers.get("retry-after"))
+                .and_then(|value| value.to_str().ok()),
+            Some("120")
+        );
+    }
+
+    /// The remaining reqwest classification arms, against loopback-only
+    /// servers: redirect exhaustion is InvalidRequest, a response that never
+    /// arrives is Timeout, and a body cut short is BodyTransfer.
+    #[tokio::test]
+    async fn reqwest_failure_classification_covers_redirect_timeout_and_body() {
+        // Redirect loop: every request gets a 302 pointing back at itself,
+        // so reqwest's default policy exhausts its redirect budget.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let redirect_addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let mut chunk = [0u8; 4096];
+                    let _ = socket.read(&mut chunk).await;
+                    let _ = socket
+                        .write_all(
+                            b"HTTP/1.1 302 Found\r\nLocation: /loop\r\nContent-Length: 0\r\n\r\n",
+                        )
+                        .await;
+                });
+            }
+        });
+
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .expect("plain client builds");
+        let error = client
+            .get(format!("http://{redirect_addr}/loop"))
+            .send()
+            .await
+            .err()
+            .expect("a redirect loop must fail");
+        assert!(error.is_redirect(), "expected a redirect error: {error}");
+        let kind = Error::from(error)
+            .transport_error_kind()
+            .expect("reqwest failures classify");
+        assert_eq!(kind, TransportErrorKind::InvalidRequest);
+
+        // Hanging server: accepts the connection and never responds, so the
+        // client's own request timeout fires.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let hang_addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            while let Ok((socket, _)) = listener.accept().await {
+                // Hold the connection open forever without answering.
+                std::mem::forget(socket);
+            }
+        });
+
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_millis(200))
+            .build()
+            .expect("timeout client builds");
+        let error = client
+            .get(format!("http://{hang_addr}/"))
+            .send()
+            .await
+            .err()
+            .expect("a hanging server must time out");
+        assert!(error.is_timeout(), "expected a timeout error: {error}");
+        let kind = Error::from(error)
+            .transport_error_kind()
+            .expect("reqwest failures classify");
+        assert_eq!(kind, TransportErrorKind::Timeout);
+
+        // Truncated body: Content-Length promises 100 bytes, the server sends
+        // two and closes, so the body read fails mid-transfer.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let truncated_addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            if let Ok((mut socket, _)) = listener.accept().await {
+                let mut chunk = [0u8; 4096];
+                let _ = socket.read(&mut chunk).await;
+                let _ = socket
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\nhi")
+                    .await;
+                let _ = socket.shutdown().await;
+            }
+        });
+
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .expect("plain client builds");
+        let response = client
+            .get(format!("http://{truncated_addr}/"))
+            .send()
+            .await
+            .expect("headers arrive before the body fails");
+        let error = response
+            .bytes()
+            .await
+            .err()
+            .expect("a truncated body must fail the read");
+        assert!(
+            error.is_body() || error.is_decode(),
+            "expected a body-transfer error: {error}"
+        );
+        let kind = Error::from(error)
+            .transport_error_kind()
+            .expect("reqwest failures classify");
+        assert_eq!(kind, TransportErrorKind::BodyTransfer);
+        assert!(!kind.is_retryable());
+    }
+
     #[tokio::test]
     async fn stall_warning_stream_never_kills_a_stalled_stream() {
         use futures::StreamExt;

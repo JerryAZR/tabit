@@ -326,6 +326,29 @@ mod tests {
         }
     }
 
+    /// A decoration naming a tool id no open slot carries is a no-op: late
+    /// or misattributed provider metadata must not fabricate a slot or
+    /// disturb the established ones.
+    #[test]
+    fn a_decoration_for_an_unknown_tool_id_is_a_no_op() {
+        let mut bridge = ToolCallBridge::<usize>::new();
+        bridge.open(0, Some("call_a"), Some("get_weather"));
+
+        bridge.decorate(ToolCallDecoration {
+            tool_id: "call_unknown".to_owned(),
+            signature: Some("sig".to_owned()),
+            additional_params: Some(serde_json::json!({"k": "v"})),
+        });
+
+        let slot = bridge.remove(0).expect("slot 0 open");
+        assert!(slot.signature.is_none());
+        assert!(slot.additional_params.is_none());
+        assert!(
+            bridge.is_empty(),
+            "an unknown-id decoration must not fabricate a slot"
+        );
+    }
+
     /// Decoration fields are first-wins: a gemini-style signature-then-params
     /// sequence composes, and a later decoration cannot clobber an earlier
     /// signature with `None`.

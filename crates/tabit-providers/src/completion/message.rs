@@ -1344,6 +1344,18 @@ mod tests {
     use super::*;
 
     #[test]
+    fn tool_result_content_as_text_is_text_only() {
+        assert_eq!(ToolResultContent::text("ok").as_text(), Some("ok"));
+        let image = ToolResultContent::Image(Image {
+            data: DocumentSourceKind::Base64("aGk=".to_string()),
+            media_type: None,
+            detail: None,
+            additional_params: None,
+        });
+        assert_eq!(image.as_text(), None, "an image block is not text");
+    }
+
+    #[test]
     fn tool_result_status_serializes_snake_case_and_defaults_absent() {
         let plain = serde_json::to_value(ToolResult {
             id: "c".to_string(),

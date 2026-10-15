@@ -2218,3 +2218,92 @@ fn a_cut_short_turn_may_be_contentless_but_a_completed_empty_turn_may_not() {
         "the empty-response guard stays: {error}"
     );
 }
+
+/// A non-streaming assistant turn's `tool_calls` map to
+/// `AssistantContent::tool_call` entries on the normalized choice.
+#[tokio::test]
+async fn non_streaming_tool_calls_become_tool_call_content() {
+    use crate::client::CompletionClient;
+    use crate::completion::CompletionModel;
+    use crate::providers::openai::CompletionsClient;
+    use crate::test_utils::RecordingHttpClient;
+
+    let body = r#"{
+            "id": "chatcmpl-1",
+            "object": "chat.completion",
+            "created": 0,
+            "model": "gpt-4o-mini",
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [{
+                        "id": "call_1",
+                        "type": "function",
+                        "function": { "name": "get_weather", "arguments": "{\"city\":\"Paris\"}" }
+                    }]
+                },
+                "logprobs": null,
+                "finish_reason": "tool_calls"
+            }],
+            "usage": { "prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2 }
+        }"#;
+    let client = CompletionsClient::builder()
+        .api_key("test-key")
+        .http_client(RecordingHttpClient::new(body))
+        .build()
+        .expect("build client");
+    let model = client.completion_model("gpt-4o-mini");
+    let request = model.completion_request("What's the weather?").build();
+
+    let response = model
+        .completion(request)
+        .await
+        .expect("completion should succeed");
+
+    let [completion::AssistantContent::ToolCall(tool_call)] =
+        response.choice.iter().collect::<Vec<_>>().as_slice()
+    else {
+        panic!(
+            "expected exactly one tool call content, got {:?}",
+            response.choice
+        );
+    };
+    assert_eq!(tool_call.id, "call_1");
+    assert_eq!(tool_call.function.name, "get_weather");
+    assert_eq!(
+        tool_call.function.arguments,
+        serde_json::json!({"city": "Paris"})
+    );
+}
+
+/// A request that fails to build (here malformed `additional_params.tools`)
+/// must surface as an error from `completion()` before any network I/O.
+#[tokio::test]
+async fn completion_fails_when_the_request_body_cannot_be_built() {
+    use crate::client::CompletionClient;
+    use crate::completion::CompletionModel;
+    use crate::providers::openai::CompletionsClient;
+    use crate::test_utils::RecordingHttpClient;
+
+    let client = CompletionsClient::builder()
+        .api_key("test-key")
+        .http_client(RecordingHttpClient::new("{}"))
+        .build()
+        .expect("build client");
+    let model = client.completion_model("gpt-4o-mini");
+    let request = model
+        .completion_request("hello")
+        .additional_params(serde_json::json!({ "tools": "not-an-array" }))
+        .build();
+
+    let error = model
+        .completion(request)
+        .await
+        .expect_err("an unbuildable request body must fail completion()");
+    assert!(
+        error.to_string().contains("`additional_params.tools`"),
+        "the error names the payload: {error}"
+    );
+}
