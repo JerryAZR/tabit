@@ -40,6 +40,12 @@ pub use assemble::{
     ContinueMiss, Launchable, WorldBoot, assemble, build_registry, core_tools, extension_root,
     host_data, host_node, install_root, mount_world, world_scan,
 };
+
+/// Serializes unit tests that stage process-global environment
+/// (`TABIT_SETTINGS`, `USERPROFILE`/`HOME`): one test's staged home
+/// is another test's race.
+#[cfg(test)]
+pub(crate) static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 pub use gate::PermissionGate;
 pub use options::{AppOptions, parse_model};
 pub use serve::{serve_json_stdio, setup_guide, startup_banner};

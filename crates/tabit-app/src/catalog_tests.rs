@@ -8,12 +8,17 @@ fn temp_dir(tag: &str) -> PathBuf {
 }
 
 fn settings(urls: Vec<String>) -> CatalogSettings {
+    // Generous budgets: no test through this helper exercises the
+    // budget itself (the budget tests below set their own tight
+    // values), and a tight default flakes under full-gate scheduling
+    // starvation — a 32-way suite can stall a connection-refused
+    // round trip past a 1s timeout.
     CatalogSettings {
         auto_update: true,
         ttl_hours: 24,
         urls,
-        pointer_budget_ms: 1000,
-        artifact_budget_ms: 2500,
+        pointer_budget_ms: 30_000,
+        artifact_budget_ms: 60_000,
     }
 }
 
@@ -33,6 +38,219 @@ fn sha256_hex(body: &str) -> String {
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect()
+}
+
+#[test]
+fn auto_path_sits_next_to_the_config_or_falls_back_to_the_home_dir() {
+    let _guard = crate::TEST_ENV_LOCK.lock().expect("env lock");
+    // Next to the config that was read.
+    let config = Path::new("C:/cfg/providers.toml");
+    assert_eq!(
+        auto_path(Some(config)),
+        Some(config.with_file_name("providers.auto.toml"))
+    );
+    // No config path: the default home location (a bare machine's
+    // catalog still lands where boot looks for it). home_dir prefers
+    // USERPROFILE (Windows) over HOME — stage both, restore after.
+    let home = temp_dir("auto-home");
+    let saved_userprofile = std::env::var_os("USERPROFILE");
+    let saved_home = std::env::var_os("HOME");
+    // SAFETY: serialized by TEST_ENV_LOCK.
+    unsafe {
+        std::env::set_var("USERPROFILE", &home);
+        std::env::set_var("HOME", &home);
+    }
+    let resolved = auto_path(None);
+    // SAFETY: restoring immediately; no other env reader runs under
+    // the lock.
+    unsafe {
+        match &saved_userprofile {
+            Some(saved) => std::env::set_var("USERPROFILE", saved),
+            None => std::env::remove_var("USERPROFILE"),
+        }
+        match &saved_home {
+            Some(saved) => std::env::set_var("HOME", saved),
+            None => std::env::remove_var("HOME"),
+        }
+    }
+    assert_eq!(
+        resolved,
+        Some(home.join(".tabit").join("providers.auto.toml"))
+    );
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+#[tokio::test]
+async fn a_held_refresher_lock_skips_the_refresh_before_the_network() {
+    let dir = temp_dir("lock-held");
+    let auto = dir.join("providers.auto.toml");
+    // A concurrent refresher holds the lock: the sidecar exists and
+    // is claimed — the check precedes any network.
+    let lock_path = auto.with_file_name("providers.auto.lock");
+    let held = std::fs::File::create(&lock_path).expect("lock file");
+    held.try_lock().expect("the test claims the lock");
+
+    let outcome = refresh(&settings(vec!["http://127.0.0.1:1".to_string()]), &auto).await;
+
+    match outcome {
+        RefreshOutcome::Offline { reason } => {
+            assert!(
+                reason.contains("a concurrent refresher holds the lock"),
+                "{reason}"
+            );
+        }
+        other => panic!("a held lock is offline, not {other:?}"),
+    }
+    assert!(!auto.exists(), "nothing installed");
+    drop(held);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn a_pointer_phase_with_no_live_mirror_is_offline() {
+    let dir = temp_dir("pointer-dead");
+    let auto = dir.join("providers.auto.toml");
+
+    let outcome = refresh(&settings(vec!["http://127.0.0.1:1".to_string()]), &auto).await;
+
+    match outcome {
+        RefreshOutcome::Offline { reason } => {
+            assert!(reason.contains("every mirror failed"), "{reason}");
+        }
+        other => panic!("a dead mirror is offline, not {other:?}"),
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn an_unparseable_pointer_is_offline() {
+    let dir = temp_dir("bad-pointer");
+    let auto = dir.join("providers.auto.toml");
+    let server = httpmock::MockServer::start_async().await;
+    server.mock(|when, then| {
+        when.path("/latest.toml");
+        then.status(200).body("not toml = [");
+    });
+
+    let outcome = refresh(&settings(vec![server.url("")]), &auto).await;
+
+    match outcome {
+        RefreshOutcome::Offline { reason } => {
+            assert!(reason.contains("bad pointer"), "{reason}");
+        }
+        other => panic!("a bad pointer is offline, not {other:?}"),
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn a_stale_state_matching_the_pointer_restamps_without_downloading() {
+    // The stale-TTL state whose version IS the pointer's: same
+    // catalog, fresh stamp — the TTL restarts, the artifact never
+    // re-downloads.
+    let dir = temp_dir("restamp");
+    let auto = dir.join("providers.auto.toml");
+    write_state(
+        &state_path(&auto),
+        &CatalogState {
+            version: "v1".to_string(),
+            fetched_at: 0,
+        },
+    )
+    .expect("the stale state writes");
+    let server = httpmock::MockServer::start_async().await;
+    let latest = format!(
+        "version = \"v1\"\nsha256 = \"{}\"\nmin_schema = 1\n",
+        sha256_hex(CATALOG_V1)
+    );
+    server.mock(|when, then| {
+        when.path("/latest.toml");
+        then.status(200).body(&latest);
+    });
+    let artifact = server.mock(|when, then| {
+        when.path("/catalog-v1.toml");
+        then.status(500);
+    });
+
+    let outcome = refresh(&settings(vec![server.url("")]), &auto).await;
+
+    assert_eq!(
+        outcome,
+        RefreshOutcome::Fresh {
+            version: "v1".to_string()
+        }
+    );
+    assert_eq!(
+        artifact.calls_async().await,
+        0,
+        "the same version never re-downloads"
+    );
+    let restamped = read_state(&state_path(&auto)).expect("the state re-stamped");
+    assert!(restamped.fetched_at > 0, "the TTL restarted");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn an_unparseable_artifact_is_refused_and_never_lands() {
+    // The checksum passes (the bytes ARE the pointer's); the install
+    // refuses what cannot parse as a providers fragment.
+    let dir = temp_dir("bad-artifact");
+    let auto = dir.join("providers.auto.toml");
+    let garbage = "not toml = [";
+    let server = httpmock::MockServer::start_async().await;
+    let latest = format!(
+        "version = \"v1\"\nsha256 = \"{}\"\nmin_schema = 1\n",
+        sha256_hex(garbage)
+    );
+    server.mock(|when, then| {
+        when.path("/latest.toml");
+        then.status(200).body(&latest);
+    });
+    server.mock(|when, then| {
+        when.path("/catalog-v1.toml");
+        then.status(200).body(garbage);
+    });
+
+    let outcome = refresh(&settings(vec![server.url("")]), &auto).await;
+
+    match outcome {
+        RefreshOutcome::Offline { reason } => {
+            assert!(reason.contains("artifact does not parse"), "{reason}");
+        }
+        other => panic!("a refused artifact is offline, not {other:?}"),
+    }
+    assert!(!auto.exists(), "a refused artifact never lands");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn a_missing_artifact_is_offline() {
+    let dir = temp_dir("artifact-404");
+    let auto = dir.join("providers.auto.toml");
+    let server = httpmock::MockServer::start_async().await;
+    let latest = format!(
+        "version = \"v1\"\nsha256 = \"{}\"\nmin_schema = 1\n",
+        sha256_hex(CATALOG_V1)
+    );
+    server.mock(|when, then| {
+        when.path("/latest.toml");
+        then.status(200).body(&latest);
+    });
+    server.mock(|when, then| {
+        when.path("/catalog-v1.toml");
+        then.status(404);
+    });
+
+    let outcome = refresh(&settings(vec![server.url("")]), &auto).await;
+
+    match outcome {
+        RefreshOutcome::Offline { reason } => {
+            assert!(reason.contains("artifact: every mirror failed"), "{reason}");
+        }
+        other => panic!("a missing artifact is offline, not {other:?}"),
+    }
+    assert!(!auto.exists(), "nothing installed");
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[tokio::test]
@@ -346,10 +564,24 @@ min_schema = 1
 
 /// Boot-shape test harness: a staged home, config path, and offline
 /// extension root, with the catalog settings pointing at the mock.
+/// The root stages two STATIC packages (no entry ⇒ no spawn): relay
+/// contributes a providers fragment, relay2's fragment repeats
+/// relay's provider id (the fragment-collision warning).
 fn boot_stage(tag: &str, urls: Vec<String>, budgets: (u64, u64)) -> (PathBuf, crate::AppOptions) {
     let dir = temp_dir(tag);
     let extensions = dir.join("extensions");
     std::fs::create_dir_all(&extensions).expect("extensions");
+    let fragment = "[providers.relay]\nbase_url = \"http://127.0.0.1:8391/v1\"\napi = \"openai-completions\"\nkeyless = true\n";
+    for name in ["relay", "relay2"] {
+        let package = extensions.join(name);
+        std::fs::create_dir_all(&package).expect("package dir");
+        std::fs::write(
+            package.join("tabit.json"),
+            format!("{{\"name\":\"{name}\",\"version\":\"0.1.0\"}}"),
+        )
+        .expect("manifest");
+        std::fs::write(package.join("providers.toml"), fragment).expect("fragment");
+    }
     let settings_body = format!(
         "[catalog]
 urls = {:?}
@@ -393,6 +625,24 @@ fn a_child_session_never_refreshes_the_catalog() {
     // no config path disables.
     let plan = crate::assemble::catalog_plan(false, &settings, Some(&auto));
     assert!(matches!(plan, crate::assemble::CatalogPlan::Check(_)));
+    // A cache within TTL reports its version without a network check.
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock")
+        .as_secs();
+    write_state(
+        &state_path(&auto),
+        &CatalogState {
+            version: "v1".to_string(),
+            fetched_at: now,
+        },
+    )
+    .expect("state writes");
+    let plan = crate::assemble::catalog_plan(false, &settings, Some(&auto));
+    assert!(
+        matches!(plan, crate::assemble::CatalogPlan::Cached { version: Some(ref version) } if version == "v1"),
+        "a fresh cache merges without a check"
+    );
     let mut off = settings.clone();
     off.auto_update = false;
     let plan = crate::assemble::catalog_plan(false, &off, Some(&auto));
@@ -404,6 +654,9 @@ fn a_child_session_never_refreshes_the_catalog() {
 
 #[test]
 fn a_slow_update_is_pending_and_installs_for_next_boot() {
+    // boot_stage sets TABIT_SETTINGS (process-global): serialize
+    // against the other env-staging tests.
+    let _env_guard = crate::TEST_ENV_LOCK.lock().expect("env lock");
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -431,7 +684,7 @@ min_schema = 1
     let config_path = boot_config_path(&dir);
     let auto = dir.join("providers.auto.toml");
 
-    let boot = crate::world_scan(
+    let mut boot = crate::world_scan(
         &options,
         TabitConfig::default(),
         Some(config_path),
@@ -439,6 +692,16 @@ min_schema = 1
     )
     .expect("world_scan");
     assert!(boot.checking_catalog());
+    // The staged static packages mount (scan facts only — no entry,
+    // no launch) and reach the fragment merge.
+    let launchable = boot.take_launchable();
+    let names: Vec<&str> = launchable
+        .packages
+        .iter()
+        .map(|(name, _)| name.as_str())
+        .collect();
+    assert_eq!(names, ["relay", "relay2"], "scan order is directory order");
+    assert!(launchable.found.is_empty(), "static packages never launch");
     let registry = crate::build_registry(boot, &runtime);
     assert!(
         matches!(
@@ -447,6 +710,10 @@ min_schema = 1
         ),
         "{:?}",
         registry.catalog_status()
+    );
+    assert!(
+        registry.config().provider("relay").is_some(),
+        "the package fragment merged under the user config"
     );
     assert!(!auto.exists(), "the merge ran before the install");
 

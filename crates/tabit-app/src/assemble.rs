@@ -897,6 +897,324 @@ id = "m2"
         )
     }
 
+    /// A hand-built boot (build_registry ignores the launchable
+    /// half): the catalog arms fill without a world_scan.
+    fn staged_boot(
+        refresh: Option<tokio::task::JoinHandle<crate::catalog::RefreshOutcome>>,
+        cached_version: Option<String>,
+        disabled: bool,
+        auto_path: Option<PathBuf>,
+    ) -> WorldBoot {
+        WorldBoot {
+            launchable: None,
+            merged: TabitConfig::default(),
+            auth: Arc::new(AuthConfig::default()),
+            catalog: tabit_config::CatalogSettings::default(),
+            auto_path,
+            cached_version,
+            refresh,
+            disabled,
+        }
+    }
+
+    fn test_runtime() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime")
+    }
+
+    #[test]
+    fn build_registry_stamps_each_refresh_outcome() {
+        use crate::catalog::RefreshOutcome;
+        use tabit_session::CatalogStatus;
+        let runtime = test_runtime();
+        let _guard = runtime.enter();
+
+        let boot = staged_boot(
+            Some(runtime.spawn(async {
+                RefreshOutcome::Fresh {
+                    version: "v1".to_string(),
+                }
+            })),
+            None,
+            false,
+            None,
+        );
+        assert_eq!(
+            build_registry(boot, &runtime).catalog_status(),
+            &CatalogStatus::Fresh {
+                version: Some("v1".to_string())
+            }
+        );
+
+        let boot = staged_boot(
+            Some(runtime.spawn(async {
+                RefreshOutcome::Updated {
+                    version: "v2".to_string(),
+                }
+            })),
+            None,
+            false,
+            None,
+        );
+        assert_eq!(
+            build_registry(boot, &runtime).catalog_status(),
+            &CatalogStatus::Updated {
+                version: "v2".to_string()
+            }
+        );
+
+        // Offline reports the LAST cache's version, not the failure's.
+        let boot = staged_boot(
+            Some(runtime.spawn(async {
+                RefreshOutcome::Offline {
+                    reason: "down".to_string(),
+                }
+            })),
+            Some("v0".to_string()),
+            false,
+            None,
+        );
+        assert_eq!(
+            build_registry(boot, &runtime).catalog_status(),
+            &CatalogStatus::Offline {
+                version: Some("v0".to_string())
+            }
+        );
+    }
+
+    #[test]
+    fn build_registry_without_a_refresh_reports_cached_or_disabled() {
+        use tabit_session::CatalogStatus;
+        let runtime = test_runtime();
+
+        let boot = staged_boot(None, None, true, None);
+        assert_eq!(
+            build_registry(boot, &runtime).catalog_status(),
+            &CatalogStatus::Disabled
+        );
+
+        let boot = staged_boot(None, Some("v1".to_string()), false, None);
+        assert_eq!(
+            build_registry(boot, &runtime).catalog_status(),
+            &CatalogStatus::Cached {
+                version: Some("v1".to_string())
+            }
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "catalog refresh task failed")]
+    fn a_panicking_refresh_task_is_the_sanctioned_crash() {
+        let runtime = test_runtime();
+        let _guard = runtime.enter();
+        let boot = staged_boot(
+            Some(runtime.spawn(async {
+                panic!("boom");
+                #[allow(unreachable_code)]
+                crate::catalog::RefreshOutcome::Offline {
+                    reason: String::new(),
+                }
+            })),
+            None,
+            false,
+            None,
+        );
+        let _ = build_registry(boot, &runtime);
+    }
+
+    #[test]
+    fn a_corrupt_auto_file_warns_and_keeps_the_input_providers() {
+        let dir = std::env::temp_dir().join(format!("tabit-corrupt-auto-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("dir");
+        let auto = dir.join("providers.auto.toml");
+        std::fs::write(&auto, "not toml = [").expect("garbage auto file");
+        let runtime = test_runtime();
+        let mut boot = staged_boot(None, None, false, Some(auto));
+        boot.merged = test_config();
+
+        let registry = build_registry(boot, &runtime);
+
+        // The unreadable generated file warns and is skipped — the
+        // input providers survive whole.
+        assert_eq!(registry.config().providers.len(), 1);
+        assert!(registry.config().provider("lmstudio").is_some());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_preamble_override_must_carry_text() {
+        let dir = std::env::temp_dir().join(format!("tabit-preamble-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = SessionStore::new(&dir);
+        let registry = ModelRegistry::new(Arc::new(test_config()), Arc::new(AuthConfig::default()));
+
+        // Whitespace-only is no override at all — loud, never a
+        // silently empty system prompt.
+        let blank = AppOptions {
+            preamble: Some("  ".to_string()),
+            ..AppOptions::default()
+        };
+        let error = match assemble(&blank, &registry, &store, ContinueMiss::Fail, None) {
+            Err(error) => error,
+            Ok(_) => panic!("a blank preamble override is an error"),
+        };
+        assert!(
+            error.contains("the --preamble override is empty"),
+            "{error}"
+        );
+
+        // A real override replaces the default preamble and assembles.
+        let custom = AppOptions {
+            preamble: Some("You are a research probe.".to_string()),
+            ..AppOptions::default()
+        };
+        let (session, _) = assemble(&custom, &registry, &store, ContinueMiss::Fail, None)
+            .expect("a set preamble assembles");
+        assert!(!session.resumed());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn continue_resumes_the_newest_stored_session() {
+        let dir = std::env::temp_dir().join(format!("tabit-continue-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = SessionStore::new(&dir);
+        let registry = ModelRegistry::new(Arc::new(test_config()), Arc::new(AuthConfig::default()));
+
+        // A fresh assembly leaves no file (deferred creation) — one
+        // failing run over the dead-port provider materializes it
+        // (the user message commits at acceptance).
+        let (created, _) = assemble(
+            &AppOptions::default(),
+            &registry,
+            &store,
+            ContinueMiss::Fail,
+            None,
+        )
+        .expect("the seed session assembles");
+        test_runtime().block_on(async {
+            let wiring = SessionHostWiring {
+                node: host_node(),
+                store: store.clone(),
+                boot_parent: None,
+                boot_parent_call: None,
+            };
+            let mounted = Arc::new(extensions::Mounted::none());
+            let data = host_data(&AppOptions::default(), &registry, &store, &mounted);
+            let mut handle = SessionHost::spawn(created, Vec::new(), wiring, data);
+            let id = handle.info().session_id.clone();
+            handle.message(&id, "seed the file");
+            handle.close_commands();
+            while let Some(frame) = handle.next_event().await {
+                if matches!(frame.event, tabit_session::SessionEvent::RunFailed { .. }) {
+                    break;
+                }
+            }
+        });
+
+        // --continue over a non-empty store resumes the newest.
+        let cont = AppOptions {
+            continue_newest: true,
+            ..AppOptions::default()
+        };
+        let (session, _) = assemble(&cont, &registry, &store, ContinueMiss::Fail, None)
+            .expect("a non-empty store resumes");
+        assert!(session.resumed(), "the newest stored session resumes");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_disabled_gate_mounts_a_bare_hook_stack() {
+        let _guard = crate::TEST_ENV_LOCK.lock().expect("env lock");
+        let dir = std::env::temp_dir().join(format!("tabit-gate-off-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("dir");
+        let settings = dir.join("settings.toml");
+        std::fs::write(&settings, "[gate]\nenabled = false\n").expect("settings");
+        let store = SessionStore::new(dir.join("sessions"));
+        let registry = ModelRegistry::new(Arc::new(test_config()), Arc::new(AuthConfig::default()));
+        // SAFETY: serialized by TEST_ENV_LOCK.
+        unsafe {
+            std::env::set_var("TABIT_SETTINGS", &settings);
+        }
+        let assembled = assemble(
+            &AppOptions::default(),
+            &registry,
+            &store,
+            ContinueMiss::Fail,
+            None,
+        );
+        // SAFETY: restoring immediately; no other env reader runs
+        // under the lock.
+        unsafe {
+            std::env::remove_var("TABIT_SETTINGS");
+        }
+        let (session, _) = assembled.expect("a gate-less assembly builds");
+        assert!(!session.resumed());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_install_root_is_the_default_extensions_dir() {
+        let _guard = crate::TEST_ENV_LOCK.lock().expect("env lock");
+        let home = std::env::temp_dir().join(format!("tabit-install-root-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).expect("home");
+        // home_dir prefers USERPROFILE (Windows) over HOME — stage
+        // both, restore after.
+        let saved_userprofile = std::env::var_os("USERPROFILE");
+        let saved_home = std::env::var_os("HOME");
+        // SAFETY: serialized by TEST_ENV_LOCK.
+        unsafe {
+            std::env::set_var("USERPROFILE", &home);
+            std::env::set_var("HOME", &home);
+        }
+        let root = install_root();
+        // SAFETY: restoring immediately.
+        unsafe {
+            match &saved_userprofile {
+                Some(saved) => std::env::set_var("USERPROFILE", saved),
+                None => std::env::remove_var("USERPROFILE"),
+            }
+            match &saved_home {
+                Some(saved) => std::env::set_var("HOME", saved),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+        assert_eq!(
+            root.expect("a staged home resolves"),
+            home.join(".tabit").join("extensions")
+        );
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn the_extension_skills_catalog_reads_each_packages_skill_tree() {
+        let dir = std::env::temp_dir().join(format!("tabit-ext-skills-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let skill = dir.join("pkg").join("skills").join("demo");
+        std::fs::create_dir_all(&skill).expect("skill dir");
+        std::fs::write(
+            skill.join("SKILL.md"),
+            "---\nname: demo\ndescription: a demo skill\n---\nbody\n",
+        )
+        .expect("SKILL.md");
+
+        let skills = extension_skills_catalog(&[("pkg".to_string(), dir.join("pkg"))]);
+
+        let entry = skills
+            .lookup("demo")
+            .expect("the package's skill registered");
+        assert!(
+            entry.skill_file.ends_with("SKILL.md"),
+            "entries keep the package's own paths"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn the_tool_filter_admits_allowed_and_not_denied() {
         let candidate = vec![named_tool("read"), named_tool("bash"), named_tool("echo")];
@@ -1115,10 +1433,17 @@ id = "m2"
         let dir = std::env::temp_dir().join(format!("tabit-frag-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("package dir");
-        std::fs::write(dir.join("providers.toml"), "not toml").expect("broken fragment");
         let mut config = TabitConfig::default();
         let user_ids = std::collections::HashSet::new();
         let mut warnings = Vec::new();
+
+        // A package without a providers.toml contributes nothing and
+        // never warns — the common case.
+        merge_fragment_into(&mut config, "broken", &dir, &user_ids, &mut warnings);
+        assert!(config.providers.is_empty());
+        assert!(warnings.is_empty(), "{warnings:?}");
+
+        std::fs::write(dir.join("providers.toml"), "not toml").expect("broken fragment");
         merge_fragment_into(&mut config, "broken", &dir, &user_ids, &mut warnings);
         assert!(config.providers.is_empty());
         assert_eq!(warnings.len(), 1);
@@ -1312,6 +1637,7 @@ id = "m"
         let registry = ModelRegistry::new(Arc::new(test_config()), Arc::new(AuthConfig::default()));
         let child_role = AppOptions {
             ephemeral: true,
+            max_turns: Some(7),
             ..AppOptions::default()
         };
         let (session, _) = assemble(

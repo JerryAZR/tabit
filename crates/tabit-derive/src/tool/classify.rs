@@ -200,6 +200,16 @@ mod tests {
         let wrapped_path = wrapped("some::ToolContext", true);
         is_tool_context_type(&wrapped_path, &refs);
 
+        // A parenthesized context path still classifies: the
+        // parentheses are transparent to the recognition.
+        let context = format!("({}::tool::ToolContext)", "tabit_engine");
+        let paren_context: Type = syn::parse_str(&context).expect("paren type parses");
+        assert!(matches!(paren_context, Type::Paren(_)));
+        assert!(
+            is_tool_context_type(&paren_context, &refs),
+            "tabit-engine is a dev-dependency, so its root resolves"
+        );
+
         // A transparent wrapper around an explicitly marked shared reference
         // is reported as a context (with the mutability checked separately).
         let marked = wrapped("&mut Context", false);
