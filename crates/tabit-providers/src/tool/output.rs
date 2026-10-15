@@ -110,11 +110,12 @@ impl ToolOutput {
         } else {
             // `OneOrMany<ToolResultContent>` is plain serde data (strings,
             // JSON values, media-type enums), so serialization cannot fail;
-            // if it ever does, flag the internal invariant loudly instead of
-            // silently substituting ordinary-looking output.
-            serde_json::to_string(&self.content).unwrap_or_else(|err| {
-                format!("<internal invariant violated: tool output failed to serialize: {err}>")
-            })
+            // if it ever does, that is an internal invariant violation —
+            // the sanctioned crash, never a placeholder that looks like
+            // real output.
+            #[allow(clippy::expect_used)]
+            serde_json::to_string(&self.content)
+                .expect("internal invariant violated: tool output failed to serialize")
         }
     }
 }
