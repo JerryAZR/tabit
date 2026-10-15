@@ -1206,14 +1206,6 @@ impl From<&str> for Message {
     }
 }
 
-impl From<&String> for Message {
-    fn from(text: &String) -> Self {
-        Message::User {
-            content: OneOrMany::one(UserContent::Text(text.into())),
-        }
-    }
-}
-
 impl From<Text> for Message {
     fn from(text: Text) -> Self {
         Message::User {
@@ -1243,12 +1235,6 @@ impl From<Document> for Message {
         Message::User {
             content: OneOrMany::one(UserContent::Document(document)),
         }
-    }
-}
-
-impl From<String> for ToolResultContent {
-    fn from(text: String) -> Self {
-        ToolResultContent::text(text)
     }
 }
 
@@ -1961,11 +1947,8 @@ mod tests {
         let source = Message::user("clone me");
         assert_eq!(Message::from(&source), source);
 
-        let borrowed: &String = &"from &String".to_string();
-        assert_eq!(
-            Message::from(borrowed.clone()),
-            Message::user("from &String")
-        );
+        let borrowed = "from &str";
+        assert_eq!(Message::from(borrowed), Message::user("from &str"));
 
         assert_eq!(
             Message::from(Text::new("from Text")),

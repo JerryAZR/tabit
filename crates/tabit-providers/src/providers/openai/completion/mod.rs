@@ -62,8 +62,7 @@ pub enum Message {
         #[serde(
             default,
             deserialize_with = "json_utils::string_or_vec",
-            skip_serializing_if = "Vec::is_empty",
-            serialize_with = "serialize_assistant_content_vec"
+            skip_serializing_if = "Vec::is_empty"
         )]
         content: Vec<AssistantContent>,
         // OpenAI-compatible providers expose hidden reasoning on this non-standard
@@ -1099,7 +1098,9 @@ impl crate::completion::NormalizeCompletionResponse for CompletionResponse {
             )),
         }?;
 
-        let choice = if content.is_empty() {
+        let choice = if let Some(choice) = OneOrMany::from_iter_optional(content) {
+            choice
+        } else {
             // A turn the provider cut short (output budget, content
             // filter) may legitimately carry no content: the finish reason
             // and usage are the story — upstream's truncated-turn rule,
@@ -1118,12 +1119,6 @@ impl crate::completion::NormalizeCompletionResponse for CompletionResponse {
                     ));
                 }
             }
-        } else {
-            OneOrMany::many(content).map_err(|_| {
-                CompletionError::ResponseError(
-                    "Response contained no message or tool call (empty)".to_owned(),
-                )
-            })?
         };
 
         let usage = response
@@ -1858,20 +1853,6 @@ where
 {
     fn construct(client: &crate::client::Client<Ext, H>, model: String) -> Self {
         Self::new(client.clone(), model)
-    }
-}
-
-fn serialize_assistant_content_vec<S>(
-    value: &Vec<AssistantContent>,
-    serializer: S,
-) -> Result<S::Ok, S::Error>
-where
-    S: Serializer,
-{
-    if value.is_empty() {
-        serializer.serialize_str("")
-    } else {
-        value.serialize(serializer)
     }
 }
 

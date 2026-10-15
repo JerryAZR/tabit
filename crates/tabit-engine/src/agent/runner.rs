@@ -50,7 +50,7 @@ use tabit_providers::{
 use tabit_log::ContextManager;
 
 use crate::{
-    completion::{CompletionModel, Document, Message, PromptError, Usage},
+    completion::{CompletionModel, Document, Message, PromptError},
     json_utils,
     tool::{
         ToolContext, ToolDispatch, ToolOutput, ToolResult,
@@ -200,7 +200,6 @@ pub struct AgentRunner {
     pub(crate) tool_choice: Option<ToolChoice>,
     pub(crate) concurrency: usize,
     pub(crate) hooks: HookStack,
-    pub(crate) error_usage: Option<Arc<Mutex<Usage>>>,
     /// Queued user input injected at steering points; `None` disables
     /// steering for this request.
     pub(crate) steering: Option<Arc<dyn SteeringSource>>,
@@ -277,7 +276,6 @@ impl AgentRunner {
             tool_choice: agent.tool_choice.clone(),
             concurrency: 1,
             hooks: agent.hooks.clone(),
-            error_usage: None,
             steering: None,
             pre_request: None,
             turn_id_source: Arc::new(tabit_providers::id::generate),
@@ -780,8 +778,12 @@ pub(crate) async fn run_single_tool(
 /// one). A presentation rewrite replaces only the content — the execution
 /// still happened, so the status is the execution's either way.
 fn with_execution_status(content: UserContent, result: &ToolResult) -> UserContent {
+    // Every call site stamps tool_result_output/tool_result_message output,
+    // which builds only UserContent::ToolResult — the else is the
+    // sanctioned crash for a broken invariant (AGENTS.md doctrine).
+    #[allow(clippy::unreachable)]
     let UserContent::ToolResult(mut tool_result) = content else {
-        return content;
+        unreachable!("with_execution_status requires a tool-result message")
     };
     tool_result.status = Some(result.execution_status());
     UserContent::ToolResult(tool_result)

@@ -171,9 +171,9 @@ where
                 .to_string(),
         ));
     }
-    if let Some(error) = assembler.pending_delta_error() {
-        return classify_error(error);
-    }
+    // No pending-delta-error check here: a buffered-delta defect either
+    // surfaced at the Final item's ingest precheck (returned above as an
+    // ingest error) or, without a Final, lost to the truncation return.
     let final_choice = stream.choice.clone();
     let streamed_turn = assembler.finish(stream.message_id.clone(), &final_choice);
     let mut turn = ModelTurn::new(

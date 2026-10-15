@@ -81,19 +81,14 @@ pub struct ToolCallBridge<I> {
     minted: SyntheticIds,
 }
 
-impl<I> Default for ToolCallBridge<I>
-where
-    I: Eq + Hash + Ord + Copy,
-{
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl<I> ToolCallBridge<I>
 where
     I: Eq + Hash + Ord + Copy,
 {
+    // No `Default`: the only constructions are this and
+    // `with_minted_namespace`, and clippy's new_without_default would
+    // otherwise demand a dead `Default` impl.
+    #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
         Self {
             slots: HashMap::new(),

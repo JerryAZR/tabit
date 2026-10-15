@@ -140,12 +140,6 @@ pub(crate) fn streaming_error_into_prompt(err: StreamingError) -> PromptError {
     }
 }
 
-pub(crate) fn store_error_usage(runner: &AgentRunner, ledger: &RunLedger) {
-    if let Some(usage) = &runner.error_usage {
-        *tabit_log::lock::lock(usage) = ledger.usage();
-    }
-}
-
 /// How a failed turn classifies — the loop owns error observation and
 /// classification (ENGINE.md's taxonomy).
 enum TurnFailure {
@@ -296,7 +290,6 @@ where
             // session actor's presence in the engine — so the notice
             // rides the mailbox's own channel ahead of the terminal.
             if let Some(reason) = terminating.take() {
-                store_error_usage(&runner, &ledger);
                 if let Some(steering) = runner.steering.as_ref() {
                     steering.discard_pending();
                 }
@@ -333,7 +326,6 @@ where
             // at-least-one-turn by construction. The entry rule below
             // is the one first-pass exit.
             if pending_error_terminal {
-                store_error_usage(&runner, &ledger);
                 // Sanctioned crash: the flag is only ever set alongside
                 // the error it classifies (AGENTS.md doctrine).
                 #[allow(clippy::expect_used)]
@@ -353,7 +345,6 @@ where
                 break 'outer;
             }
             if defect_streak > crate::agent::run::TURN_RETRY_CAP {
-                store_error_usage(&runner, &ledger);
                 yield Err(Box::new(PromptError::prompt_cancelled(format!(
                     "the model repeatedly emitted tool calls with malformed arguments \
                      ({defect_streak} consecutive turns discarded and retried); the \
@@ -364,7 +355,6 @@ where
                 break 'outer;
             }
             if provider_streak > crate::agent::run::TURN_RETRY_CAP {
-                store_error_usage(&runner, &ledger);
                 yield Err(Box::new(PromptError::prompt_cancelled(
                     "provider retry streak exhausted",
                 ))
@@ -372,7 +362,6 @@ where
                 break 'outer;
             }
             if turns_used >= runner.max_turns {
-                store_error_usage(&runner, &ledger);
                 yield Err(StreamingError::Prompt(Box::new(
                     PromptError::MaxTurnsError {
                         max_turns: runner.max_turns,
@@ -390,7 +379,6 @@ where
             if !entry_checked {
                 entry_checked = true;
                 if cell_history(conversation).is_empty() {
-                    store_error_usage(&runner, &ledger);
                     yield Err(Box::new(PromptError::prompt_cancelled(
                         "empty conversation: a run needs the message being sent — the cell \
                          and the steering drain both produced nothing",

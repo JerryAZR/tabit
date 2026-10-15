@@ -45,7 +45,7 @@ use crate::{
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::ops::{Add, AddAssign};
+use std::ops::AddAssign;
 use thiserror::Error;
 
 // Errors
@@ -565,25 +565,6 @@ impl Usage {
 impl Default for Usage {
     fn default() -> Self {
         Self::new()
-    }
-}
-
-impl Add for Usage {
-    type Output = Self;
-
-    fn add(self, other: Self) -> Self::Output {
-        Self {
-            input_tokens: self.input_tokens + other.input_tokens,
-            output_tokens: self.output_tokens + other.output_tokens,
-            total_tokens: self.total_tokens + other.total_tokens,
-            cached_input_tokens: self.cached_input_tokens + other.cached_input_tokens,
-            cache_creation_input_tokens: self.cache_creation_input_tokens
-                + other.cache_creation_input_tokens,
-            cache_creation_1h_input_tokens: self.cache_creation_1h_input_tokens
-                + other.cache_creation_1h_input_tokens,
-            tool_use_prompt_tokens: self.tool_use_prompt_tokens + other.tool_use_prompt_tokens,
-            reasoning_tokens: self.reasoning_tokens + other.reasoning_tokens,
-        }
     }
 }
 

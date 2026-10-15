@@ -173,12 +173,6 @@ pub(crate) fn reasoning_choices_from_done_item(
     choices
 }
 
-impl From<&StreamingCompletionResponse> for crate::completion::Usage {
-    fn from(response: &StreamingCompletionResponse) -> Self {
-        Self::from(&response.usage)
-    }
-}
-
 /// A response chunk from OpenAI's response API.
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ResponseChunk {

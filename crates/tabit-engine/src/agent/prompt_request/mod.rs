@@ -402,18 +402,19 @@ pub(crate) fn tool_result_message(
     call_id: Option<String>,
     message: String,
 ) -> UserContent {
-    match tool_result_with(
+    // tool_result_with builds only UserContent::ToolResult — the else is
+    // the sanctioned crash for a broken invariant (AGENTS.md doctrine).
+    #[allow(clippy::unreachable)]
+    let UserContent::ToolResult(mut tool_result) = tool_result_with(
         id,
         call_id,
         OneOrMany::one(ToolResultContent::text(message)),
         None,
-    ) {
-        UserContent::ToolResult(mut tool_result) => {
-            tool_result.status = Some(ToolResultStatus::Failed { code: None });
-            UserContent::ToolResult(tool_result)
-        }
-        other => other,
-    }
+    ) else {
+        unreachable!("tool_result_with builds only UserContent::ToolResult")
+    };
+    tool_result.status = Some(ToolResultStatus::Failed { code: None });
+    UserContent::ToolResult(tool_result)
 }
 
 pub(crate) fn is_empty_assistant_turn(choice: &OneOrMany<AssistantContent>) -> bool {

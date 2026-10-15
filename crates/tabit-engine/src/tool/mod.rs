@@ -432,10 +432,7 @@ impl ErasedTool for DynamicTool {
                 }
             };
             match (self.callback)(context, args).await {
-                Ok(output) => match output.into_tool_output() {
-                    Ok(output) => ToolResult::success(output),
-                    Err(error) => ToolResult::failed(error),
-                },
+                Ok(output) => ToolResult::success(output),
                 Err(error) => ToolResult::failed(error),
             }
         })
