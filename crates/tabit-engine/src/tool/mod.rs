@@ -937,6 +937,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn from_tools_registers_homogeneous_typed_tools() {
+        // The homogeneous-vector entry point: same type, one call, and
+        // the set dispatches exactly like an `add_tool`-built one.
+        let set = ToolSet::from_tools(vec![Echo]);
+
+        assert!(set.contains("echo"));
+        assert_eq!(set.get_tool_definitions()[0].name, "echo");
+        let result = set
+            .execute("echo", r#"{"value":1}"#, &mut ToolContext::new())
+            .await;
+        assert!(result.is_success());
+        assert_eq!(
+            result.output(),
+            &ToolOutput::json(serde_json::json!({"value": 1}))
+        );
+    }
+
+    #[tokio::test]
     async fn toolset_dispatch_snapshot_is_canonical_and_returns_result_metadata() {
         let mut set = ToolSet::default();
         set.add_tool(Echo);
@@ -1985,6 +2003,29 @@ mod migrated_tests {
             &portable_fixture_output("portable dynamic failure")
         );
         assert_eq!(failure.output(), error.model_output());
+    }
+
+    /// The `From` conversion is the `from_portable` adapter spelled for
+    /// generic callers: name, definition, and callback all carry across.
+    #[tokio::test]
+    async fn dynamic_tool_from_conversion_adapts_the_portable_callback() {
+        let tool = DynamicTool::from(portable_dynamic_fixture());
+        assert_eq!(tool.name(), "portable_runtime_name");
+
+        let mut toolset = ToolSet::default();
+        toolset.add_dynamic_tool(tool);
+        let result = toolset
+            .execute(
+                "portable_runtime_name",
+                r#"{"value":"via-from"}"#,
+                &mut ToolContext::new(),
+            )
+            .await;
+        assert!(result.is_success());
+        assert_eq!(
+            result.output(),
+            &portable_fixture_output("dynamic:via-from")
+        );
     }
 
     #[tokio::test]

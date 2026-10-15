@@ -3498,3 +3498,77 @@ async fn approval_policy_allow_list_with_sticky_decisions() {
         "the policy denial reason must reach the model as the subtract tool result"
     );
 }
+
+/// A steering source that deliberately keeps the DEFAULT
+/// `discard_pending` (it has nothing source-specific to say at a stop):
+/// its one message is queued only after the opening drain, so a post-tool
+/// stop finds it still pending — and the stop never drains.
+struct LateQueuedSteers {
+    /// (opening drain done, message not yet taken)
+    state: Mutex<(bool, Option<Message>)>,
+}
+
+impl crate::agent::runner::SteeringSource for LateQueuedSteers {
+    fn drain(&self) -> Vec<(String, Message)> {
+        let mut state = self.state.lock().expect("steer state");
+        let (opening_done, pending) = &mut *state;
+        if !*opening_done {
+            // The opening drain (before the first model call) runs before
+            // the message exists; only a later drain would take it.
+            *opening_done = true;
+            return Vec::new();
+        }
+        pending
+            .take()
+            .map(|message| vec![(tabit_providers::id::generate(), message)])
+            .unwrap_or_default()
+    }
+    // `discard_pending` deliberately not overridden: the default no-op.
+}
+
+/// The post-tool stop exit calls the steering source's `discard_pending`
+/// (ENGINE.md, stop taxonomy: the queue dies with the stopped run). For a
+/// source on the default, the call is a tolerated no-op: the pending
+/// message is never folded, never sent, and the stop reason is the run's
+/// whole answer.
+#[tokio::test]
+async fn a_post_tool_stop_discards_pending_steers_through_the_default() {
+    let steers = Arc::new(LateQueuedSteers {
+        state: Mutex::new((false, Some(Message::user("wait, actually...")))),
+    });
+
+    let mut stream = AgentBuilder::new(stream_model([
+        MockTurn::tool_call("tc1", "add", json!({"x": 1, "y": 2})),
+        MockTurn::text("unreachable"),
+    ]))
+    .tool(MockAddTool)
+    .build()
+    .runner("go")
+    .max_turns(3)
+    .steering(steers.clone())
+    .add_hook(HumanApprovalHook::new([Decision::Abort(
+        "halted by the reviewer",
+    )]))
+    .stream()
+    .await;
+
+    let mut stream_error = None;
+    while let Some(item) = stream.next().await {
+        match item {
+            Err(err) => stream_error = Some(format!("{err}")),
+            Ok(MultiTurnStreamItem::FinalResponse(resp)) => {
+                panic!("a stopped run must not finalize, got: {}", resp.output())
+            }
+            Ok(_) => {}
+        }
+    }
+    let stream_error = stream_error.expect("the post-tool stop errors the run");
+    assert!(
+        stream_error.contains("halted by the reviewer"),
+        "the stop reason is the run's answer, got: {stream_error}"
+    );
+    assert!(
+        steers.state.lock().expect("steer state").1.is_some(),
+        "the default discard is a no-op: the pending message never joined the run"
+    );
+}

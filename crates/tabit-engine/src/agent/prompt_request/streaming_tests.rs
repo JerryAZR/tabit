@@ -312,6 +312,44 @@ async fn malformed_tool_call_discards_the_turn_and_retries_within_budget() {
     );
 }
 
+/// A 429 from the provider classifies retryable (ENGINE.md's taxonomy:
+/// rate limits retry, everything else is terminal): the loop re-issues the
+/// identical request and the run completes on the recovery turn.
+#[tokio::test]
+async fn a_rate_limited_turn_retries_and_recovers() {
+    use crate::streaming::StreamingChat;
+
+    let model = MockCompletionModel::from_stream_turns([
+        vec![MockStreamEvent::Error(MockError::http(
+            429,
+            "rate limit exceeded",
+        ))],
+        vec![
+            MockStreamEvent::text("recovered"),
+            MockStreamEvent::final_response(Usage::new()),
+        ],
+    ]);
+    let agent = Arc::new(AgentBuilder::new(model.clone()).build());
+
+    let mut stream = agent.stream_chat(vec![Message::user("go")]).await;
+    let mut finished = false;
+    while let Some(item) = stream.next().await {
+        if let Ok(crate::agent::MultiTurnStreamItem::FinalResponse(_)) = item {
+            finished = true;
+        }
+    }
+    assert!(
+        finished,
+        "the rate-limited turn retries; the recovery completes the run"
+    );
+    assert_eq!(model.request_count(), 2, "one 429, one recovery");
+    assert_eq!(
+        request_user_texts(&model.requests()[1]),
+        ["go"],
+        "the retry resent the identical conversation"
+    );
+}
+
 /// Two consecutive malformed turns exhaust the retry: the run fails with a
 /// message naming the defect and the levers, and the history stays clean.
 #[tokio::test]

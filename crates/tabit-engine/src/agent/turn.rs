@@ -378,6 +378,27 @@ mod tests {
         ));
     }
 
+    /// Argument deltas whose name never validated surface at the
+    /// terminal's ingest precheck and classify as a failure (not the
+    /// defect — the call's arguments never became parseable JSON to
+    /// reject; the stream itself was inconsistent).
+    #[tokio::test]
+    async fn deltas_before_their_name_fail_at_the_terminal() {
+        let outcome = consume_turns(
+            vec![vec![
+                MockStreamEvent::tool_call_arguments_delta("call-1", r#"{"path": "x"}"#),
+                MockStreamEvent::final_response_with_default_usage(),
+            ]],
+            &mut Vec::new(),
+        )
+        .await;
+        assert!(matches!(
+            outcome,
+            AttemptOutcome::Failed(CompletionError::ResponseError(message))
+                if message.contains("before a validated tool name")
+        ));
+    }
+
     #[tokio::test]
     async fn a_mid_stream_provider_error_settles_failed() {
         let outcome = consume_turns(

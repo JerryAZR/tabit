@@ -205,3 +205,106 @@ fn final_event_carries_the_finish_reason() {
         }]
     ));
 }
+
+/// An unmodeled provider item forwards to the consumer without touching
+/// the accumulated turn (no `AssistantContent::Unknown` exists to fold it
+/// into).
+#[test]
+fn unknown_items_forward_without_disturbing_accumulation() {
+    let mut assembler = assembler();
+    let events = assembler
+        .ingest(&StreamedAssistantContent::Unknown(serde_json::json!({
+            "type": "hosted_tool_result"
+        })))
+        .expect("ingest");
+    assert!(matches!(
+        events.as_slice(),
+        [StreamedTurnEvent::EmitIngested]
+    ));
+}
+
+/// Argument deltas whose name never validated turn the turn's Final into
+/// an error — the provider-stream consistency violation surfaces at the
+/// terminal, not silently as a half-named call.
+#[test]
+fn a_final_with_unvalidated_buffered_deltas_is_an_error() {
+    let mut assembler = assembler();
+    let buffered = assembler
+        .ingest(&StreamedAssistantContent::ToolCallDelta {
+            id: "call_1".to_string(),
+            internal_call_id: "internal_1".to_string(),
+            content: ToolCallDeltaContent::Delta("{\"x\":".to_string()),
+        })
+        .expect("buffered deltas emit nothing yet");
+    assert!(buffered.is_empty(), "the delta buffers awaiting its name");
+
+    let error = assembler
+        .ingest(&StreamedAssistantContent::Final(
+            tabit_providers::streaming::StreamFinal::new("mock", Usage::new()),
+        ))
+        .expect_err("the Final rejects the never-named delta");
+    let CompletionError::ResponseError(message) = error else {
+        panic!("the consistency violation is a response error");
+    };
+    assert!(
+        message.contains("received before a validated tool name"),
+        "got: {message}"
+    );
+    assert!(
+        message.contains("call_1"),
+        "the error names the call: {message}"
+    );
+    assert!(
+        message.contains("1 buffered argument delta(s)"),
+        "the error counts the buffered deltas: {message}"
+    );
+}
+
+/// Canonicalization keeps a text block that carries provider metadata even
+/// when its text is empty — the metadata is provider state the replay must
+/// not drop (the filter's second disjunct).
+#[test]
+fn empty_text_with_additional_params_survives_canonicalization() {
+    let mut assembler = assembler();
+    delta_events(
+        &mut assembler,
+        &[StreamedAssistantContent::ToolCall {
+            tool_call: tabit_providers::message::ToolCall::new(
+                "call_1".to_string(),
+                tabit_providers::message::ToolFunction::new(
+                    "add".to_string(),
+                    serde_json::json!({"x": 1}),
+                ),
+            ),
+            internal_call_id: "internal_1".to_string(),
+        }],
+    );
+    let metadata_text = AssistantContent::Text(tabit_providers::message::Text {
+        text: String::new(),
+        additional_params: Some(serde_json::json!({"provider_field": true})),
+    });
+    let final_choice = OneOrMany::one(metadata_text);
+
+    let turn = assembler.finish(None, &final_choice);
+
+    let kinds: Vec<&str> = turn
+        .choice
+        .iter()
+        .map(|content| match content {
+            AssistantContent::Text(text) => {
+                assert!(
+                    text.additional_params.is_some(),
+                    "the metadata rides the kept text block"
+                );
+                "text"
+            }
+            AssistantContent::ToolCall(_) => "tool",
+            _ => "other",
+        })
+        .collect();
+    assert_eq!(
+        kinds,
+        ["text", "tool"],
+        "the metadata-carrying empty text is kept ahead of the call"
+    );
+}

@@ -623,3 +623,72 @@ async fn merge_interleaves_under_one_priority_law() {
         vec!["inner-early", "outer-a", "inner-b"]
     );
 }
+
+/// The context's Debug renders its structure (the rewrite frames render
+/// non-exhaustively — interior frames are runtime scratch, not identity).
+#[test]
+fn hook_context_debug_renders_the_rewrite_frames_field() {
+    let debug = format!("{:?}", ctx());
+    assert!(
+        debug.contains("ToolCallRewriteFrames"),
+        "the rewrite frames render in the context's Debug: {debug}"
+    );
+}
+
+struct StubServices;
+impl crate::tool::services::HostServices for StubServices {
+    fn model_prompt(
+        &self,
+        _caller: &str,
+        _request: crate::tool::services::ModelPromptRequest,
+    ) -> futures::future::BoxFuture<'static, Result<crate::tool::services::ModelPromptOk, String>>
+    {
+        Box::pin(async { Err("stub: no services".to_string()) })
+    }
+}
+
+/// The capability getters read the run's capability map verbatim — a
+/// present capability surfaces, an absent one reports `None` (the same
+/// lookup the tool bodies make, driven through the host-side seam).
+#[test]
+fn hook_context_capability_getters_mirror_the_inserted_map() {
+    let mut capabilities = ToolContext::new();
+    capabilities.insert(tokio_util::sync::CancellationToken::new());
+    capabilities.insert(crate::tool::SessionTag(std::sync::Arc::from("session-1")));
+    capabilities.insert(std::sync::Arc::new(StubServices)
+        as std::sync::Arc<dyn crate::tool::services::HostServices>);
+    let mounted = crate::test_utils::hook_context(capabilities);
+    assert!(mounted.run_token().is_some());
+    assert_eq!(mounted.session_id().as_deref(), Some("session-1"));
+    assert!(mounted.host_services().is_some());
+
+    let empty = ctx();
+    assert!(empty.run_token().is_none());
+    assert!(empty.session_id().is_none());
+    assert!(empty.host_services().is_none());
+}
+
+/// The bare-id conversions are the zero-priority spellings: `From<&str>`
+/// and `From<String>` both register at the default priority.
+#[test]
+fn hook_spec_from_bare_ids_defaults_to_zero_priority() {
+    let borrowed = HookSpec::from("bare");
+    assert_eq!(borrowed.id, "bare");
+    assert_eq!(borrowed.priority, 0);
+
+    let owned = HookSpec::from(String::from("owned"));
+    assert_eq!(owned.id, "owned");
+    assert_eq!(owned.priority, 0);
+}
+
+/// A closure registered only at the post-result point passes the pre-call
+/// gate through untouched (each absent point is the pass-through default).
+#[tokio::test]
+async fn a_result_only_closure_passes_tool_calls_through() {
+    let stack = HookStack::new().hook(
+        ("result-only", 0),
+        on::tool_result(|_ctx, _event| Box::pin(async { ToolResultAction::keep() })),
+    );
+    let action = AgentHook::on_tool_call(&stack, &ctx(), tool_call_event()).await;
+    assert_eq!(action, ToolCallAction::run());
+}
