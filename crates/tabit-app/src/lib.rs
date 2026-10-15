@@ -43,3 +43,26 @@ pub use assemble::{
 pub use gate::PermissionGate;
 pub use options::{AppOptions, parse_model};
 pub use serve::{serve_json_stdio, setup_guide, startup_banner};
+
+/// The binary's one exit path. `std::process::exit` on Windows is
+/// `ExitProcess`, which never runs the CRT `atexit` chain — and the
+/// LLVM coverage runtime registers its profile flush there, so an
+/// instrumented child exiting via `process::exit` writes no profraw
+/// (the spawned-binary coverage attribution silently collapsed to
+/// zero until this flush was added, 2026-10). Flush explicitly under
+/// `cfg(coverage)` (cargo-llvm-cov sets it), then exit. Every
+/// terminal exit in the binary routes through here — never around.
+pub fn exit(code: i32) -> ! {
+    #[cfg(coverage)]
+    // SAFETY: `__llvm_profile_write_file` is the compiler-rt profile
+    // runtime's public flush entry point, linked exactly when the
+    // build is instrumented (which is exactly when `cfg(coverage)`
+    // is set). It is idempotent and takes no state.
+    unsafe {
+        unsafe extern "C" {
+            fn __llvm_profile_write_file() -> std::ffi::c_int;
+        }
+        __llvm_profile_write_file();
+    }
+    std::process::exit(code)
+}

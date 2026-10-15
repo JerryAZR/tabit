@@ -87,7 +87,7 @@ fn json_reject(reason: String) -> ! {
     };
     println!("{}", tabit_protocol::to_wire_line(&event));
     eprintln!("{reason}");
-    std::process::exit(1)
+    crate::exit(1)
 }
 
 /// Serve the frozen wire on stdio: the composition's JSON mode as one
@@ -212,7 +212,7 @@ pub fn serve_json_stdio(
         // never through the runtime drop (the reader thread parks in
         // an uninterruptible read on the stream-end path, and a
         // runtime drop would wait on it forever).
-        std::process::exit(code);
+        crate::exit(code);
     })
 }
 

@@ -169,7 +169,7 @@ fn install_crash_hook() {
             "tabit: internal error — exiting with code 101; \
              please report this together with the output above"
         );
-        std::process::exit(101);
+        tabit_app::exit(101);
     }));
 }
 
@@ -188,10 +188,10 @@ fn main() {
         crash_injection();
     }
     match run() {
-        Ok(code) => std::process::exit(code),
+        Ok(code) => tabit_app::exit(code),
         Err(error) => {
             eprintln!("tabit: {error}");
-            std::process::exit(1);
+            tabit_app::exit(1);
         }
     }
 }
