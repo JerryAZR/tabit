@@ -186,9 +186,17 @@ bullet below).
   forbidden. Test code relaxes the warnings via the identical
   `#![cfg_attr(test, allow(..))]` header at the top of each crate's
   lib.rs — new crates copy the current version from an existing one.
-- Coverage: `cargo llvm-cov --workspace --html --output-dir target/llvm-cov/html`.
-  Every gap must be filled, justified, or explicitly deferred — the
-  ledger and policy live in `COVERAGE.md`.
+- Coverage: the recipe and the ledger live in COVERAGE.md's
+  Methodology section (llvm-cov needs pre-built examples +
+  `--no-clean`, a clean env, `--test-threads=4`; read it before
+  collecting). Every gap must be filled, justified, or explicitly
+  deferred — the ledger and policy live in `COVERAGE.md`.
+- **Resource caps.** This machine has 32 cores and cargo will use all
+  of them; a 32-way instrumented build plus 32-way test-child fan-out
+  exhausted memory and crashed the host (2026-10). Heavy workloads —
+  coverage runs, full instrumented builds — run with
+  `CARGO_BUILD_JOBS=4` and `--test-threads=4`. The plain gate is fine
+  as-is.
 - Scripted or regex mass-edits of source files are a last resort, and
   the result is read back before the next build. The compiler is not
   a reviewer.
