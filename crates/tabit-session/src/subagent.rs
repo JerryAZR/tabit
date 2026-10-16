@@ -175,7 +175,14 @@ impl SpawnContext {
     /// abort + closes stdin — the parent returns immediately (a
     /// reaper bounds the child's exit with the tree kill; the
     /// graceful window buys the write-behind flush for persisted
-    /// children, never the parent's latency). Mapping the returned
+    /// children, never the parent's latency).
+    ///
+    /// This is the one-shot drive: send the task, wait for the
+    /// terminal outcome, done. The production subagent flow is the
+    /// pool's keep-open drive (subagent_pool.rs — park/followup);
+    /// this is the simple embedder recipe, kept deliberately (owner
+    /// ruling 2026-10: thin composition, cheap to maintain, already
+    /// pinned by the integration tests). Mapping the returned
     /// [`RunSummary`] to a tool result is the caller's policy.
     pub async fn drive_subprocess(
         &self,

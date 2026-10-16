@@ -108,7 +108,7 @@
 //! a terminal provider or telemetry concern; Rig does not reconstruct rich
 //! content by parsing a returned string.
 
-use std::{collections::HashMap, sync::Arc};
+use std::sync::Arc;
 
 pub mod builtin;
 pub mod interaction;
@@ -120,7 +120,7 @@ use serde::Deserialize;
 
 use tabit_providers::wasm_compat::{WasmBoxedFuture, WasmCompatSend, WasmCompatSync};
 
-use crate::completion::{self, ToolDefinition};
+use crate::completion::ToolDefinition;
 
 pub(crate) mod extensions;
 
@@ -684,18 +684,6 @@ pub struct ToolSet {
 }
 
 impl ToolSet {
-    /// Build a set from homogeneous typed tools.
-    pub fn from_tools<T>(tools: Vec<T>) -> Self
-    where
-        T: Tool + 'static,
-    {
-        let mut set = Self::default();
-        for tool in tools {
-            set.add_tool(tool);
-        }
-        set
-    }
-
     /// Build a set from runtime-defined tools.
     pub fn from_dynamic_tools(tools: Vec<DynamicTool>) -> Self {
         let mut set = Self::default();
@@ -703,11 +691,6 @@ impl ToolSet {
             set.add_dynamic_tool(tool);
         }
         set
-    }
-
-    /// Create a builder.
-    pub fn builder() -> ToolSetBuilder {
-        ToolSetBuilder::default()
     }
 
     /// Whether the name is registered.
@@ -794,70 +777,6 @@ impl ToolSet {
         context.accept_dispatch_result(dispatch_context);
         result
     }
-
-    /// Documents describing all registered tools.
-    pub fn documents(&self) -> Vec<completion::Document> {
-        let mut docs = Vec::new();
-        for (name, registration) in &self.tools {
-            let definition = registration.tool.definition_with_name(name.clone());
-            let serialized = serde_json::to_string_pretty(&definition).unwrap_or_else(|error| {
-                tracing::warn!(
-                    tool_name = %name,
-                    %error,
-                    "tool definition could not be pretty-printed; using a plain representation"
-                );
-                format!(
-                    "name: {}\ndescription: {}\nparameters: {}",
-                    definition.name, definition.description, definition.parameters
-                )
-            });
-            docs.push(completion::Document {
-                id: name.clone(),
-                text: format!("Tool: {name}\nDefinition: \n{serialized}"),
-                additional_props: HashMap::new(),
-            });
-        }
-        docs
-    }
-}
-
-/// Builder for static and runtime-defined tools.
-#[derive(Default)]
-pub struct ToolSetBuilder {
-    tools: Vec<RegisteredTool>,
-}
-
-impl ToolSetBuilder {
-    /// Add a typed static tool.
-    pub fn static_tool<T>(mut self, tool: T) -> Self
-    where
-        T: Tool + 'static,
-    {
-        self.tools.push(RegisteredTool(Arc::new(tool)));
-        self
-    }
-
-    /// Add a runtime-defined tool.
-    pub fn dynamic_tool(mut self, tool: DynamicTool) -> Self {
-        self.tools.push(RegisteredTool(Arc::new(tool)));
-        self
-    }
-
-    /// Add a context-free dynamic tool through the classic adapter.
-    pub fn portable_dynamic_tool(mut self, tool: PortableDynamicTool) -> Self {
-        self.tools
-            .push(RegisteredTool(Arc::new(DynamicTool::from_portable(tool))));
-        self
-    }
-
-    /// Build the set.
-    pub fn build(self) -> ToolSet {
-        let mut set = ToolSet::default();
-        for tool in self.tools {
-            set.insert(tool);
-        }
-        set
-    }
 }
 
 #[cfg(test)]
@@ -934,24 +853,6 @@ mod tests {
             context.insert_result("result-metadata".to_string());
             Ok(args)
         }
-    }
-
-    #[tokio::test]
-    async fn from_tools_registers_homogeneous_typed_tools() {
-        // The homogeneous-vector entry point: same type, one call, and
-        // the set dispatches exactly like an `add_tool`-built one.
-        let set = ToolSet::from_tools(vec![Echo]);
-
-        assert!(set.contains("echo"));
-        assert_eq!(set.get_tool_definitions()[0].name, "echo");
-        let result = set
-            .execute("echo", r#"{"value":1}"#, &mut ToolContext::new())
-            .await;
-        assert!(result.is_success());
-        assert_eq!(
-            result.output(),
-            &ToolOutput::json(serde_json::json!({"value": 1}))
-        );
     }
 
     #[tokio::test]
@@ -1870,10 +1771,6 @@ mod migrated_tests {
         let defs = toolset.get_tool_definitions();
         let def_names: Vec<String> = defs.into_iter().map(|def| def.name).collect();
         assert_eq!(def_names, names);
-
-        let docs = toolset.documents();
-        let doc_ids: Vec<String> = docs.into_iter().map(|doc| doc.id).collect();
-        assert_eq!(doc_ids, names);
     }
 
     #[tokio::test]
@@ -1907,54 +1804,10 @@ mod migrated_tests {
         let defs = toolset.get_tool_definitions();
         assert_eq!(defs[0].name, NamedTool::NAME);
 
-        let docs = toolset.documents();
-        assert_eq!(docs[0].id, NamedTool::NAME);
-        assert!(docs[0].text.contains(NamedTool::NAME));
-
         let result = toolset
             .execute(NamedTool::NAME, "{}", &mut ToolContext::new())
             .await;
         assert_eq!(result.output().render(), "ok");
-    }
-
-    #[test]
-    fn builder_registers_every_tool_kind_in_registration_order() {
-        struct BuilderStaticTool;
-
-        impl Tool for BuilderStaticTool {
-            const NAME: &'static str = "builder_static";
-            type Error = crate::tool::ToolExecutionError;
-            type Args = serde_json::Value;
-            type Output = String;
-
-            fn description(&self) -> String {
-                "builder static tool".to_string()
-            }
-            fn parameters(&self) -> serde_json::Value {
-                json!({ "type": "object", "properties": {} })
-            }
-            async fn call(
-                &self,
-                _context: &mut ToolContext,
-                _args: Self::Args,
-            ) -> Result<Self::Output, ToolExecutionError> {
-                Ok("ok".to_string())
-            }
-        }
-
-        let set = ToolSet::builder()
-            .static_tool(BuilderStaticTool)
-            .dynamic_tool(named_tool("builder_dynamic", "builder dynamic tool"))
-            .portable_dynamic_tool(portable_dynamic_fixture())
-            .build();
-
-        assert_eq!(
-            set.get_tool_definitions()
-                .iter()
-                .map(|definition| definition.name.as_str())
-                .collect::<Vec<_>>(),
-            ["builder_static", "builder_dynamic", "portable_runtime_name"]
-        );
     }
 
     #[tokio::test]

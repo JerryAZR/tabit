@@ -31,6 +31,8 @@ pub mod message;
 pub mod overflow;
 pub mod request;
 
-pub use message::{AssistantContent, Message, MessageError, ToolResultStatus};
+pub use message::{
+    AssistantContent, Message, MessageError, ToolResultStatus, assistant_text_from_choice,
+};
 pub use overflow::ContextOverflow;
 pub use request::*;

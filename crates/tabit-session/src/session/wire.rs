@@ -15,8 +15,12 @@ const TEXT_PART_SEPARATOR: &str = "\n\n";
 /// subagent task text). The door's tag scans read [`authored_text`]
 /// instead: they scan what the user typed, never the expansion.
 pub(crate) fn user_text(message: &Message) -> String {
+    // Callers (user_message_event's queued messages, the subagent
+    // bridge's task text) pass user messages by construction — the
+    // same invariant authored_text panics on, twenty lines below.
     let Message::User { content } = message else {
-        return String::new();
+        #[allow(clippy::panic)] // sanctioned crash: producer invariant, as authored_text
+        panic!("user_text: a queued message is always a user message");
     };
     content
         .iter()
@@ -138,16 +142,9 @@ mod tests {
 
     #[test]
     fn user_text_reads_only_the_text_parts_of_user_messages() {
-        // A non-user message carries no user text.
-        let assistant = Message::Assistant {
-            id: None,
-            content: tabit_providers::OneOrMany::one(
-                tabit_providers::message::AssistantContent::text("hi"),
-            ),
-        };
-        assert!(user_text(&assistant).is_empty());
-        // Non-text parts contribute nothing; text parts join with
-        // the fold-owned separator — parts carry no join punctuation.
+        // A non-user message is a producer bug — user_text panics on
+        // it (the sanctioned crash, as authored_text); only the fold
+        // is tested here.
         let message = Message::User {
             content: tabit_providers::OneOrMany::many(vec![
                 tabit_providers::message::UserContent::image_base64("aGk=", None, None),
@@ -156,6 +153,8 @@ mod tests {
             ])
             .expect("three parts"),
         };
+        // Non-text parts contribute nothing; text parts join with
+        // the fold-owned separator — parts carry no join punctuation.
         assert_eq!(user_text(&message), "first\n\nsecond");
     }
 

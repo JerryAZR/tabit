@@ -557,7 +557,7 @@ where
                 }));
 
                 let response = PromptResponse::new(
-                    crate::agent::prompt_request::assistant_text_from_choice(&turn.choice),
+                    tabit_providers::completion::assistant_text_from_choice(&turn.choice),
                     ledger.usage(),
                 )
                 .with_completion_calls(ledger.calls().to_vec())

@@ -122,16 +122,3 @@ pub fn check_write(
     };
     check_path_permission(file_path, &config.permissions.write, ctx)
 }
-
-/// Check delete permission for a path. Deletion is a write operation
-/// (modifies the parent directory), so this is an alias for
-/// [`check_write`] — TS `checkDelete`, deprecated there and kept as
-/// the alias it is.
-#[deprecated = "Use check_write directly (deletion checks write permissions)"]
-pub fn check_delete(
-    file_path: &str,
-    config: &SanityConfig,
-    context: Option<&PathContext>,
-) -> PathCheckResult {
-    check_write(file_path, config, context)
-}

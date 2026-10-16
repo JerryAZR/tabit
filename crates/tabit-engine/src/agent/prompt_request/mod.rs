@@ -425,15 +425,5 @@ pub(crate) fn is_empty_assistant_turn(choice: &OneOrMany<AssistantContent>) -> b
         )
 }
 
-pub(crate) fn assistant_text_from_choice(choice: &OneOrMany<AssistantContent>) -> String {
-    choice
-        .iter()
-        .filter_map(|content| match content {
-            AssistantContent::Text(text) => Some(text.text.as_str()),
-            _ => None,
-        })
-        .collect()
-}
-
 #[cfg(test)]
 mod tests;

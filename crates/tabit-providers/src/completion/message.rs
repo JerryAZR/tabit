@@ -1339,6 +1339,20 @@ impl From<MessageError> for CompletionError {
     }
 }
 
+/// The assistant turn's text: every text part, in order, concatenated.
+/// The one fold of `OneOrMany<AssistantContent>` to plain text —
+/// engine's drive/streaming paths and session's compaction summary
+/// share it (a second implementation is a rule-7 duplicate).
+pub fn assistant_text_from_choice(choice: &OneOrMany<AssistantContent>) -> String {
+    choice
+        .iter()
+        .filter_map(|content| match content {
+            AssistantContent::Text(text) => Some(text.text.as_str()),
+            _ => None,
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

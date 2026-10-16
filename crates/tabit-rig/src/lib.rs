@@ -135,8 +135,7 @@ pub mod tool {
     #[cfg(feature = "agent")]
     #[cfg_attr(docsrs, doc(cfg(feature = "agent")))]
     pub use tabit_engine::tool::{
-        DynamicTool, MissingToolContext, Tool, ToolContext, ToolSet, ToolSetBuilder, server,
-        tool_definition,
+        DynamicTool, MissingToolContext, Tool, ToolContext, ToolSet, server, tool_definition,
     };
 
     /// The complete portable `tabit-providers` tool surface, under one explicit path.

@@ -5,7 +5,7 @@ use crate::{
     agent::drive::PhaseEvent,
     agent::drive::{DriveStream, TurnSource, drive_tool_calls},
     agent::hook::{AgentHook, HookContext},
-    agent::prompt_request::{assistant_text_from_choice, is_empty_assistant_turn},
+    agent::prompt_request::is_empty_assistant_turn,
     agent::run::{
         ModelTurn, PendingToolCall, RunLedger,
         streamed::{StreamedTurnAssembler, StreamedTurnEvent},
@@ -171,9 +171,12 @@ fn final_response_from_content(
     aggregated_usage: crate::completion::Usage,
     completion_calls: Vec<CompletionCall>,
 ) -> PromptResponse {
-    PromptResponse::new(assistant_text_from_choice(&content), aggregated_usage)
-        .with_content(content)
-        .with_completion_calls(completion_calls)
+    PromptResponse::new(
+        tabit_providers::completion::assistant_text_from_choice(&content),
+        aggregated_usage,
+    )
+    .with_content(content)
+    .with_completion_calls(completion_calls)
 }
 
 impl MultiTurnStreamItem {
