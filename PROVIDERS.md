@@ -94,18 +94,38 @@ reasoning flag) — is **generated externally and downloaded**; nothing
 is compiled in. The local manager:
 
 - At startup, if the cache is absent or older than its TTL (24h,
-  config-overridable), refreshes **after boot, in the background** —
-  startup never blocks on a network.
+  config-overridable), the refresh spawns right after settings load
+  and the boot **bounded-waits** on it after the extension handshakes
+  (the slowest boot phase hides the network): `pointer_budget_ms`
+  (default 1s — the pointer is a 100-byte fetch) plus
+  `artifact_budget_ms` (default 2.5s). Within budget, a new catalog
+  applies to THIS boot; over budget the task detaches, keeps
+  downloading, and installs for next boot (the `pending` wire
+  status). A check in flight is announced on the wire
+  (`catalog_status`, v26); the resolved state and cache version ride
+  `providers_available.catalog`. Subagent children never refresh —
+  the parent's boot owns the network; they merge the cache as-is.
 - Fetches a small mutable `latest.toml` (version + sha256) from an
-  ordered mirror list (`catalog_urls`, config-overridable; defaults
+  ordered mirror list (`catalog.urls` in settings.toml,
+  config-overridable; defaults
   chosen for complementary failure modes: jsDelivr first — reliable
-  from China — then GitHub raw). Version match: done. Else downloads
-  the **immutable versioned artifact** `catalog-<version>.toml`
+  from China — then GitHub raw). Version match with a verified
+  artifact on disk: done (the TTL restarts). Else downloads the
+  **immutable versioned artifact** `catalog-<version>.toml`
   (cache-forever URL, sidesteps CDN branch-cache staleness), verifies
   the sha256, and writes `~/.tabit/providers.auto.toml` atomically
   (temp + rename) under an OS sidecar lock (`std::fs::File::lock` —
   the session-store pattern; a concurrent session that loses the lock
-  skips, since the winner just wrote fresh data).
+  skips, since the winner just wrote fresh data). Each artifact fetch
+  is bounded (`artifact_timeout_ms`, default 60s — a mirror that
+  connects then stalls fails over like any other failure, never
+  parks the refresh task holding the lock) and size-capped (32 MiB).
+- The freshness invariant: the state sidecar and the artifact are
+  checked TOGETHER — a stamp only counts while the artifact it
+  vouches for exists and parses (a deleted or corrupt cache
+  re-downloads rather than reporting fresh forever), and a stamp in
+  the future is clock skew (suspect — re-check, never laundered into
+  fresh by saturating arithmetic).
 - `catalog.auto_update = false` disables the channel outright (the
   one network posture this adds; read-only and failure-soft).
 - Channel down, artifact corrupt, or unknown schema major version:

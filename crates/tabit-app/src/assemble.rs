@@ -480,7 +480,11 @@ pub fn world_scan(
     let mut refresh = None;
     let mut cached_version = None;
     match plan {
-        CatalogPlan::Check(path) => {
+        CatalogPlan::Check {
+            path,
+            cached_version: stale,
+        } => {
+            cached_version = stale;
             if let Ok(handle) = tokio::runtime::Handle::try_current() {
                 let task_settings = catalog_settings.clone();
                 let task_path = path.clone();
@@ -519,8 +523,15 @@ pub fn world_scan(
 /// TTL merges without a check; only a stale or absent cache goes to
 /// the network.
 pub(crate) enum CatalogPlan {
-    Check(std::path::PathBuf),
-    Cached { version: Option<String> },
+    Check {
+        path: std::path::PathBuf,
+        /// The stale cache's version, so an Offline outcome can name
+        /// what is actually merged on disk.
+        cached_version: Option<String>,
+    },
+    Cached {
+        version: Option<String>,
+    },
     Disabled,
 }
 
@@ -536,13 +547,23 @@ pub(crate) fn catalog_plan(
         return CatalogPlan::Disabled;
     }
     if is_child {
-        return CatalogPlan::Cached { version: None };
+        // The parent's boot owns the network; the child merges the
+        // cache as-is and reports its version (the wire documents
+        // the version as absent only when NO usable cache exists).
+        return CatalogPlan::Cached {
+            version: crate::catalog::installed_version(path),
+        };
     }
     match crate::catalog::cache_fresh(settings, path) {
         Some(version) => CatalogPlan::Cached {
             version: Some(version),
         },
-        None => CatalogPlan::Check(path.to_path_buf()),
+        None => CatalogPlan::Check {
+            path: path.to_path_buf(),
+            // The stale cache still merges — an Offline outcome names
+            // the version actually in use.
+            cached_version: crate::catalog::installed_version(path),
+        },
     }
 }
 
@@ -566,7 +587,10 @@ pub fn build_registry(boot: WorldBoot, runtime: &tokio::runtime::Runtime) -> Mod
         tabit_session::CatalogStatus::Disabled
     } else if let Some(handle) = refresh {
         let budget = std::time::Duration::from_millis(
-            catalog.pointer_budget_ms + catalog.artifact_budget_ms + 100,
+            catalog
+                .pointer_budget_ms
+                .saturating_add(catalog.artifact_budget_ms)
+                .saturating_add(100),
         );
         match runtime.block_on(tokio::time::timeout(budget, handle)) {
             Ok(Ok(crate::catalog::RefreshOutcome::Fresh { version })) => {
@@ -922,6 +946,37 @@ id = "m2"
             .enable_all()
             .build()
             .expect("runtime")
+    }
+
+    #[test]
+    fn the_boot_budget_sum_saturates() {
+        // pointer + artifact + slack on absurd-but-legal settings
+        // values must not overflow (debug panic / release wrap): a
+        // settings file must never crash the boot.
+        use crate::catalog::RefreshOutcome;
+        use tabit_session::CatalogStatus;
+        let runtime = test_runtime();
+        let _guard = runtime.enter();
+
+        let mut boot = staged_boot(
+            Some(runtime.spawn(async {
+                RefreshOutcome::Fresh {
+                    version: "v1".to_string(),
+                }
+            })),
+            None,
+            false,
+            None,
+        );
+        boot.catalog.pointer_budget_ms = u64::MAX;
+        boot.catalog.artifact_budget_ms = u64::MAX;
+        assert_eq!(
+            build_registry(boot, &runtime).catalog_status(),
+            &CatalogStatus::Fresh {
+                version: Some("v1".to_string())
+            },
+            "absurd budgets saturate, never overflow"
+        );
     }
 
     #[test]

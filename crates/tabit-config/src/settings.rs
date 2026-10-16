@@ -64,6 +64,11 @@ pub struct CatalogSettings {
     /// exists. Over budget: the download continues in the background
     /// and applies next boot (the `pending` status).
     pub artifact_budget_ms: u64,
+    /// Per-fetch timeout for an artifact download attempt (distinct
+    /// from the boot's patience): a connected-but-stalled mirror fails
+    /// over to the next mirror instead of parking the refresh task —
+    /// and the lock it holds — for the process's life.
+    pub artifact_timeout_ms: u64,
 }
 
 impl Default for CatalogSettings {
@@ -74,6 +79,7 @@ impl Default for CatalogSettings {
             urls: Vec::new(),
             pointer_budget_ms: 1000,
             artifact_budget_ms: 2500,
+            artifact_timeout_ms: 60_000,
         }
     }
 }

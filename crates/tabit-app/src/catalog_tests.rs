@@ -19,6 +19,7 @@ fn settings(urls: Vec<String>) -> CatalogSettings {
         urls,
         pointer_budget_ms: 30_000,
         artifact_budget_ms: 60_000,
+        artifact_timeout_ms: 60_000,
     }
 }
 
@@ -150,6 +151,10 @@ async fn a_stale_state_matching_the_pointer_restamps_without_downloading() {
     // re-downloads.
     let dir = temp_dir("restamp");
     let auto = dir.join("providers.auto.toml");
+    // The artifact is installed and valid — the restamp is only
+    // legitimate when the cache the state vouches for is actually
+    // there (the missing-artifact case re-downloads).
+    std::fs::write(&auto, CATALOG_V1).expect("the artifact is installed");
     write_state(
         &state_path(&auto),
         &CatalogState {
@@ -342,6 +347,7 @@ async fn a_fresh_cache_skips_the_network() {
         .duration_since(std::time::UNIX_EPOCH)
         .expect("clock")
         .as_secs();
+    std::fs::write(&auto, CATALOG_V1).expect("the artifact is installed");
     write_state(
         &state_path(&auto),
         &CatalogState {
@@ -624,12 +630,13 @@ fn a_child_session_never_refreshes_the_catalog() {
     // An adult with a stale cache checks; auto_update off disables;
     // no config path disables.
     let plan = crate::assemble::catalog_plan(false, &settings, Some(&auto));
-    assert!(matches!(plan, crate::assemble::CatalogPlan::Check(_)));
+    assert!(matches!(plan, crate::assemble::CatalogPlan::Check { .. }));
     // A cache within TTL reports its version without a network check.
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .expect("clock")
         .as_secs();
+    std::fs::write(&auto, CATALOG_V1).expect("the artifact is installed");
     write_state(
         &state_path(&auto),
         &CatalogState {
@@ -642,6 +649,28 @@ fn a_child_session_never_refreshes_the_catalog() {
     assert!(
         matches!(plan, crate::assemble::CatalogPlan::Cached { version: Some(ref version) } if version == "v1"),
         "a fresh cache merges without a check"
+    );
+    // The child carries the cache's version too — the wire documents
+    // the block's version as absent only when NO cache exists.
+    let plan = crate::assemble::catalog_plan(true, &settings, Some(&auto));
+    assert!(
+        matches!(plan, crate::assemble::CatalogPlan::Cached { version: Some(ref version) } if version == "v1"),
+        "a child merges the parent's cache and reports its version"
+    );
+    // And a stale cache's version rides the Check plan, so an Offline
+    // outcome can name what is actually merged on disk.
+    write_state(
+        &state_path(&auto),
+        &CatalogState {
+            version: "v1".to_string(),
+            fetched_at: 0,
+        },
+    )
+    .expect("the stale state writes");
+    let plan = crate::assemble::catalog_plan(false, &settings, Some(&auto));
+    assert!(
+        matches!(plan, crate::assemble::CatalogPlan::Check { ref cached_version, .. } if cached_version.as_deref() == Some("v1")),
+        "the Check plan carries the stale cache's version"
     );
     let mut off = settings.clone();
     off.auto_update = false;
@@ -721,5 +750,217 @@ min_schema = 1
     runtime.block_on(tokio::time::sleep(std::time::Duration::from_millis(1400)));
     assert!(auto.exists(), "the background refresh landed");
     unsafe { std::env::remove_var("TABIT_SETTINGS") };
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn a_stale_state_with_a_missing_artifact_redownloads() {
+    // The state sidecar vouches for v1, the pointer agrees — but the
+    // artifact itself is GONE (deleted, cleaned, torn write). A
+    // restamp would vouch for a cache that isn't there: the version
+    // match must re-download, not restamp.
+    let dir = temp_dir("restamp-missing");
+    let auto = dir.join("providers.auto.toml");
+    write_state(
+        &state_path(&auto),
+        &CatalogState {
+            version: "v1".to_string(),
+            fetched_at: 0,
+        },
+    )
+    .expect("the stale state writes");
+    let server = httpmock::MockServer::start_async().await;
+    let latest = format!(
+        "version = \"v1\"\nsha256 = \"{}\"\nmin_schema = 1\n",
+        sha256_hex(CATALOG_V1)
+    );
+    server.mock(|when, then| {
+        when.path("/latest.toml");
+        then.status(200).body(&latest);
+    });
+    let artifact = server.mock(|when, then| {
+        when.path("/catalog-v1.toml");
+        then.status(200).body(CATALOG_V1);
+    });
+
+    let outcome = refresh(&settings(vec![server.url("")]), &auto).await;
+
+    assert!(
+        matches!(outcome, RefreshOutcome::Updated { .. }),
+        "a missing artifact re-downloads even when the version matches"
+    );
+    assert_eq!(artifact.calls_async().await, 1, "the artifact was fetched");
+    assert!(auto.is_file(), "the artifact landed");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn a_fresh_state_with_a_missing_artifact_is_not_fresh() {
+    // The within-TTL pre-check must vouch for the artifact too: state
+    // fresh but artifact absent means the cache contributes nothing —
+    // refresh, don't skip.
+    let dir = temp_dir("fresh-missing");
+    let auto = dir.join("providers.auto.toml");
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock")
+        .as_secs();
+    write_state(
+        &state_path(&auto),
+        &CatalogState {
+            version: "v1".to_string(),
+            fetched_at: now,
+        },
+    )
+    .expect("state writes");
+    let server = httpmock::MockServer::start_async().await;
+    let latest = format!(
+        "version = \"v1\"\nsha256 = \"{}\"\nmin_schema = 1\n",
+        sha256_hex(CATALOG_V1)
+    );
+    server.mock(|when, then| {
+        when.path("/latest.toml");
+        then.status(200).body(&latest);
+    });
+    server.mock(|when, then| {
+        when.path("/catalog-v1.toml");
+        then.status(200).body(CATALOG_V1);
+    });
+
+    let outcome = refresh(&settings(vec![server.url("")]), &auto).await;
+
+    assert!(
+        matches!(outcome, RefreshOutcome::Updated { .. }),
+        "a state without its artifact is not a fresh cache"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_future_fetched_at_is_stale_not_fresh() {
+    // Clock skew: a state stamped in the future must not launder into
+    // permanently-fresh through saturating_sub — treat it as suspect
+    // and re-check (the refresh restamps with the corrected clock).
+    let dir = temp_dir("skew");
+    let auto = dir.join("providers.auto.toml");
+    std::fs::write(&auto, CATALOG_V1).expect("the artifact is installed");
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock")
+        .as_secs();
+    write_state(
+        &state_path(&auto),
+        &CatalogState {
+            version: "v1".to_string(),
+            fetched_at: now + 365 * 24 * 3600,
+        },
+    )
+    .expect("state writes");
+
+    assert_eq!(
+        cache_fresh(&settings(Vec::new()), &auto),
+        None,
+        "a future stamp is suspect, not fresh"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn the_ttl_hours_multiplication_saturates() {
+    // ttl_hours * 3600 on an absurd-but-legal settings value must not
+    // panic (debug overflow) or wrap (release).
+    let dir = temp_dir("ttl-overflow");
+    let auto = dir.join("providers.auto.toml");
+    std::fs::write(&auto, CATALOG_V1).expect("the artifact is installed");
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock")
+        .as_secs();
+    write_state(
+        &state_path(&auto),
+        &CatalogState {
+            version: "v1".to_string(),
+            fetched_at: now,
+        },
+    )
+    .expect("state writes");
+    let mut absurd = settings(Vec::new());
+    absurd.ttl_hours = u64::MAX;
+
+    assert_eq!(
+        cache_fresh(&absurd, &auto).as_deref(),
+        Some("v1"),
+        "an absurd TTL saturates to still-fresh"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn an_unusable_lock_file_is_named_not_blamed_on_a_peer() {
+    // The lock sidecar path exists as a DIRECTORY: File::create fails.
+    // That is a local filesystem problem to name, not "a concurrent
+    // refresher holds the lock".
+    let dir = temp_dir("lock-unusable");
+    let auto = dir.join("providers.auto.toml");
+    std::fs::create_dir(auto.with_file_name("providers.auto.lock"))
+        .expect("the lock path is a directory");
+
+    let outcome = refresh(&settings(vec!["http://127.0.0.1:1".to_string()]), &auto).await;
+
+    match outcome {
+        RefreshOutcome::Offline { reason } => assert!(
+            !reason.contains("concurrent refresher"),
+            "a local lock-file failure is mislabeled as a peer holding it: {reason}"
+        ),
+        other => panic!("an unusable lock file is offline, not {other:?}"),
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn a_stalled_artifact_mirror_fails_over() {
+    // The pointer's mirror accepts the artifact connection then
+    // stalls: the artifact fetch must give up within the artifact
+    // timeout and fail over to the next mirror — never park the
+    // refresh task (and the lock it holds) for the process's life.
+    let dir = temp_dir("stall");
+    let auto = dir.join("providers.auto.toml");
+    let stalled = httpmock::MockServer::start_async().await;
+    let latest = format!(
+        "version = \"v1\"\nsha256 = \"{}\"\nmin_schema = 1\n",
+        sha256_hex(CATALOG_V1)
+    );
+    stalled.mock(|when, then| {
+        when.path("/latest.toml");
+        then.status(200).body(&latest);
+    });
+    stalled.mock(|when, then| {
+        when.path("/catalog-v1.toml");
+        then.status(200)
+            .body(CATALOG_V1)
+            .delay(std::time::Duration::from_secs(5));
+    });
+    let fallback = httpmock::MockServer::start_async().await;
+    let fallback_artifact = fallback.mock(|when, then| {
+        when.path("/catalog-v1.toml");
+        then.status(200).body(CATALOG_V1);
+    });
+    let mut settings = settings(vec![stalled.url(""), fallback.url("")]);
+    settings.artifact_timeout_ms = 50;
+
+    let outcome =
+        tokio::time::timeout(std::time::Duration::from_secs(4), refresh(&settings, &auto))
+            .await
+            .expect("the stall fails over instead of parking");
+
+    assert!(
+        matches!(outcome, RefreshOutcome::Updated { .. }),
+        "the fallback mirror served the artifact"
+    );
+    assert_eq!(
+        fallback_artifact.calls_async().await,
+        1,
+        "the fallback was used"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
