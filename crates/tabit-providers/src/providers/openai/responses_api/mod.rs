@@ -1551,8 +1551,8 @@ where
         req.tools.extend(self.tools.clone());
 
         // The model-level routing key fills only where the request itself
-        // did not set one (config `extra_body` reaches here as parsed
-        // additional params and keeps the last word).
+        // did not set one (config-set additional parameters keep the
+        // last word).
         if req.additional_parameters.prompt_cache_key.is_none()
             && let Some(cache_key) = &self.cache_key
         {

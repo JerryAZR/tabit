@@ -1627,9 +1627,10 @@ typed-prompt/extractor surface (`TypedPrompt`, `TypedPromptRequest`,
 `run_with_error_usage`, the provider composition capability and its
 three provider overrides), and `finalize_streamed_choice` are deleted
 -- the problem they served is gone on the providers tabit keeps, and
-no tabit run ever set a schema. `output_schema` remains as pure
-pass-through to the provider's native structured output
-(`AgentBuilder::output_schema` -> request builder); the
+no tabit run ever set a schema. The `output_schema` pass-through
+this paragraph once recorded as surviving was later deleted too —
+zero `output_schema` remains in any source file (2026-10 review:
+this ledger entry was stale); the
 `RoundtripClosed` item and the session door lose their feedback arm,
 and a user message inside an open tool batch is corruption at the
 parser, the door, and the closed-path check alike. Test fallout: the

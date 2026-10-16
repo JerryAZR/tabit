@@ -686,7 +686,7 @@ fn a_tag_appends_the_body_as_its_own_part_and_part_zero_is_the_authored_text() {
     // The joined rendering (the wire fold) is the old string form:
     // authored text, separator, block.
     assert_eq!(
-        crate::session::user_text(&expanded),
+        crate::session::joined_user_text(&expanded),
         format!("{text}\n\n{block}"),
         "the fold owns the separator"
     );

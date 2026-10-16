@@ -72,7 +72,7 @@ pub(crate) fn expand_attachments(message: Message) -> Message {
         return message;
     }
     let mut appended: Vec<UserContent> = Vec::new();
-    for path in scan_attachment_tags(&text) {
+    for path in crate::session::wire::scan_tags(&text, TAG_OPEN, TAG_CLOSE) {
         match resolve(path) {
             Some((label, image)) => {
                 appended.push(UserContent::text(label));
@@ -95,24 +95,6 @@ pub(crate) fn expand_attachments(message: Message) -> Message {
         content.push(part);
     }
     Message::User { content }
-}
-
-/// The tag paths in order of appearance — everything between
-/// `<attachment path="` and `"/>`. A dangling opening (no close) stops
-/// the scan; anything malformed is simply not a tag and passes through.
-/// Mirrors the skill tag's scanner (skills.rs).
-fn scan_attachment_tags(text: &str) -> Vec<&str> {
-    let mut paths = Vec::new();
-    let mut rest = text;
-    while let Some(start) = rest.find(TAG_OPEN) {
-        let after = &rest[start + TAG_OPEN.len()..];
-        let Some(end) = after.find(TAG_CLOSE) else {
-            break;
-        };
-        paths.push(&after[..end]);
-        rest = &after[end + TAG_CLOSE.len()..];
-    }
-    paths
 }
 
 /// Resolve one tag to its label and image part: read the file, sniff

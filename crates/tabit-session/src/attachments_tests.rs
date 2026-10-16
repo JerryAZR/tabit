@@ -125,7 +125,7 @@ fn a_resolvable_tag_appends_label_and_image_after_the_text() {
         "the label is the bare basename — the wire fold owns the separator"
     );
     assert_eq!(
-        crate::session::user_text(&expanded),
+        crate::session::joined_user_text(&expanded),
         format!("{text}\n\nshot.png"),
         "the joined rendering separates the label from the text"
     );
@@ -154,7 +154,7 @@ fn multiple_tags_append_in_tag_order() {
     assert_eq!(text_of(&parts[3]), Some("second.png"));
     assert!(image_of(&parts[4]).is_some());
     assert_eq!(
-        crate::session::user_text(&expanded),
+        crate::session::joined_user_text(&expanded),
         format!("{text}\n\nfirst.png\n\nsecond.png"),
         "the fold joins the text parts with the one separator"
     );

@@ -76,5 +76,5 @@ pub(crate) fn map_settlement(settlement: tabit_wire::client::Settlement) -> RunS
 /// The task's text (the shared user-text fold — empty when the
 /// message carries no text parts; the child treats it as the task).
 fn message_text(message: &Message) -> String {
-    crate::session::wire::user_text(message)
+    crate::session::wire::joined_user_text(message)
 }

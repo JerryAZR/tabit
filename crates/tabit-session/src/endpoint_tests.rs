@@ -627,7 +627,7 @@ async fn a_message_mid_run_steers_instead_of_starting_a_second_run() {
     assert!(
         branch.iter().any(|entry| matches!(&entry.kind,
             crate::EntryKind::UserMessage { message }
-                if entry.id == *steer_id && crate::session::user_text(message) == "also this")),
+                if entry.id == *steer_id && crate::session::joined_user_text(message) == "also this")),
         "the steer's born-early id is its node's id"
     );
     std::fs::remove_dir_all(store.dir()).ok();
@@ -2026,7 +2026,9 @@ fn chain_users(handle: &SessionHost, store: &SessionStore) -> Vec<String> {
     file_branch(store, &handle.info().session_path.clone())
         .iter()
         .filter_map(|entry| match &entry.kind {
-            crate::EntryKind::UserMessage { message } => Some(crate::session::user_text(message)),
+            crate::EntryKind::UserMessage { message } => {
+                Some(crate::session::joined_user_text(message))
+            }
             _ => None,
         })
         .collect()
@@ -4744,7 +4746,9 @@ async fn ack_and_discard_carry_the_authored_text_and_a_resend_expands_once() {
     let user_entries: Vec<String> = branch
         .iter()
         .filter_map(|entry| match &entry.kind {
-            crate::EntryKind::UserMessage { message } => Some(crate::session::user_text(message)),
+            crate::EntryKind::UserMessage { message } => {
+                Some(crate::session::joined_user_text(message))
+            }
             _ => None,
         })
         .collect();

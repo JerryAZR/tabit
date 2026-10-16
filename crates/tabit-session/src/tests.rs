@@ -2643,7 +2643,9 @@ async fn resumed_sessions_probe_ids_from_earlier_processes() -> Result<(), Sessi
     let off_chain = file_nodes(file_path(&session))
         .into_iter()
         .find_map(|entry| match &entry.kind {
-            EntryKind::UserMessage { message } if crate::session::user_text(message) == "two" => {
+            EntryKind::UserMessage { message }
+                if crate::session::joined_user_text(message) == "two" =>
+            {
                 Some(entry.id.clone())
             }
             _ => None,

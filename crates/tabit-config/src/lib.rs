@@ -14,18 +14,21 @@
 //!
 //! 1. **What are the providers and how do I talk to them?** —
 //!    [`Provider`]: endpoint (`base_url`), wire protocol (`api`), auth
-//!    (`api_key` inline or `api_key_env`), extra headers, and a shared
-//!    `extra_body` merge.
+//!    (`api_key` inline or `api_key_env`), extra headers.
 //! 2. **What models does each provider have and what can they do?** —
 //!    [`Model`]: id, display name, input modalities, reasoning flag,
 //!    context/output limits, pricing, default sampling params, and an
-//!    ordered list of [`ThinkingLevel`]s a UI can cycle through.
+//!    ordered list of thinking-level **names** (plain strings; each
+//!    dialect engine realizes them natively — PROVIDERS.md) a UI can
+//!    cycle through.
 //!
-//! There is no built-in model catalog and no compat-flag taxonomy: every
-//! provider quirk is expressed as plain request fields through `extra_body`,
-//! and every capability value is supplied by the user's config. Parsing and
-//! validation fail loudly, naming the exact file and setting at fault, and
-//! validation reports *all* issues in one pass.
+//! There is no built-in model catalog in this crate and no compat-flag
+//! taxonomy: every capability value is supplied by config (the user's,
+//! an extension fragment's, or the downloaded catalog's — `merge_catalog`
+//! folds it in at boot), parsing and validation fail loudly, naming the
+//! exact file and setting at fault, and validation reports *all* issues
+//! in one pass. The one seam for observed provider deviations is
+//! `quirks` (PROVIDERS.md) — empty today, loud on any key.
 //!
 //! Provider config is secret-free by construction: keys live in a separate
 //! [`AuthConfig`] file (`~/.tabit/auth.toml`) or in environment variables
@@ -48,23 +51,11 @@
 //! context_window = 131_072
 //! max_tokens = 65_536
 //!
-//! [providers.deepseek]
-//! base_url = "https://api.deepseek.com"
-//! api = "openai-completions"
-//! api_key_env = "DEEPSEEK_API_KEY"
-//! extra_body = { requires = "nothing" }  # top-level request-body merge
-//!
 //! [[providers.deepseek.models]]
 //! id = "deepseek-chat"
 //! context_window = 131_072
-//!
-//! [[providers.deepseek.models.thinking_levels]]
-//! name = "off"
-//! extra_body = { thinking = { type = "disabled" } }
-//!
-//! [[providers.deepseek.models.thinking_levels]]
-//! name = "high"
-//! extra_body = { thinking = { type = "enabled" } }
+//! thinking_levels = ["low", "high"]  # plain names; the dialect
+//!                                    # engines realize them natively
 //! ```
 //!
 //! Loading uses [`TabitConfig::load`] with an explicit path, or

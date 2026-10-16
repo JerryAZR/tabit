@@ -50,7 +50,7 @@ pub(crate) use wire::{
 // The joined fold's only consumers outside wire.rs are the tests (the
 // door's scans read `authored_text`; events ride `user_message_event`).
 #[cfg(test)]
-pub(crate) use wire::user_text;
+pub(crate) use wire::joined_user_text;
 pub(crate) use world::SharedWorld;
 
 use crate::context_manager::ContextManager;
