@@ -91,7 +91,7 @@ impl Session {
             std::sync::RwLock::new(ContextManager::empty(buffer.clone())),
         );
         let shared_conversation = SharedConversation {
-            conversation: conversation_cell.clone(),
+            conversation: Arc::downgrade(&conversation_cell),
         };
         // No opening agent: the cache is lazy (the selection-is-truth
         // rule derives it at run open) — a selection-less session has

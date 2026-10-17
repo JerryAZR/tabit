@@ -53,7 +53,7 @@ pub use entry::{
 pub use fold::{calls_of, fold_branch, tail_is_closed, user_message_boundaries};
 pub use ids::{filename_timestamp, new_entry_id, new_session_id, now_rfc3339};
 pub use tree::{SessionTree, TreeFault};
-pub use writer::{NullBuffer, SessionWriter, SharedBuffer, WriteBuffer};
+pub use writer::{ClaimGuard, NullBuffer, SessionWriter, SharedBuffer, WriteBuffer, claim_session};
 
 mod error;
 pub use error::LogError;

@@ -55,7 +55,8 @@ fn append_to_a_missing_file_is_a_typed_error() {
     let path = temp_path("append-missing");
     // append_to opens without create: a missing file refuses, naming
     // the path.
-    let error = SessionWriter::append_to(&path, "sid".to_string(), 0)
+    let claim = claim_session(&path).expect("no live writer holds the claim");
+    let error = SessionWriter::append_to(&path, "sid".to_string(), 0, claim)
         .err()
         .expect("a missing file cannot be appended to");
     assert!(
@@ -210,8 +211,13 @@ fn append_to_resumes_from_the_files_end() {
         .expect("first batch");
     let len = std::fs::metadata(&path).expect("file").len();
 
+    // The resume arrives after the first writer's close — the
+    // single-writer claim would refuse a second live writer (the
+    // lock's whole point).
+    drop(writer);
+    let claim = claim_session(&path).expect("the closed writer released the claim");
     let mut resumed =
-        SessionWriter::append_to(&path, "sid".to_string(), len).expect("append_to opens");
+        SessionWriter::append_to(&path, "sid".to_string(), len, claim).expect("append_to opens");
     assert_eq!(resumed.pending(), 0);
     resumed
         .enqueue(&[user_record("b", Some("a"))])
@@ -353,4 +359,64 @@ fn non_message_records_never_bring_a_session_into_existence() {
         5,
         "header + 3 side records + the user message: {raw}"
     );
+}
+
+#[test]
+fn a_second_claim_on_a_live_session_fails_loud() {
+    let path = temp_path("claim-held");
+    let _guard = claim_session(&path).expect("the first claim takes");
+    let error = claim_session(&path)
+        .err()
+        .expect("the second claim refuses");
+    assert!(
+        matches!(error, LogError::InUse { .. }),
+        "the contention error is typed: {error:?}"
+    );
+    let message = error.to_string();
+    assert!(message.contains("in use by another backend"), "{message}");
+    assert!(
+        message.contains("session.jsonl"),
+        "the error names the session: {message}"
+    );
+    std::fs::remove_dir_all(path.parent().unwrap()).ok();
+}
+
+#[test]
+fn a_released_claim_can_be_reclaimed() {
+    let path = temp_path("claim-release");
+    let guard = claim_session(&path).expect("the first claim takes");
+    drop(guard);
+    let _guard = claim_session(&path).expect("the dropped claim releases");
+    std::fs::remove_dir_all(path.parent().unwrap()).ok();
+}
+
+#[test]
+fn an_uncommitted_session_leaves_no_sidecar() {
+    let path = temp_path("claim-orphan");
+    let writer = SessionWriter::create(path.clone(), header());
+    drop(writer);
+    assert!(!path.exists(), "no session file (the no-orphan gate)");
+    let mut sidecar = path.as_os_str().to_owned();
+    sidecar.push(".lock");
+    assert!(
+        !PathBuf::from(sidecar).exists(),
+        "no sidecar either — the gate extends to the claim"
+    );
+    std::fs::remove_dir_all(path.parent().unwrap()).ok();
+}
+
+#[test]
+fn a_committed_session_holds_its_claim_until_close() {
+    let path = temp_path("claim-commit");
+    let mut writer = SessionWriter::create(path.clone(), header());
+    writer
+        .enqueue(&[user_record("a", None)])
+        .expect("the first commit materializes and claims");
+    let error = claim_session(&path)
+        .err()
+        .expect("the committed writer holds the claim");
+    assert!(matches!(error, LogError::InUse { .. }), "{error:?}");
+    drop(writer);
+    claim_session(&path).expect("the closed writer releases");
+    std::fs::remove_dir_all(path.parent().unwrap()).ok();
 }

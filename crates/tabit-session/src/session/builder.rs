@@ -225,6 +225,12 @@ impl SessionBuilder {
     /// owner ruling): the last model_change in append order wins,
     /// whichever branch the conversation is on.
     pub fn resume(self, path: &Path, cwd: &str) -> Result<(Session, ResumeReport), SessionError> {
+        // The single-writer claim comes FIRST — claim → parse →
+        // append, so the parsed state is never raced by another
+        // backend's append landing between the read and the claim
+        // (the forked-chain window the lock exists to close). A
+        // second live backend fails here, loud.
+        let claim = tabit_log::claim_session(path)?;
         let parsed = self.store.open_path(path)?;
         let report = ResumeReport {
             resumed_model: parsed.register.clone(),
@@ -234,7 +240,7 @@ impl SessionBuilder {
         }
         let id = parsed.header.id.clone();
         let file_path = parsed.path.clone();
-        let writer = SessionWriter::append_to(&parsed.path, id.clone(), parsed.file_len)?;
+        let writer = SessionWriter::append_to(&parsed.path, id.clone(), parsed.file_len, claim)?;
         let cwd = PathBuf::from(cwd);
         let mut session = Session::assemble(
             self,

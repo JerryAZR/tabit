@@ -395,7 +395,10 @@ cache_write = 0.0
     assert!((recorded - spent).abs() < 1e-12, "{recorded} vs {spent}");
 
     // Resume under a halved rate card: the spend that left is the
-    // spend that left.
+    // spend that left. The first session closes before the resume —
+    // a fresh open refuses a second live writer (the single-writer
+    // claim).
+    drop(session);
     let (resumed, _) = Factory::new(vec![text_turn("never runs")])
         .into_builder_with_config(store.clone(), config(0.5), ModelSelection::new("p", "m"))
         .resume(&path, "C:/w")?;
@@ -878,6 +881,9 @@ async fn a_dangling_tool_roundtrip_fails_the_resume_loudly() -> Result<(), Sessi
         tabit_log::WriteBuffer::enqueue(&mut writer, &[crate::entry::FileRecord::Node(assistant)]);
     assert!(error.is_ok(), "write assistant: {error:?}");
     let path = writer.path().to_path_buf();
+    // The staging writer closes first: a resume is a fresh open, and
+    // the single-writer claim refuses a second live writer.
+    drop(writer);
 
     let resumed = Factory::new(vec![text_turn("never runs")])
         .into_builder(store.clone())
@@ -2157,6 +2163,9 @@ async fn rewind_targets_steers_like_prompts() -> Result<(), SessionError> {
         },
     );
     let path = writer.path().to_path_buf();
+    // The staging writer closes first: a resume is a fresh open, and
+    // the single-writer claim refuses a second live writer.
+    drop(writer);
 
     let (mut session, _report) = Factory::new(vec![text_turn("ok")])
         .into_builder(store.clone())
@@ -2238,6 +2247,9 @@ async fn rewinding_into_an_open_roundtrip_resolves_forward() -> Result<(), Sessi
         },
     );
     let path = writer.path().to_path_buf();
+    // The staging writer closes first: a resume is a fresh open, and
+    // the single-writer claim refuses a second live writer.
+    drop(writer);
 
     let (mut session, _report) = Factory::new(vec![text_turn("ok")])
         .into_builder(store.clone())
@@ -2319,6 +2331,9 @@ async fn rewind_to_the_root_leaves_the_register_untouched() -> Result<(), Sessio
         },
     );
     let path = writer.path().to_path_buf();
+    // The staging writer closes first: a resume is a fresh open, and
+    // the single-writer claim refuses a second live writer.
+    drop(writer);
     let mut session = Factory::new(vec![text_turn("fresh answer"), text_turn("next")])
         .into_builder(store.clone())
         .resume(&path, "C:/w")
@@ -2403,6 +2418,9 @@ async fn a_ghost_model_in_history_does_not_block_a_rewind() -> Result<(), Sessio
         },
     );
     let path = writer.path().to_path_buf();
+    // The staging writer closes first: a resume is a fresh open, and
+    // the single-writer claim refuses a second live writer.
+    drop(writer);
 
     let (mut session, _report) = Factory::new(vec![text_turn("ok"), text_turn("after")])
         .into_builder(store.clone())
@@ -3188,4 +3206,44 @@ id = "z1"
         "the refresh cleared the cache; the open rebuilt through the surviving factory"
     );
     std::fs::remove_dir_all(store.dir()).ok();
+}
+
+/// The single-writer lock at the session level (2026-10, after a real
+/// two-backend corruption): a second live open of the same file
+/// refuses loud, the read paths never claim, and the released claim
+/// lets the next open through.
+#[tokio::test]
+async fn a_second_live_open_of_the_same_session_fails_loud() -> Result<(), SessionError> {
+    let store = temp_store("single-writer");
+    let mut session = Factory::new(vec![text_turn("hi")])
+        .into_builder(store.clone())
+        .create("C:/w")?;
+    session.prompt("hello").await;
+    let path = file_path(&session).to_path_buf();
+
+    // The read path never claims: parsing a live session is fine.
+    store.open_path(&path)?;
+
+    let error = match Factory::new(vec![text_turn("never runs")])
+        .into_builder(store.clone())
+        .resume(&path, "C:/w")
+    {
+        Err(error) => error,
+        Ok(_) => panic!("a second live open must refuse"),
+    };
+    assert!(
+        error.to_string().contains("in use by another backend"),
+        "{error}"
+    );
+
+    drop(session);
+    let (_resumed, _report) = match Factory::new(vec![text_turn("never runs")])
+        .into_builder(store.clone())
+        .resume(&path, "C:/w")
+    {
+        Ok(opened) => opened,
+        Err(error) => panic!("the released claim lets the next open through: {error}"),
+    };
+    std::fs::remove_dir_all(store.dir()).ok();
+    Ok(())
 }

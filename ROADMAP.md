@@ -181,25 +181,15 @@ log decision, parked here.
 
 ### Session-store exclusion
 
-- **The single-writer lock** (designed 2026-10, after a real
-  two-backend corruption): the append invariant (every entry parents
-  the current head) holds per process, but nothing stops two backends
-  on the same cwd from opening the same session file — observed in
-  the field as two interleaved chains and a loader refusal. The fix:
-  an OS file lock (`std::fs::File::try_lock`, no new dep) on a
-  sidecar `<session>.jsonl.lock`, claimed at `SessionLog::open`, held
-  for the session's lifetime. OS release on handle close means every
-  exit kind self-cleans (no stale lockfiles — the O_EXCL-sentinel
-  variant was rejected on exactly that). Per-session granularity;
-  second open fails loud with "in use by another backend". The
-  sidecar (not the data file) keeps every read path lock-free.
-- **Read-only session open** (nice-to-have, not urgent; the lock
-  design already supports it — the claim is write-mode-only): a
+- **Read-only session open** (nice-to-have, not urgent): a
   non-claiming load for spectator tooling / a second frontend /
-  `tabit inspect`. Carries one new behavior decision: a spectator
-  racing a live writer can see a torn final line, which the owning
-  parser correctly treats as fatal — a read-only mode would tolerate
-  a partial tail instead.
+  `tabit inspect`. The single-writer claim (shipped 2026-10 — the
+  OS lock on the `<session>.jsonl.lock` sidecar, claimed by resume
+  before parse and by create at first commit, OS-released on any
+  exit) claims in write mode only, so the spectator needs no lock
+  changes — the one new behavior decision: a spectator racing a live
+  writer can see a torn final line, which the owning parser treats
+  as fatal; a read-only mode would tolerate a partial tail instead.
 
 ### Docs and comments sweep
 

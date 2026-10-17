@@ -161,7 +161,16 @@ fn print_mode_answers_one_prompt_end_to_end() {
     let sessions = dir.join(".tabit").join("sessions");
     assert_eq!(
         std::fs::read_dir(&sessions)
-            .map(|entries| entries.count())
+            .map(|entries| {
+                entries
+                    .filter_map(|entry| entry.ok())
+                    .filter(|entry| {
+                        // The single-writer sidecar (`<session>.jsonl.lock`)
+                        // shares the directory; the count is session FILES.
+                        entry.path().extension().and_then(|e| e.to_str()) == Some("jsonl")
+                    })
+                    .count()
+            })
             .unwrap_or(0),
         1,
         "the run left exactly one session file"
@@ -343,7 +352,16 @@ fn a_promptless_rewind_drops_the_last_user_message_then_branches() {
     let sessions = dir.join(".tabit").join("sessions");
     assert_eq!(
         std::fs::read_dir(&sessions)
-            .map(|entries| entries.count())
+            .map(|entries| {
+                entries
+                    .filter_map(|entry| entry.ok())
+                    .filter(|entry| {
+                        // The single-writer sidecar (`<session>.jsonl.lock`)
+                        // shares the directory; the count is session FILES.
+                        entry.path().extension().and_then(|e| e.to_str()) == Some("jsonl")
+                    })
+                    .count()
+            })
             .unwrap_or(0),
         1,
         "rewind branches within the session file, it does not fork one"

@@ -1612,7 +1612,13 @@ fn spawn_worker(
                 _ = worker_mailbox.work_signal().notified() => {}
             }
         }
-        lock(&stats).insert(stats_id, session.stats());
+        // closing_stats means FULLY closed: capture the stats, drop
+        // the session (releasing the single-writer claim and flushing
+        // the tail), THEN report — an observer may reopen the file the
+        // moment the stats appear.
+        let final_stats = session.stats();
+        drop(session);
+        lock(&stats).insert(stats_id, final_stats);
     });
     (worker, channel, join)
 }

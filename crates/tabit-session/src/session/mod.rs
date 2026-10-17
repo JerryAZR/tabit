@@ -199,17 +199,27 @@ pub struct Session {
 
 /// The receive-time view of the conversation (checkout validation at
 /// receive): a locked read over the session's manager — the probes
-/// never mutate, and the read is the live tree even mid-run.
+/// never mutate, and the read is the live tree even mid-run. Weak by
+/// rule (2026-10, the single-writer claim): the endpoint's Worker
+/// holds a probe past the worker task's wind-down (the workers map
+/// and the node's channel closures never drop it), and the manager
+/// owns a strong clone of the write buffer — a strong probe would
+/// keep the session-file claim alive past the session's death. A
+/// probe against a dead session answers "no": the worker is gone, so
+/// no checkout can be served anyway.
 #[derive(Clone)]
 pub(crate) struct SharedConversation {
-    conversation: Arc<std::sync::RwLock<ContextManager>>,
+    conversation: std::sync::Weak<std::sync::RwLock<ContextManager>>,
 }
 
 impl SharedConversation {
     /// Whether `id` names a node in the tree (any branch) — the
     /// receive-time checkout validation.
     pub(crate) fn contains(&self, id: &str) -> bool {
-        crate::lock::read(&self.conversation).contains(id)
+        let Some(conversation) = self.conversation.upgrade() else {
+            return false;
+        };
+        crate::lock::read(&conversation).contains(id)
     }
 }
 

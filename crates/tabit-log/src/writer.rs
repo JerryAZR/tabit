@@ -18,6 +18,18 @@
 //! that never enqueues drains nothing and leaves nothing on disk; a
 //! session that committed at least once tries a best-effort final
 //! flush at drop.
+//!
+//! **The single-writer claim** (2026-10, after a real two-backend
+//! corruption interleaved two chains in one file): one live writer per
+//! session file, enforced by an OS lock on the `<session>.jsonl.lock`
+//! sidecar ([`claim_session`], held as [`ClaimGuard`]). A resume claims
+//! before it parses (claim → parse → append — the read is never raced
+//! by another backend's append); a fresh session claims at
+//! materialize, so the no-orphan gate covers the sidecar too. Read
+//! paths never claim. The claim's lifetime is the writer's — which is
+//! why session plumbing handed to longer-lived owners (the endpoint's
+//! `Worker`) holds the buffer weakly: a strong handle outliving the
+//! session would keep the claim past the session's death.
 
 use crate::entry::{FileRecord, SessionHeader};
 use crate::error::LogError;
@@ -58,6 +70,56 @@ pub trait WriteBuffer: Send {
 /// session file.
 pub type SharedBuffer = std::sync::Arc<std::sync::Mutex<dyn WriteBuffer + Send>>;
 
+/// The single-writer claim on a session file (designed 2026-10, after
+/// a real two-backend corruption interleaved two chains in one file):
+/// an OS lock on the sidecar `<session>.jsonl.lock` — never the data
+/// file, so every read path stays lock-free even where byte-range
+/// locks are mandatory (Windows). Held inside the writer for the
+/// session's lifetime; the OS releases on handle close, so every
+/// exit kind self-cleans — there is no stale-lock state to repair
+/// (the O_EXCL-sentinel design was rejected on exactly that). The
+/// sidecar persists as an empty file: deleting it on close would
+/// reintroduce the inode-reuse race (a closer unlinks while an
+/// opener creates a fresh inode — two live "locks" on different
+/// inodes).
+#[derive(Debug)]
+pub struct ClaimGuard {
+    /// The hold IS the point — never read, released on drop.
+    _file: File,
+}
+
+/// Claim `path`'s session for writing. A second live claim fails loud
+/// with [`LogError::InUse`] — same process or another, the OS answers
+/// both (std's whole-file `try_lock` over flock/LockFileEx). The
+/// sidecar is created on demand; two racers creating it concurrently
+/// both open the one file and the lock arbitrates.
+pub fn claim_session(path: &Path) -> Result<ClaimGuard, LogError> {
+    let mut sidecar = path.as_os_str().to_owned();
+    sidecar.push(".lock");
+    let sidecar = PathBuf::from(sidecar);
+    let file = OpenOptions::new()
+        .create(true)
+        .write(true)
+        // Never written, never truncated — the file is a lock target
+        // only (the lint wants the intent explicit).
+        .truncate(false)
+        .open(&sidecar)
+        .map_err(|source| LogError::Io {
+            path: sidecar.clone(),
+            source,
+        })?;
+    match file.try_lock() {
+        Ok(()) => Ok(ClaimGuard { _file: file }),
+        Err(std::fs::TryLockError::WouldBlock) => Err(LogError::InUse {
+            path: path.to_path_buf(),
+        }),
+        Err(std::fs::TryLockError::Error(source)) => Err(LogError::Io {
+            path: sidecar,
+            source,
+        }),
+    }
+}
+
 /// The file-backed write buffer for one session file. See the module
 /// docs.
 #[derive(Debug)]
@@ -67,6 +129,11 @@ pub struct SessionWriter {
     /// The append handle, opened at the first write attempt. `None`
     /// until then: nothing has touched the disk.
     file: Option<File>,
+    /// The single-writer claim. A resume claims before the parse and
+    /// arrives here with it; a fresh session claims at materialize —
+    /// the no-orphan gate extends to the sidecar: a session that
+    /// never commits leaves nothing behind, lock file included.
+    _claim: Option<ClaimGuard>,
     /// Serialized lines whose bytes have not reached the disk yet, in
     /// commit order.
     outbox: VecDeque<String>,
@@ -114,6 +181,7 @@ impl SessionWriter {
             degraded: false,
             transition: None,
             born: false,
+            _claim: None,
         }
     }
 
@@ -133,7 +201,16 @@ impl SessionWriter {
     /// Re-open an existing session file for appending. The durable
     /// prefix is everything already in the file (the caller holds the
     /// parsed state; there is deliberately no second parse here).
-    pub fn append_to(path: &Path, id: String, durable_offset: u64) -> Result<Self, LogError> {
+    /// The `claim` was taken by the caller BEFORE the parse (claim →
+    /// parse → append — a parsed state is never raced by another
+    /// backend's append landing between the read and the claim, the
+    /// forked-chain window the lock exists to close).
+    pub fn append_to(
+        path: &Path,
+        id: String,
+        durable_offset: u64,
+        claim: ClaimGuard,
+    ) -> Result<Self, LogError> {
         let file = OpenOptions::new()
             .append(true)
             .open(path)
@@ -150,6 +227,7 @@ impl SessionWriter {
             degraded: false,
             transition: None,
             born: true,
+            _claim: Some(claim),
         })
     }
 
@@ -274,8 +352,24 @@ impl SessionWriter {
             .open(&self.path)
         {
             Ok(file) => {
-                self.file = Some(file);
-                Ok(())
+                // The fresh session's claim rides the file's
+                // materialization (the no-orphan gate covers the
+                // sidecar too). A failure here means another backend
+                // claimed this id first — the uuid makes that a
+                // near-impossible race, but the answer is the same:
+                // back the fresh file out and report.
+                match claim_session(&self.path) {
+                    Ok(claim) => {
+                        self._claim = Some(claim);
+                        self.file = Some(file);
+                        Ok(())
+                    }
+                    Err(error) => {
+                        drop(file);
+                        let _ = fs::remove_file(&self.path);
+                        Err(error)
+                    }
+                }
             }
             Err(source) => {
                 let _ = fs::remove_file(&self.path);
