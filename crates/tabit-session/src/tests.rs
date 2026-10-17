@@ -2419,9 +2419,8 @@ async fn a_ghost_model_in_history_does_not_block_a_rewind() -> Result<(), Sessio
 }
 
 /// Configured request parameters are pure forwarding: the model's
-/// `max_tokens` and sampling knobs, and the `extra_body` chain (provider →
-/// model → active thinking level, later sources win), reach the request the
-/// model serves.
+/// `max_tokens` and sampling knobs, and the active thinking level,
+/// reach the request the model serves.
 #[tokio::test]
 async fn configured_request_parameters_reach_the_model() -> Result<(), SessionError> {
     let store = temp_store("params-forwarding");

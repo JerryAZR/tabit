@@ -151,28 +151,25 @@ log decision, parked here.
   catalog manager) — the remaining piece is the generator itself
   (its own project thread), plus the built-in mirror list's real
   coordinates when it ships.
-- **Config reload — the `reload` command** (2026-10): an additive
-  first cut — re-read config/auth, new keys and providers appear, the
-  model catalog re-announces (`models_available`, FRONTEND.md §6).
-  Its mechanism shipped with `login`/`logout` (2026-10, protocol v21):
-  the current-world cell plus the per-session world refresh is exactly
-  the path `reload` reuses — what remains is re-reading the
-  providers.toml layers and the command itself. One dormant
-  assumption closes with it: `run.rs`'s `turn_cost` reads the rate
-  card LIVE from the world config — safe today because login/logout
-  swap auth only (the config Arc is shared), but a reload swaps the
-  config mid-run, so it must snapshot the config into the run's bound
-  pair (or re-derive the bound-at-open invoice invariant) when it
-  lands. The general
-  semantics — vanished providers, stale session registers, the
-  skills/gate reload scope — stay parked until the command lands.
-- **The models.dev catalog extension** (2026-10, recorded): an
-  extension shipping an auto-updating providers fragment (the
-  models.dev catalog), versioned separately from tabit itself — the
-  zero-config story's other half: on a bare install it gives
-  `login` its providers to scan, so first run is "install the
-  catalog extension, paste a key" with no hand-written
-  providers.toml.
+- **Config reload — SUPERSEDED by respawn-reload (2026-10 ruling):**
+  reload is the frontend's kill-and-respawn (FRONTEND.md's Reload
+  section); an in-process `reload` command is deferred until a
+  scenario respawn cannot serve. What survives of the original
+  entry: the login/logout world-refresh machinery (the current-world
+  cell plus the per-session world refresh, protocol v21) is the path
+  an in-process reload would reuse IF it lands, and the dormant
+  assumption stays recorded against that day — `run.rs`'s `turn_cost`
+  reads the rate card LIVE from the world config, safe today because
+  login/logout swap auth only; a config-swapping reload must snapshot
+  the config into the run's bound pair (or re-derive the
+  bound-at-open invoice invariant) when it lands.
+- **The models.dev catalog extension — SUBSUMED (2026-10 ruling):**
+  the built-in catalog channel (the downloaded artifact, the mirror
+  list, the bounded boot refresh) delivers the same out-of-band,
+  separately-versioned provider+model catalog without an install
+  step. The zero-config story the extension was for is complete:
+  bare install → boot downloads the catalog → `login` lists its
+  providers → paste a key.
 - Per-model `headers` stay unwired (needs a client-caching decision);
   `context_window` is wired (compaction); display names /
   `reasoning` wait on a model-picker UI (with the frontend).

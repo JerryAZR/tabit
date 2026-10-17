@@ -1,5 +1,5 @@
 //! EMBEDDING.md's tiers 2+3 together: the composition's presets
-//! (`world_registry`/`mount_world`/`assemble`/`host_data`) driving
+//! (`world_scan`/`build_registry`/`mount_world`/`assemble`/`host_data`) driving
 //! one prompt through a streaming `SessionHost` — the terminal's
 //! response text printed once, a `select_one` card
 //! rendered on stderr and answered from one stdin line, abort on an

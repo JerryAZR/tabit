@@ -109,7 +109,7 @@ you read and write on the child's stdio (one frame per line; the
    `--max-turns <n>`, `--ephemeral` (in memory, nothing persists).
    You own the lifecycle: you picked the binary, you kill it.
 2. **Read the first line — the report.**
-   `{"type":"report","protocol_version":23}`. Protocol facts only.
+   `{"type":"report","protocol_version":26}`. Protocol facts only.
    **You are the version check**: a version you do not speak is
    yours to kill and clean up (§3). After the report there is no
    handshake state — your commands may flow from your first line
@@ -228,7 +228,7 @@ arrive as events. Input tolerance: blank lines are skipped, a trailing
 size limit** — tool output can be large; buffer accordingly.
 
 ```
-← {"type":"report","protocol_version":23}
+← {"type":"report","protocol_version":26}
 ← {"type":"session_opened","stream":"019…","id":"019…","path":"…","cwd":"…",
    "model":{"provider":"…","model":"…"},"resumed":true}
 ← {"type":"sessions_available","sessions":[

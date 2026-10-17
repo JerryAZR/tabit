@@ -131,7 +131,7 @@ fn run() -> Result<i32, String> {
             // 2026-09-27): an installed package exists in every mode.
             // The runtime is the boot's and the run's one serving
             // runtime — the supervisor's watchers outlive the boot.
-            // It exists before the world builds: world_registry spawns
+            // It exists before the world builds: world_scan spawns
             // the catalog refresh onto the ambient runtime.
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
