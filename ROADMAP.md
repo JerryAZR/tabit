@@ -46,25 +46,30 @@ review; AGENTS.md carries the ruling). A future frontend that runs no
 tokio extracts a sync core into `tabit-wire`'s client rather than
 growing a twin.
 
-### The extension-skills catalog as a value (structural fix — review round 2026-10)
+### The extension-skills catalog as a value (structural fix — review round 2026-10; DEFERRED 2026-10)
 
 The extension-skills fold lives in a process-global `OnceLock`
-(`EXTENSION_SKILLS`, tabit-app assemble.rs), seeded once by
-`world_scan`, read by session assembly through a silent
-`unwrap_or_default`. The review round found the shape wrong, three
-ways: the documented invariant (seed-before-read) is the opposite of
-the enforced one (double-seed panics; early reads silently absorb an
-empty catalog, conflating "scanned, no skills" with "never scanned");
-the global makes per-test isolation impossible (the
-one-integration-binary-per-scenario dance); and any future
-reload/rescan flow deadlocks against the once-per-process constraint
-by construction. The redesign (owner discussion pending): the global
-dies; `world_scan` computes the catalog and stows it on `WorldBoot`
-(the boot-product hand-off that already exists); `assemble` takes it
-as a parameter. The once-per-process law evaporates with the global.
-Do NOT patch the symptom in the meantime (no loud-read/test-helper
-machinery — the interim patch was considered and rejected as
-elaborating machinery to preserve the global).
+(`EXTENSION_SKILLS`, tabit-app assemble.rs), seeded once at boot
+(serve_json_stdio, from the world scan's host skills), read by
+session assembly. The review round found the
+shape wrong, and the reload discussion (2026-10) re-scoped WHY: the
+original third catch — any reload/rescan flow deadlocks against the
+once-per-process constraint — DISSOLVED under the respawn-reload
+ruling (FRONTEND.md's Reload section: reload is the frontend's
+kill-and-respawn, the world re-scans fresh in the new process, an
+in-process reload is deferred until a scenario respawn cannot serve).
+What survives is the test-honesty case: the global makes per-test
+isolation impossible (the one-integration-binary-per-scenario dance),
+and the seed/read ordering invariant is enforced in the wrong
+direction (double-seed panics; early reads absorb an empty catalog).
+The redesign, when it lands: the global dies; `world_scan` computes
+the catalog and stows it on `WorldBoot` (the boot-product hand-off
+that already exists); `assemble` takes it as a parameter. Deferred
+by owner ruling (2026-10) — the status quo is sound in production
+(one seed per process boot, by construction); the cost is borne only
+by tests. Do NOT patch the symptom in the meantime (no
+loud-read/test-helper machinery — the interim patch was considered
+and rejected as elaborating machinery to preserve the global).
 
 ### Extension follow-ups
 
