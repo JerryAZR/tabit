@@ -13,7 +13,11 @@ use crate::events::SessionEvent;
 use serde::{Deserialize, Serialize};
 
 /// The protocol version this build speaks. The child's first line is
-/// its [`ServerControlFrame::Report`] carrying this version; the
+/// its [`ServerControlFrame::Report`] carrying this version, written
+/// at process entry — before config load, the world scan, and the
+/// catalog wait (2026-10: reporting is the first thing launch does,
+/// so the spawner's version check never waits on boot work, and no
+/// mid-boot frame — v26's `catalog_status` — can precede it); the
 /// spawner reads it and kills an incompatible child (owner ruling
 /// 2026-09-25 — the report model: children report first, spawners
 /// decide). v23: `session_closed` — the wire-level child-death

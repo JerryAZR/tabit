@@ -69,16 +69,13 @@ fn json_startup_failure(detail: &str) -> ! {
 }
 
 /// The report model's startup failure (owner ruling 2026-09-25): the
-/// child has reported (the spawner knows the version and that this
-/// process is alive), then the reason crosses as an unstamped `error`
-/// event — the same grammar every other backend-level failure uses —
-/// and the process exits nonzero. The reason also echoes on stderr
-/// (the human surface).
+/// child has reported (the report is the process's first line, written
+/// at [`serve_json_stdio`]'s entry — the spawner knows the version and
+/// that this process is alive), then the reason crosses as an
+/// unstamped `error` event — the same grammar every other
+/// backend-level failure uses — and the process exits nonzero. The
+/// reason also echoes on stderr (the human surface).
 fn json_reject(reason: String) -> ! {
-    let report = tabit_protocol::ServerControlFrame::Report {
-        protocol_version: tabit_protocol::PROTOCOL_VERSION,
-    };
-    println!("{}", tabit_protocol::to_wire_line(&report));
     let event = tabit_protocol::EventFrame {
         stream: None,
         origin: None,
@@ -112,6 +109,24 @@ pub fn serve_json_stdio(
     config_path: Option<std::path::PathBuf>,
     auth: Result<AuthConfig, String>,
 ) -> ! {
+    // The self-report — this process's FIRST line on the channel
+    // (owner ruling 2026-09-25, the report model; moved to literal
+    // entry 2026-10): the spawner can assume nothing until the child
+    // self-reports, so reporting is the first thing launch does —
+    // before config, the world scan, and the catalog wait, none of
+    // which may precede it (the v26 `catalog_status` frame fires
+    // mid-boot; a first-line violation hard-fails the wire client's
+    // spawn pump). Static data only: the protocol version. The side
+    // benefit: the spawner's version check/kill happens immediately
+    // instead of waiting blind through the whole boot.
+    let report = tabit_protocol::ServerFrame::Control(tabit_protocol::ServerControlFrame::Report {
+        protocol_version: tabit_protocol::PROTOCOL_VERSION,
+    });
+    let report_line = tabit_protocol::to_wire_line(&report);
+    tracing::trace!(target: "wire::frontend::out", "{report_line}");
+    println!("{report_line}");
+    let _ = std::io::Write::flush(&mut std::io::stdout());
+
     // A broken config file is a graceful wire rejection carrying the
     // setup guide; a MISSING default file never reaches here (the
     // reversed first-run ruling: zero config boots —
