@@ -268,6 +268,39 @@ fn an_empty_branch_projects_to_nothing() {
 }
 
 #[test]
+#[should_panic(expected = "no matching tool call")]
+fn an_orphaned_tool_result_is_corruption_not_a_placeholder() {
+    // Hand-edit damage: the parser's threat model trusts mid-file
+    // shapes that keep valid JSON and parentage, so this file LOADS
+    // — but the projection's pairing invariant (every result's
+    // call_id names a call in its chain; the writer commits each
+    // roundtrip as one blob) is broken. Owner ruling 2026-10: panic,
+    // never a placeholder name that looks like real data.
+    let chain = vec![
+        entry(
+            "t1",
+            assistant(
+                vec![tool_call("call-1", Some("wire-1"), "ls")],
+                Usage::new(),
+            ),
+        ),
+        entry(
+            "r1",
+            EntryKind::ToolResult {
+                result: tabit_providers::message::ToolResult {
+                    id: "call-9".to_string(),
+                    call_id: Some("wire-9".to_string()),
+                    details: None,
+                    content: OneOrMany::one(ToolResultContent::text("orphan")),
+                    status: Some(tabit_providers::completion::ToolResultStatus::Success),
+                },
+            },
+        ),
+    ];
+    let _ = project_events(&chain);
+}
+
+#[test]
 fn failed_results_keep_their_structured_status() {
     let chain = vec![
         entry(

@@ -271,10 +271,21 @@ impl Projection {
             .expect("a tool result must follow the assistant turn that called it");
         let call_id = result.call_id.clone().unwrap_or_else(|| result.id.clone());
         let status = wire_status(&result.status);
+        // Sanctioned crash (owner ruling 2026-10 — hand-edit corruption
+        // is never corrected): the writer commits each roundtrip as one
+        // blob, so a result whose call_id matches no call in the chain
+        // means a damaged or hand-edited file. Panic, never a
+        // placeholder name that looks like real data.
+        #[allow(clippy::expect_used)]
+        let name = self
+            .tool_names
+            .get(&call_id)
+            .cloned()
+            .expect("a tool result's call_id has no matching tool call in the chain");
         events.push(SessionEvent::ToolResult {
             turn_id,
             entry_id: entry.id.clone(),
-            name: self.tool_names.get(&call_id).cloned().unwrap_or_default(),
+            name,
             internal_call_id: call_id,
             content: result_text(result),
             status,

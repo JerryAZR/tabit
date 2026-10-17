@@ -19,8 +19,12 @@
 //! records, edited checkout targets — because no app-level failure
 //! produces them (one-blob commits), and below-app damage severe
 //! enough to create them breaks the JSON or the parent links first,
-//! which IS caught. There is no repair pass: a detected violation
-//! fails the open with a named error, not a guess.
+//! which IS caught. Trusted means UNVALIDATED, never silently
+//! repaired (2026-10 ruling): a trusted shape that breaks a
+//! projection invariant downstream — an orphaned tool result whose
+//! call_id names no call in its chain — panics at replay rather than
+//! emitting placeholder data. There is no repair pass: a detected
+//! violation fails the open with a named error, not a guess.
 
 use crate::entry::{
     EntryKind, FileRecord, SESSION_FORMAT_MAJOR, SESSION_FORMAT_MINOR, SessionHeader, SideKind,
