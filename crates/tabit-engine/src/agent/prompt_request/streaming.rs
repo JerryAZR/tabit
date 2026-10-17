@@ -15,7 +15,6 @@ use crate::{
     tool::{ToolContext, server::ToolRegistrySnapshot},
 };
 use futures::{Stream, StreamExt};
-use serde::{Deserialize, Serialize};
 use std::{collections::VecDeque, pin::Pin, sync::Arc};
 use tracing_futures::Instrument;
 
@@ -37,8 +36,7 @@ pub type StreamingResult =
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 pub type StreamingResult = Pin<Box<dyn Stream<Item = Result<MultiTurnStreamItem, StreamingError>>>>;
 
-#[derive(Deserialize, Serialize, Debug, Clone)]
-#[serde(tag = "type", rename_all = "camelCase")]
+#[derive(Debug, Clone)]
 #[non_exhaustive]
 pub enum MultiTurnStreamItem {
     /// A model-call attempt committed — the request is about to be issued.
