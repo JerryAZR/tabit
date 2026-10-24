@@ -1,4 +1,4 @@
-# tabit-tui-alt — the alt-screen frontend
+# tabit-tui — the alt-screen frontend
 
 The sibling build (`../tabit-tui-work/tui`, branch `tui/research`) is the
 **native-scrollback** frontend: the omp Composer retires finalized transcript

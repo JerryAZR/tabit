@@ -1,8 +1,8 @@
-# tui-alt roadmap
+# tui roadmap
 
 The ordered work list for the alt-screen TUI (owner-ruled 2026-10).
-Process: merge `master` into this worktree during development; merge back
-to main as `tui/` when done. Follow pi's proven patterns (`reports/pi.md`,
+Process: merged back to main as `tui/` (2026-10); work continues on
+`master`. Follow pi's proven patterns (`reports/pi.md`,
 the pi repo); **deviations need justification stated in advance**.
 
 Protocol state: **v26** (synced; see FRONTEND.md's changelog).
@@ -188,5 +188,5 @@ badge. The design's stated leftovers live in **Parked** below.
   self-update machinery are deliberate deferrals.
 - ~~ROADMAP.md on main still says "omp fork of pi-tui under Bun …~~
   ~~Bun-compiled exe"~~ — amended in the same pass.
-- The merge-back itself: this worktree's branch lands as `tui/` on
-  `master`.
+- ~~The merge-back itself~~ — **landed 2026-10**: the branch landed as
+  `tui/` on `master`.

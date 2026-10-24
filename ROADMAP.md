@@ -25,8 +25,8 @@ frontend that ships primary.
 
 ### The frontend (the active item)
 
-**TUI: the Node route (ruled 2026-09; pivot landed 2026-10 on branch
-`tui/tabit-tui-alt`).** The claurst ratatui harvest stays dead (GPL)
+**TUI: the Node route (ruled 2026-09; the pivot landed 2026-10,
+merged as `tui/`).** The claurst ratatui harvest stays dead (GPL)
 and a Rust-native TUI stays deferred. The terminal frontend rides the
 JS ecosystem: **stock pi-tui (`@earendil-works/pi-tui`) on plain
 Node ≥ 24.2** — type-stripped TypeScript in dev, no build step (the
@@ -43,7 +43,6 @@ darwin-arm64 after a mac test).
 One version line for the bundle — TUI and core changes bump it alike:
 the lockstepped pair is the strict protocol handshake made atomic.
 crates.io stays the backend-only channel (`cargo install tabit-core`).
-The TUI enters the monorepo (`tui/`) at merge-back.
 
 The GUI is **not planned** — the egui tree was deleted 2026-09 (the
 paused frontend's sync twin kept surfacing as the exception on every

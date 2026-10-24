@@ -11,6 +11,6 @@
 /.tabit/
 .zcode/
 
-# tui-alt (Node/TypeScript)
+# tui (Node/TypeScript)
 node_modules/
-tui-alt/dist/
+tui/dist/
