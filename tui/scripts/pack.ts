@@ -205,6 +205,9 @@ for (const platform of toPack) {
 				license: "MIT",
 				os: [os],
 				cpu: [arch],
+				// The publish target rides the manifest (a mirror may ride dev
+				// installs; uploads go only to the official registry).
+				publishConfig: { registry: "https://registry.npmjs.org" },
 			},
 			null,
 			"\t",
