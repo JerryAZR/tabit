@@ -12,7 +12,9 @@ use std::sync::Arc;
 use tabit_config::{AuthConfig, TabitConfig};
 use tabit_session::{SessionHost, SessionHostWiring, SessionStore};
 
-use crate::assemble::{ContinueMiss, assemble, host_data, host_node, mount_world, world_registry};
+use crate::assemble::{
+    ContinueMiss, assemble, build_registry, host_data, host_node, mount_world, world_scan,
+};
 use crate::options::AppOptions;
 
 /// The first-run setup guide, for the config errors that remain
@@ -67,16 +69,13 @@ fn json_startup_failure(detail: &str) -> ! {
 }
 
 /// The report model's startup failure (owner ruling 2026-09-25): the
-/// child has reported (the spawner knows the version and that this
-/// process is alive), then the reason crosses as an unstamped `error`
-/// event — the same grammar every other backend-level failure uses —
-/// and the process exits nonzero. The reason also echoes on stderr
-/// (the human surface).
+/// child has reported (the report is the process's first line, written
+/// at [`serve_json_stdio`]'s entry — the spawner knows the version and
+/// that this process is alive), then the reason crosses as an
+/// unstamped `error` event — the same grammar every other
+/// backend-level failure uses — and the process exits nonzero. The
+/// reason also echoes on stderr (the human surface).
 fn json_reject(reason: String) -> ! {
-    let report = tabit_protocol::ServerControlFrame::Report {
-        protocol_version: tabit_protocol::PROTOCOL_VERSION,
-    };
-    println!("{}", tabit_protocol::to_wire_line(&report));
     let event = tabit_protocol::EventFrame {
         stream: None,
         origin: None,
@@ -85,7 +84,7 @@ fn json_reject(reason: String) -> ! {
     };
     println!("{}", tabit_protocol::to_wire_line(&event));
     eprintln!("{reason}");
-    std::process::exit(1)
+    crate::exit(1)
 }
 
 /// Serve the frozen wire on stdio: the composition's JSON mode as one
@@ -110,6 +109,24 @@ pub fn serve_json_stdio(
     config_path: Option<std::path::PathBuf>,
     auth: Result<AuthConfig, String>,
 ) -> ! {
+    // The self-report — this process's FIRST line on the channel
+    // (owner ruling 2026-09-25, the report model; moved to literal
+    // entry 2026-10): the spawner can assume nothing until the child
+    // self-reports, so reporting is the first thing launch does —
+    // before config, the world scan, and the catalog wait, none of
+    // which may precede it (the v26 `catalog_status` frame fires
+    // mid-boot; a first-line violation hard-fails the wire client's
+    // spawn pump). Static data only: the protocol version. The side
+    // benefit: the spawner's version check/kill happens immediately
+    // instead of waiting blind through the whole boot.
+    let report = tabit_protocol::ServerFrame::Control(tabit_protocol::ServerControlFrame::Report {
+        protocol_version: tabit_protocol::PROTOCOL_VERSION,
+    });
+    let report_line = tabit_protocol::to_wire_line(&report);
+    tracing::trace!(target: "wire::frontend::out", "{report_line}");
+    println!("{report_line}");
+    let _ = std::io::Write::flush(&mut std::io::stdout());
+
     // A broken config file is a graceful wire rejection carrying the
     // setup guide; a MISSING default file never reaches here (the
     // reversed first-run ruling: zero config boots —
@@ -124,12 +141,9 @@ pub fn serve_json_stdio(
     // The extension world's data half (settings, scan, fragment
     // merge, skills, registry); a settings failure is a plain
     // startup failure.
-    let (registry, launchable) = match world_registry(options, config, config_path, Arc::new(auth))
-    {
-        Ok(world) => world,
-        Err(detail) => json_startup_failure(&detail),
-    };
-    let registry = Arc::new(registry);
+    // The runtime comes FIRST: world_scan spawns the catalog
+    // refresh onto the ambient runtime (Handle::try_current), so the
+    // runtime must exist and be entered before the world builds.
     let runtime = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -137,6 +151,22 @@ pub fn serve_json_stdio(
         Ok(runtime) => runtime,
         Err(error) => json_startup_failure(&error.to_string()),
     };
+    let _runtime_guard = runtime.enter();
+    let mut boot = match world_scan(options, config, config_path, Arc::new(auth)) {
+        Ok(boot) => boot,
+        Err(detail) => json_startup_failure(&detail),
+    };
+    // The catalog check is in flight: tell the frontend the boot may
+    // take a moment (bounded by the pointer+artifact budgets). The
+    // resolved state rides providers_available's catalog block.
+    if boot.checking_catalog() {
+        println!(
+            "{}",
+            tabit_protocol::to_wire_line(&tabit_protocol::ServerControlFrame::CatalogStatus {
+                state: tabit_protocol::CatalogState::Checking,
+            })
+        );
+    }
     // The extension host boots and every handshake resolves BEFORE
     // the session assembly: tools exist at session build (the
     // byte-stability law), and the cost is the slowest single
@@ -161,7 +191,10 @@ pub fn serve_json_stdio(
             frontend,
         )
     });
-    let mounted = mount_world(launchable, &runtime);
+    let mounted = mount_world(boot.take_launchable(), &runtime);
+    // The catalog refresh (spawned in world_scan) has overlapped the
+    // handshakes; the bounded wait here is usually zero.
+    let registry = Arc::new(build_registry(boot, &runtime));
     // Assemble failures (a session unreadable, an explicit `--model`
     // naming a ref config does not know) fail the startup with
     // the plain reason (the report, an unstamped `error`, exit 1) —
@@ -194,7 +227,7 @@ pub fn serve_json_stdio(
         // never through the runtime drop (the reader thread parks in
         // an uninterruptible read on the stream-end path, and a
         // runtime drop would wait on it forever).
-        std::process::exit(code);
+        crate::exit(code);
     })
 }
 

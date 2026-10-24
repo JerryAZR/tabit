@@ -257,7 +257,7 @@ async fn the_models_catalog_announces_once_unstamped_after_the_extension_catalog
         .into_builder(store.clone())
         .create("C:/w")
         .expect("session");
-    let registry = crate::ModelRegistry::new(
+    let registry = crate::ModelRegistry::new_with_catalog_status(
         std::sync::Arc::new(
             tabit_config::TabitConfig::from_toml_str(
                 r#"
@@ -283,6 +283,9 @@ id = "l1"
             .expect("config"),
         ),
         std::sync::Arc::new(tabit_config::AuthConfig::default()),
+        crate::CatalogStatus::Updated {
+            version: "20261014-886d930945".to_string(),
+        },
     );
     let data = SessionHostData {
         extensions: tabit_protocol::ExtensionsCatalog {
@@ -309,6 +312,7 @@ id = "l1"
     let mut extensions_at = None;
     let mut announced = Vec::new();
     let mut providers_announced = Vec::new();
+    let mut catalog_blocks = Vec::new();
     for (index, frame) in frames.iter().enumerate() {
         match &frame.event {
             SessionEvent::ExtensionsAvailable { .. } => extensions_at = Some(index),
@@ -316,9 +320,12 @@ id = "l1"
                 assert_eq!(frame.stream, None, "backend-level: no stream stamp");
                 announced.push((index, providers));
             }
-            SessionEvent::ProvidersAvailable { providers } => {
+            SessionEvent::ProvidersAvailable {
+                providers, catalog, ..
+            } => {
                 assert_eq!(frame.stream, None, "backend-level: no stream stamp");
                 providers_announced.push((index, providers));
+                catalog_blocks.push(catalog);
             }
             _ => {}
         }
@@ -370,6 +377,14 @@ id = "l1"
             ("locked", tabit_protocol::ProviderAuth::None),
         ],
         "every configured provider, usable or not, with its key source"
+    );
+    // v26: the registry's boot status rides the same frame.
+    assert_eq!(
+        catalog_blocks.as_slice(),
+        [&tabit_protocol::CatalogChannelStatus {
+            state: tabit_protocol::CatalogState::Updated,
+            version: Some("20261014-886d930945".to_string()),
+        }]
     );
     std::fs::remove_dir_all(store.dir()).ok();
 }
@@ -481,7 +496,7 @@ id = "s1"
     let announced: Vec<&Vec<tabit_protocol::ProviderStatus>> = frames
         .iter()
         .filter_map(|frame| match &frame.event {
-            SessionEvent::ProvidersAvailable { providers } => {
+            SessionEvent::ProvidersAvailable { providers, .. } => {
                 assert_eq!(frame.stream, None, "backend-level: no stream stamp");
                 Some(providers)
             }
@@ -612,7 +627,7 @@ async fn a_message_mid_run_steers_instead_of_starting_a_second_run() {
     assert!(
         branch.iter().any(|entry| matches!(&entry.kind,
             crate::EntryKind::UserMessage { message }
-                if entry.id == *steer_id && crate::session::user_text(message) == "also this")),
+                if entry.id == *steer_id && crate::session::joined_user_text(message) == "also this")),
         "the steer's born-early id is its node's id"
     );
     std::fs::remove_dir_all(store.dir()).ok();
@@ -2011,7 +2026,9 @@ fn chain_users(handle: &SessionHost, store: &SessionStore) -> Vec<String> {
     file_branch(store, &handle.info().session_path.clone())
         .iter()
         .filter_map(|entry| match &entry.kind {
-            crate::EntryKind::UserMessage { message } => Some(crate::session::user_text(message)),
+            crate::EntryKind::UserMessage { message } => {
+                Some(crate::session::joined_user_text(message))
+            }
             _ => None,
         })
         .collect()
@@ -4729,7 +4746,9 @@ async fn ack_and_discard_carry_the_authored_text_and_a_resend_expands_once() {
     let user_entries: Vec<String> = branch
         .iter()
         .filter_map(|entry| match &entry.kind {
-            crate::EntryKind::UserMessage { message } => Some(crate::session::user_text(message)),
+            crate::EntryKind::UserMessage { message } => {
+                Some(crate::session::joined_user_text(message))
+            }
             _ => None,
         })
         .collect();
@@ -5031,7 +5050,7 @@ fn catalogs(frames: &[EventFrame]) -> CatalogPair {
     let providers = frames
         .iter()
         .filter_map(|frame| match &frame.event {
-            SessionEvent::ProvidersAvailable { providers } => {
+            SessionEvent::ProvidersAvailable { providers, .. } => {
                 assert_eq!(frame.stream, None, "backend-level: no stream stamp");
                 Some(providers.iter().map(|p| (p.id.clone(), p.auth)).collect())
             }
@@ -5610,4 +5629,296 @@ async fn a_login_mid_build_reaches_the_new_session_via_the_generation_recheck() 
         "the mid-build login's refresh reached the new session"
     );
     std::fs::remove_dir_all(store.dir()).ok();
+}
+
+#[tokio::test]
+async fn an_early_open_session_parks_until_the_boot_attaches() {
+    // The prepared-supervisor law's open arm: an `open_session`
+    // arriving before the boot's data exists parks on the door and
+    // drains at attach, behind the boot's announcements — the
+    // new-session twin's sibling, through the other builder.
+    let store = temp_store("endpoint-early-open-session");
+    let session = Factory::new(vec![text_turn("never")])
+        .into_builder(store.clone())
+        .create("C:/w")
+        .expect("session");
+    let wiring = plain_wiring(&store);
+    let node = wiring.node.clone();
+
+    let structure = SessionHost::mount(wiring, crate::mount_frontend(&node));
+    let lane = crate::Channel::local("co-frontend", |_| {}, |_| {});
+    node.intake(
+        &lane,
+        tabit_wire::node::Inbound::Command(SessionCommand::OpenSession {
+            id: "stored-1".to_string(),
+        }),
+    );
+
+    let opened_id = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let open_store = store.clone();
+    let data = SessionHostData {
+        open: std::sync::Arc::new({
+            let opened_id = opened_id.clone();
+            move |id: &str| {
+                opened_id.lock().unwrap().push(id.to_string());
+                Factory::new(vec![text_turn("reopened")])
+                    .into_builder(open_store.clone())
+                    .create("C:/w")
+                    .map(|session| (session, Vec::new()))
+                    .map_err(|error| error.to_string())
+            }
+        }),
+        ..plain_data()
+    };
+    let mut handle = structure.attach(session, Vec::new(), data);
+    let boot = boot_id(&handle);
+    let frames = drain(&mut handle).await;
+    let opened: Vec<String> = frames
+        .iter()
+        .filter_map(|frame| match &frame.event {
+            SessionEvent::SessionOpened { id, .. } => Some(id.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        opened.len(),
+        2,
+        "the boot's announcement and the parked session's: {opened:?}"
+    );
+    assert_eq!(opened[0], boot, "the boot's announcement leads");
+    assert_ne!(opened[1], boot, "the parked open_session follows behind it");
+    assert_eq!(
+        opened_id.lock().unwrap().as_slice(),
+        ["stored-1"],
+        "the parked command's payload survived the park"
+    );
+    std::fs::remove_dir_all(store.dir()).ok();
+}
+
+#[tokio::test]
+async fn a_logout_before_attach_parks_and_serves_at_attach() {
+    // The login twin's other half: a logout arriving before the
+    // boot's data exists parks and drains at attach — the boot's
+    // catalog, then the refresh's re-announcement behind it.
+    let store = temp_store("endpoint-logout-parked");
+    let auth_path = store.dir().join("auth.toml");
+    let session = Factory::new(vec![text_turn("hi")])
+        .into_builder(store.clone())
+        .create("C:/w")
+        .expect("session");
+    let wiring = plain_wiring(&store);
+    let node = wiring.node.clone();
+    let mount = SessionHost::mount(wiring, crate::endpoint::mount_frontend(&node));
+
+    let arrival = crate::Channel::local("early", |_| {}, |_| {});
+    node.intake(
+        &arrival,
+        tabit_wire::node::Inbound::Command(SessionCommand::Logout {
+            provider: "locked".to_string(),
+        }),
+    );
+    assert!(
+        !auth_path.exists(),
+        "parked — nothing served before the attach"
+    );
+
+    let mut handle = mount.attach(session, Vec::new(), auth_world(&auth_path));
+    let frames = drain(&mut handle).await;
+    let (models, providers) = catalogs(&frames);
+    assert_eq!(
+        models,
+        vec![vec!["local".to_string()], vec!["local".to_string()]],
+        "the parked logout drains at attach: the boot's catalog, then its re-announcement"
+    );
+    assert_eq!(
+        providers.len(),
+        2,
+        "the provider catalog rides the same act"
+    );
+    assert!(
+        !frames.iter().any(
+            |frame| matches!(&frame.event, SessionEvent::Error { kind, .. } if kind == "auth")
+        ),
+        "a no-op logout is no error — logout is total"
+    );
+    assert!(!auth_path.exists(), "a removal never creates the file");
+    std::fs::remove_dir_all(store.dir()).ok();
+}
+
+#[tokio::test]
+async fn a_login_whose_auth_write_fails_errors_auth() {
+    // The provider is known and the key is fine; the WRITE fails
+    // (the auth path is an existing directory — the atomic rename
+    // onto it fails portably). The refusal is a named auth error,
+    // nothing re-announces.
+    let store = temp_store("endpoint-login-writefails");
+    let auth_path = store.dir().join("auth.toml");
+    std::fs::create_dir_all(&auth_path).expect("the auth path as a directory");
+    let session = Factory::new(vec![text_turn("hi")])
+        .into_builder(store.clone())
+        .create("C:/w")
+        .expect("session");
+    let mut handle = SessionHost::spawn(
+        session,
+        Vec::new(),
+        plain_wiring(&store),
+        auth_world(&auth_path),
+    );
+
+    handle.command_link().send(SessionCommand::Login {
+        provider: "locked".to_string(),
+        api_key: tabit_protocol::ApiKey("sk-x".to_string()),
+    });
+    let frames = drain(&mut handle).await;
+    let errors: Vec<&str> = frames
+        .iter()
+        .filter_map(|frame| match &frame.event {
+            SessionEvent::Error { kind, message, .. } if kind == "auth" => Some(message.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(errors.len(), 1, "one auth-kind error");
+    assert!(errors[0].contains("could not write"), "{}", errors[0]);
+    assert_eq!(
+        catalogs(&frames).0.len(),
+        1,
+        "a failed login does not re-announce"
+    );
+    std::fs::remove_dir_all(store.dir()).ok();
+}
+
+#[tokio::test]
+async fn a_logout_without_a_resolvable_auth_path_errors_auth() {
+    // The login twin's other half (plain_data's auth_path is None):
+    // logout is total over STORED keys, but with nowhere to resolve
+    // the auth file the door reports the named auth error.
+    let store = temp_store("endpoint-logout-nopath");
+    let session = Factory::new(vec![text_turn("hi")])
+        .into_builder(store.clone())
+        .create("C:/w")
+        .expect("session");
+    let mut handle = SessionHost::spawn(session, Vec::new(), plain_wiring(&store), plain_data());
+    handle.command_link().send(SessionCommand::Logout {
+        provider: "p".to_string(),
+    });
+    let frames = drain(&mut handle).await;
+    let errors: Vec<&str> = frames
+        .iter()
+        .filter_map(|frame| match &frame.event {
+            SessionEvent::Error { kind, message, .. } if kind == "auth" => Some(message.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(errors.len(), 1, "one auth-kind error");
+    assert!(
+        errors[0].contains("cannot resolve the auth file path"),
+        "{}",
+        errors[0]
+    );
+    std::fs::remove_dir_all(store.dir()).ok();
+}
+
+#[tokio::test]
+async fn a_logout_whose_auth_file_is_malformed_errors_auth() {
+    // The removal's read fails (the existing auth file is not TOML):
+    // a named auth error, no re-announcement — the refresh never
+    // runs on a failed write. (The directory trick does not reach
+    // this arm: remove_api_key treats a non-file path as a no-op.)
+    let store = temp_store("endpoint-logout-writefails");
+    std::fs::create_dir_all(store.dir()).expect("the test dir");
+    let auth_path = store.dir().join("auth.toml");
+    std::fs::write(&auth_path, "[providers.x\n").expect("seed a broken auth file");
+    let session = Factory::new(vec![text_turn("hi")])
+        .into_builder(store.clone())
+        .create("C:/w")
+        .expect("session");
+    let mut handle = SessionHost::spawn(
+        session,
+        Vec::new(),
+        plain_wiring(&store),
+        auth_world(&auth_path),
+    );
+
+    handle.command_link().send(SessionCommand::Logout {
+        provider: "locked".to_string(),
+    });
+    let frames = drain(&mut handle).await;
+    let errors: Vec<&str> = frames
+        .iter()
+        .filter_map(|frame| match &frame.event {
+            SessionEvent::Error { kind, message, .. } if kind == "auth" => Some(message.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(errors.len(), 1, "one auth-kind error");
+    assert!(errors[0].contains("could not write"), "{}", errors[0]);
+    assert_eq!(
+        catalogs(&frames).0.len(),
+        1,
+        "a failed logout does not re-announce"
+    );
+    std::fs::remove_dir_all(store.dir()).ok();
+}
+
+#[test]
+fn catalog_status_wire_maps_every_boot_outcome() {
+    // The v26 mapping's table, directly: one fold, both announcement
+    // sites (the boot's attach test above pins the Updated arm end to
+    // end; the refresh re-announces the same status verbatim).
+    use crate::registry::CatalogStatus;
+    use tabit_protocol::CatalogState;
+    let cases: Vec<(CatalogStatus, CatalogState, Option<String>)> = vec![
+        (CatalogStatus::Disabled, CatalogState::Disabled, None),
+        (
+            CatalogStatus::Cached {
+                version: Some("v1".to_string()),
+            },
+            CatalogState::Cached,
+            Some("v1".to_string()),
+        ),
+        (
+            CatalogStatus::Cached { version: None },
+            CatalogState::Cached,
+            None,
+        ),
+        (
+            CatalogStatus::Fresh {
+                version: Some("v2".to_string()),
+            },
+            CatalogState::Fresh,
+            Some("v2".to_string()),
+        ),
+        (
+            CatalogStatus::Fresh { version: None },
+            CatalogState::Fresh,
+            None,
+        ),
+        (
+            CatalogStatus::Updated {
+                version: "v3".to_string(),
+            },
+            CatalogState::Updated,
+            Some("v3".to_string()),
+        ),
+        (CatalogStatus::Pending, CatalogState::Pending, None),
+        (
+            CatalogStatus::Offline {
+                version: Some("v4".to_string()),
+            },
+            CatalogState::Offline,
+            Some("v4".to_string()),
+        ),
+        (
+            CatalogStatus::Offline { version: None },
+            CatalogState::Offline,
+            None,
+        ),
+    ];
+    for (status, state, version) in cases {
+        assert_eq!(
+            catalog_status_wire(&status),
+            tabit_protocol::CatalogChannelStatus { state, version },
+            "{status:?}"
+        );
+    }
 }

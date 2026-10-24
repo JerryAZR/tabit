@@ -95,6 +95,32 @@ struct RegistryInner {
     config: Arc<TabitConfig>,
     auth: Arc<AuthConfig>,
     clients: Mutex<HashMap<String, ProviderClient>>,
+    catalog_status: CatalogStatus,
+}
+
+/// The model catalog's state at this boot (PROVIDERS.md). The boot
+/// announcement carries it verbatim — announce-if-cheap, the
+/// frontend decides whether to render it. The version is the
+/// cache's (the state sidecar's), absent when no cache exists.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum CatalogStatus {
+    /// No channel this boot: `catalog.auto_update` off, or no config
+    /// path (an in-process world).
+    #[default]
+    Disabled,
+    /// The cache merged without a check: within TTL, or a child
+    /// session (children serve a parent; the parent's boot owns the
+    /// network).
+    Cached { version: Option<String> },
+    /// Checked this boot; already current.
+    Fresh { version: Option<String> },
+    /// A new catalog downloaded, verified, and applied by THIS boot.
+    Updated { version: String },
+    /// The check outlived the boot budget; the download continues in
+    /// the background and applies next boot.
+    Pending,
+    /// The check failed; the cache (if any) merged.
+    Offline { version: Option<String> },
 }
 
 /// The model registry. Cheap to clone: every copy shares the cached
@@ -125,15 +151,34 @@ fn preferred_selection(
 }
 
 impl ModelRegistry {
-    /// A registry over the loaded config and auth.
+    /// A registry over the loaded config and auth, with no catalog
+    /// channel (tests, in-process worlds).
     pub fn new(config: Arc<TabitConfig>, auth: Arc<AuthConfig>) -> Self {
+        Self::new_with_catalog_status(config, auth, CatalogStatus::default())
+    }
+
+    /// A registry stamped with the boot's catalog outcome (the boot
+    /// announcement reads it; tabit-app's build_registry is the one
+    /// writer at boot, and the login/logout world rebuild PRESERVES
+    /// the boot's status rather than re-checking).
+    pub fn new_with_catalog_status(
+        config: Arc<TabitConfig>,
+        auth: Arc<AuthConfig>,
+        catalog_status: CatalogStatus,
+    ) -> Self {
         Self {
             inner: Arc::new(RegistryInner {
                 config,
                 auth,
                 clients: Mutex::new(HashMap::new()),
+                catalog_status,
             }),
         }
+    }
+
+    /// The catalog's state at this boot.
+    pub fn catalog_status(&self) -> &CatalogStatus {
+        &self.inner.catalog_status
     }
 
     /// The loaded config behind the registry.

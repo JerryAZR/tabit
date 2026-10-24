@@ -45,7 +45,7 @@ use crate::{
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::ops::{Add, AddAssign};
+use std::ops::AddAssign;
 use thiserror::Error;
 
 // Errors
@@ -565,25 +565,6 @@ impl Usage {
 impl Default for Usage {
     fn default() -> Self {
         Self::new()
-    }
-}
-
-impl Add for Usage {
-    type Output = Self;
-
-    fn add(self, other: Self) -> Self::Output {
-        Self {
-            input_tokens: self.input_tokens + other.input_tokens,
-            output_tokens: self.output_tokens + other.output_tokens,
-            total_tokens: self.total_tokens + other.total_tokens,
-            cached_input_tokens: self.cached_input_tokens + other.cached_input_tokens,
-            cache_creation_input_tokens: self.cache_creation_input_tokens
-                + other.cache_creation_input_tokens,
-            cache_creation_1h_input_tokens: self.cache_creation_1h_input_tokens
-                + other.cache_creation_1h_input_tokens,
-            tool_use_prompt_tokens: self.tool_use_prompt_tokens + other.tool_use_prompt_tokens,
-            reasoning_tokens: self.reasoning_tokens + other.reasoning_tokens,
-        }
     }
 }
 
@@ -1129,9 +1110,28 @@ impl<M: CompletionModel> CompletionRequestBuilder<M> {
 
 #[cfg(test)]
 mod tests {
-    use super::{CompletionResponse, FinishReason, Usage};
+    use super::{CompletionResponse, FinishReason, ThinkingLevel, Usage};
     use crate::OneOrMany;
     use crate::message::AssistantContent;
+
+    /// The level vocabulary is a closed set: every variant's canonical
+    /// spelling parses back to itself, and anything else is rejected
+    /// (PROVIDERS.md — the d4b7a33 pin).
+    #[test]
+    fn thinking_level_spellings_round_trip_exhaustively() {
+        for level in [
+            ThinkingLevel::Off,
+            ThinkingLevel::Minimal,
+            ThinkingLevel::Low,
+            ThinkingLevel::Medium,
+            ThinkingLevel::High,
+            ThinkingLevel::Xhigh,
+            ThinkingLevel::Max,
+        ] {
+            assert_eq!(ThinkingLevel::parse(level.as_str()), Some(level));
+        }
+        assert_eq!(ThinkingLevel::parse("bogus"), None);
+    }
 
     fn tool_call_choice() -> OneOrMany<AssistantContent> {
         OneOrMany::one(AssistantContent::tool_call(

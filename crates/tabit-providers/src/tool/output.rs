@@ -110,11 +110,12 @@ impl ToolOutput {
         } else {
             // `OneOrMany<ToolResultContent>` is plain serde data (strings,
             // JSON values, media-type enums), so serialization cannot fail;
-            // if it ever does, flag the internal invariant loudly instead of
-            // silently substituting ordinary-looking output.
-            serde_json::to_string(&self.content).unwrap_or_else(|err| {
-                format!("<internal invariant violated: tool output failed to serialize: {err}>")
-            })
+            // if it ever does, that is an internal invariant violation —
+            // the sanctioned crash, never a placeholder that looks like
+            // real output.
+            #[allow(clippy::expect_used)]
+            serde_json::to_string(&self.content)
+                .expect("internal invariant violated: tool output failed to serialize")
         }
     }
 }
@@ -279,6 +280,44 @@ mod tests {
     use crate::message::{DocumentSourceKind, ImageMediaType};
 
     use super::*;
+
+    /// `as_text` is exactly one PLAIN text block: a text block carrying
+    /// provider params, or an image block, returns `None`.
+    #[test]
+    fn as_text_rejects_parametrized_text_and_images() {
+        let output = ToolOutput::one(ToolResultContent::Text(crate::message::Text {
+            text: "hello".to_string(),
+            additional_params: Some(serde_json::json!({"citations": []})),
+        }));
+        assert_eq!(output.as_text(), None);
+
+        let output = ToolOutput::one(ToolResultContent::Image(crate::message::Image {
+            data: DocumentSourceKind::Base64("aGk=".to_string()),
+            media_type: Some(ImageMediaType::PNG),
+            detail: None,
+            additional_params: None,
+        }));
+        assert_eq!(output.as_text(), None);
+    }
+
+    /// When the content is not plain text, `render` falls back to the
+    /// details cargo (frontend/hook-facing) before the content
+    /// serialization.
+    #[test]
+    fn render_falls_back_to_details_when_content_is_not_plain_text() {
+        let details = serde_json::json!({"exit_code": 1});
+        let output = ToolOutput {
+            content: OneOrMany::one(ToolResultContent::Image(crate::message::Image {
+                data: DocumentSourceKind::Base64("aGk=".to_string()),
+                media_type: Some(ImageMediaType::PNG),
+                detail: None,
+                additional_params: None,
+            })),
+            details: Some(details.clone()),
+        };
+
+        assert_eq!(output.render(), details.to_string());
+    }
 
     #[test]
     fn json_shaped_strings_remain_literal_text() {

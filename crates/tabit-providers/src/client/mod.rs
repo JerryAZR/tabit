@@ -1220,6 +1220,27 @@ mod tests {
             .expect("any 2xx status should verify successfully");
     }
 
+    #[tokio::test]
+    async fn verify_maps_auth_failures_to_invalid_authentication() {
+        for status in [http::StatusCode::UNAUTHORIZED, http::StatusCode::FORBIDDEN] {
+            let http_backend = RecordingHttpClient::with_error_response(status, "");
+            let client = openai::Client::builder()
+                .api_key("test-key")
+                .http_client(http_backend)
+                .build()
+                .expect("build client");
+
+            let error = client
+                .verify()
+                .await
+                .expect_err("verify should fail on an auth failure");
+            assert!(
+                matches!(error, VerifyError::InvalidAuthentication),
+                "{status} must map to InvalidAuthentication, got {error:?}"
+            );
+        }
+    }
+
     /// Coverage for the transport layer owned by the generic [`Client`]:
     /// status-aware retries (with server-requested delays) and idle timeouts.
     mod transport {
@@ -1515,6 +1536,40 @@ mod tests {
             assert_eq!(defaults.retry.max_server_delay, Duration::from_secs(60));
             assert_eq!(defaults.connect_timeout, Duration::from_secs(10));
             assert_eq!(defaults.stall_warning, Duration::from_secs(120));
+        }
+
+        #[test]
+        fn connect_timeout_setter_overrides_the_default() {
+            let builder = Client::<TestExt, reqwest::Client>::builder()
+                .connect_timeout(Duration::from_secs(3));
+            assert_eq!(
+                builder.transport.connect_timeout,
+                Duration::from_secs(3),
+                "the setter lands on the transport options"
+            );
+        }
+
+        /// Multipart bodies stay outside the retry machinery: the send
+        /// delegates straight to the backend and the backend's own answer
+        /// comes back untouched (here the scripted backend's
+        /// multipart-is-unscripted `StreamEnded`).
+        #[tokio::test]
+        async fn multipart_sends_delegate_to_the_backend_without_retry() {
+            let backend = ScriptedTransport::new(vec![], vec![]);
+            let client = client_over(backend);
+
+            let req = http::Request::post("http://localhost/v1/upload")
+                .body(MultipartForm::new().text("field", "value"))
+                .expect("multipart request builds");
+
+            let result = client.send_multipart::<Bytes>(req).await;
+            let Err(error) = result else {
+                panic!("the scripted backend has no multipart outcome");
+            };
+            assert!(
+                matches!(error, http_client::Error::StreamEnded),
+                "the backend's own error comes back untouched: {error:?}"
+            );
         }
 
         #[tokio::test]

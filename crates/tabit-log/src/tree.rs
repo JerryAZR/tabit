@@ -214,7 +214,13 @@ impl SessionTree {
     /// materialized on demand for replay and checkout reporting. Never
     /// maintained as state.
     pub fn path_to_head(&self) -> Vec<SessionEntry> {
-        self.path_to(None).unwrap_or_default()
+        // The only inserts are load_append-validated, so a broken walk
+        // is an internal invariant violation — the sanctioned crash,
+        // never an empty history masquerading as a session (the
+        // doctrine; checkout panics on the same fault).
+        #[allow(clippy::expect_used)]
+        self.path_to(None)
+            .expect("internal invariant violated: the tree walks its own head")
     }
 }
 

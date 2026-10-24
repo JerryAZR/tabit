@@ -31,7 +31,7 @@ httpdate = { workspace = true }
 indexmap = { workspace = true }
 mime_guess = { workspace = true }
 reqwest = { workspace = true, features = ["json", "stream", "multipart"] }
-tabit-derive = { version = "0.1.0", path = "../tabit-derive", optional = true }
+tabit-derive = { version = "0.2.0", path = "../tabit-derive", optional = true }
 schemars = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 # `preserve_order` makes serde_json maps insertion-ordered (IndexMap-backed)

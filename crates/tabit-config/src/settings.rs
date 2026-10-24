@@ -28,8 +28,12 @@ pub struct SettingsConfig {
     /// The built-in permission gate (`tabit-gate`): on by default,
     /// any layer may turn it off.
     pub gate: GateSettings,
-    /// The model catalog channel (PROVIDERS.md).
-    pub catalog: CatalogSettings,
+    /// The model catalog channel (PROVIDERS.md). Presence-tracked:
+    /// a layer WITHOUT a `[catalog]` table leaves other layers
+    /// untouched; a layer WITH one replaces wholesale (field-level
+    /// union would need to tell an explicit default from an absent
+    /// key, which serde defaults hide).
+    catalog: Option<CatalogSettings>,
 }
 
 /// The model catalog channel's settings (PROVIDERS.md): the manager
@@ -49,6 +53,22 @@ pub struct CatalogSettings {
     /// defaults — the explicit-pointer rule, never a silent
     /// fallthrough.
     pub urls: Vec<String>,
+    /// Boot's patience for the `latest.toml` pointer phase, in
+    /// milliseconds. The pointer is the cheap high-information fetch:
+    /// same-version means done, new-version commits to the artifact
+    /// phase with its own budget. Over budget: the old cache merges
+    /// and the refresh continues in the background.
+    pub pointer_budget_ms: u64,
+    /// Boot's additional patience for the artifact phase, in
+    /// milliseconds, paid only when the pointer proved an update
+    /// exists. Over budget: the download continues in the background
+    /// and applies next boot (the `pending` status).
+    pub artifact_budget_ms: u64,
+    /// Per-fetch timeout for an artifact download attempt (distinct
+    /// from the boot's patience): a connected-but-stalled mirror fails
+    /// over to the next mirror instead of parking the refresh task —
+    /// and the lock it holds — for the process's life.
+    pub artifact_timeout_ms: u64,
 }
 
 impl Default for CatalogSettings {
@@ -57,6 +77,9 @@ impl Default for CatalogSettings {
             auto_update: true,
             ttl_hours: 24,
             urls: Vec::new(),
+            pointer_budget_ms: 1000,
+            artifact_budget_ms: 2500,
+            artifact_timeout_ms: 60_000,
         }
     }
 }
@@ -127,14 +150,26 @@ impl SettingsConfig {
         Ok(merged)
     }
 
-    /// Union another layer's disable list in (any layer naming a
-    /// package disables it — there is no re-enable override, by
-    /// design: disabling is the one explicit act) and intersect the
-    /// gate flag (any layer disabling the gate wins — the same
-    /// one-explicit-act shape).
+    /// Union another layer in: the disable list unions (any layer
+    /// naming a package disables it — there is no re-enable override,
+    /// by design: disabling is the one explicit act), the gate flag
+    /// intersects (any layer disabling the gate wins — the same
+    /// one-explicit-act shape), and the catalog settings replace
+    /// wholesale when the layer has a `[catalog]` table
+    /// (presence-tracked: serde defaults cannot tell an explicit
+    /// default from an absent key).
     pub(crate) fn absorb(&mut self, other: Self) {
         self.extensions.disabled.extend(other.extensions.disabled);
         self.gate.enabled &= other.gate.enabled;
+        if other.catalog.is_some() {
+            self.catalog = other.catalog;
+        }
+    }
+
+    /// The catalog channel's settings, defaults when no layer sets
+    /// them.
+    pub fn catalog(&self) -> CatalogSettings {
+        self.catalog.clone().unwrap_or_default()
     }
 
     /// The resolved disable list.

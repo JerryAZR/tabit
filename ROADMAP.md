@@ -51,6 +51,31 @@ review; AGENTS.md carries the ruling). A future frontend that runs no
 tokio extracts a sync core into `tabit-wire`'s client rather than
 growing a twin.
 
+### The extension-skills catalog as a value (structural fix — review round 2026-10; DEFERRED 2026-10)
+
+The extension-skills fold lives in a process-global `OnceLock`
+(`EXTENSION_SKILLS`, tabit-app assemble.rs), seeded once at boot
+(serve_json_stdio, from the world scan's host skills), read by
+session assembly. The review round found the
+shape wrong, and the reload discussion (2026-10) re-scoped WHY: the
+original third catch — any reload/rescan flow deadlocks against the
+once-per-process constraint — DISSOLVED under the respawn-reload
+ruling (FRONTEND.md's Reload section: reload is the frontend's
+kill-and-respawn, the world re-scans fresh in the new process, an
+in-process reload is deferred until a scenario respawn cannot serve).
+What survives is the test-honesty case: the global makes per-test
+isolation impossible (the one-integration-binary-per-scenario dance),
+and the seed/read ordering invariant is enforced in the wrong
+direction (double-seed panics; early reads absorb an empty catalog).
+The redesign, when it lands: the global dies; `world_scan` computes
+the catalog and stows it on `WorldBoot` (the boot-product hand-off
+that already exists); `assemble` takes it as a parameter. Deferred
+by owner ruling (2026-10) — the status quo is sound in production
+(one seed per process boot, by construction); the cost is borne only
+by tests. Do NOT patch the symptom in the meantime (no
+loud-read/test-helper machinery — the interim patch was considered
+and rejected as elaborating machinery to preserve the global).
+
 ### Extension follow-ups
 
 - The **mid-run restoration slice** — ruled, unimplemented: a dead
@@ -131,28 +156,25 @@ log decision, parked here.
   catalog manager) — the remaining piece is the generator itself
   (its own project thread), plus the built-in mirror list's real
   coordinates when it ships.
-- **Config reload — the `reload` command** (2026-10): an additive
-  first cut — re-read config/auth, new keys and providers appear, the
-  model catalog re-announces (`models_available`, FRONTEND.md §6).
-  Its mechanism shipped with `login`/`logout` (2026-10, protocol v21):
-  the current-world cell plus the per-session world refresh is exactly
-  the path `reload` reuses — what remains is re-reading the
-  providers.toml layers and the command itself. One dormant
-  assumption closes with it: `run.rs`'s `turn_cost` reads the rate
-  card LIVE from the world config — safe today because login/logout
-  swap auth only (the config Arc is shared), but a reload swaps the
-  config mid-run, so it must snapshot the config into the run's bound
-  pair (or re-derive the bound-at-open invoice invariant) when it
-  lands. The general
-  semantics — vanished providers, stale session registers, the
-  skills/gate reload scope — stay parked until the command lands.
-- **The models.dev catalog extension** (2026-10, recorded): an
-  extension shipping an auto-updating providers fragment (the
-  models.dev catalog), versioned separately from tabit itself — the
-  zero-config story's other half: on a bare install it gives
-  `login` its providers to scan, so first run is "install the
-  catalog extension, paste a key" with no hand-written
-  providers.toml.
+- **Config reload — SUPERSEDED by respawn-reload (2026-10 ruling):**
+  reload is the frontend's kill-and-respawn (FRONTEND.md's Reload
+  section); an in-process `reload` command is deferred until a
+  scenario respawn cannot serve. What survives of the original
+  entry: the login/logout world-refresh machinery (the current-world
+  cell plus the per-session world refresh, protocol v21) is the path
+  an in-process reload would reuse IF it lands, and the dormant
+  assumption stays recorded against that day — `run.rs`'s `turn_cost`
+  reads the rate card LIVE from the world config, safe today because
+  login/logout swap auth only; a config-swapping reload must snapshot
+  the config into the run's bound pair (or re-derive the
+  bound-at-open invoice invariant) when it lands.
+- **The models.dev catalog extension — SUBSUMED (2026-10 ruling):**
+  the built-in catalog channel (the downloaded artifact, the mirror
+  list, the bounded boot refresh) delivers the same out-of-band,
+  separately-versioned provider+model catalog without an install
+  step. The zero-config story the extension was for is complete:
+  bare install → boot downloads the catalog → `login` lists its
+  providers → paste a key.
 - Per-model `headers` stay unwired (needs a client-caching decision);
   `context_window` is wired (compaction); display names /
   `reasoning` wait on a model-picker UI (with the frontend).
@@ -164,25 +186,15 @@ log decision, parked here.
 
 ### Session-store exclusion
 
-- **The single-writer lock** (designed 2026-10, after a real
-  two-backend corruption): the append invariant (every entry parents
-  the current head) holds per process, but nothing stops two backends
-  on the same cwd from opening the same session file — observed in
-  the field as two interleaved chains and a loader refusal. The fix:
-  an OS file lock (`std::fs::File::try_lock`, no new dep) on a
-  sidecar `<session>.jsonl.lock`, claimed at `SessionLog::open`, held
-  for the session's lifetime. OS release on handle close means every
-  exit kind self-cleans (no stale lockfiles — the O_EXCL-sentinel
-  variant was rejected on exactly that). Per-session granularity;
-  second open fails loud with "in use by another backend". The
-  sidecar (not the data file) keeps every read path lock-free.
-- **Read-only session open** (nice-to-have, not urgent; the lock
-  design already supports it — the claim is write-mode-only): a
+- **Read-only session open** (nice-to-have, not urgent): a
   non-claiming load for spectator tooling / a second frontend /
-  `tabit inspect`. Carries one new behavior decision: a spectator
-  racing a live writer can see a torn final line, which the owning
-  parser correctly treats as fatal — a read-only mode would tolerate
-  a partial tail instead.
+  `tabit inspect`. The single-writer claim (shipped 2026-10 — the
+  OS lock on the `<session>.jsonl.lock` sidecar, claimed by resume
+  before parse and by create at first commit, OS-released on any
+  exit) claims in write mode only, so the spectator needs no lock
+  changes — the one new behavior decision: a spectator racing a live
+  writer can see a torn final line, which the owning parser treats
+  as fatal; a read-only mode would tolerate a partial tail instead.
 
 ### Docs and comments sweep
 

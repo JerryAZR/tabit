@@ -60,7 +60,7 @@ impl Session {
     pub(crate) fn model_register(&self) -> ModelRegister {
         ModelRegister {
             selection: self.selection.clone(),
-            buffer: self.buffer.clone(),
+            buffer: std::sync::Arc::downgrade(&self.buffer),
             world: self.world.clone(),
         }
     }
@@ -106,7 +106,14 @@ impl Session {
 #[derive(Clone)]
 pub(crate) struct ModelRegister {
     selection: Arc<Mutex<Option<ModelSelection>>>,
-    buffer: crate::writer::SharedBuffer,
+    /// Weak, deliberately (2026-10, the single-writer claim): the
+    /// endpoint's Worker — held by the workers map and the node's
+    /// channel closures — outlives the worker task's wind-down, and a
+    /// strong buffer here would keep the writer (and with it the
+    /// session-file claim) alive past the session's death. A write
+    /// that finds the buffer gone is a model command addressed to a
+    /// dead session: a no-op, the wind-down doctrine.
+    buffer: std::sync::Weak<std::sync::Mutex<dyn crate::writer::WriteBuffer + Send>>,
     /// The world cell — the facts resolve against the CURRENT config
     /// (a world refresh swaps it), never a spawn-time snapshot.
     world: super::world::SharedWorld,
@@ -121,8 +128,13 @@ impl ModelRegister {
     /// command).
     pub(crate) fn write(&self, selection: ModelSelection) {
         let mut cell = lock(&self.selection);
-        if let Err(error) = crate::lock::lock(&self.buffer).enqueue(&[register_record(&selection)])
-        {
+        let Some(buffer) = self.buffer.upgrade() else {
+            // A write addressed to a dead session: the wind-down
+            // doctrine's silent no-op (the cell swap below is equally
+            // moot — the register dies with its Worker).
+            return;
+        };
+        if let Err(error) = crate::lock::lock(&buffer).enqueue(&[register_record(&selection)]) {
             // Write-behind: the lines stay queued and retry at every
             // later enqueue — a refusal is degradation, not loss.
             tracing::warn!(%error, "model_change record failed to flush; queued for retry");

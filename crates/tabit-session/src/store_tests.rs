@@ -163,6 +163,24 @@ fn project_default_resolves_under_the_current_directory() {
 }
 
 #[test]
+fn listing_rejects_a_non_utf8_file_as_io() {
+    // A .jsonl that is not UTF-8 fails the listing's read as Io (the
+    // stageable sibling of the bad-header rejections — the read's
+    // InvalidData, not the parse).
+    let store = temp_store("non-utf8");
+    std::fs::create_dir_all(store.dir()).expect("dir");
+    std::fs::write(store.dir().join("garbage.jsonl"), [0xff, 0xfe, 0x00, 0x41])
+        .expect("write raw bytes");
+    match store.list() {
+        Err(SessionError::Io { path, .. }) => {
+            assert!(path.ends_with("garbage.jsonl"), "{path:?}")
+        }
+        other => panic!("expected io error, got {other:?}"),
+    }
+    std::fs::remove_dir_all(store.dir()).ok();
+}
+
+#[test]
 fn listing_rejects_files_with_bad_headers() {
     let store = temp_store("bad-header");
     std::fs::create_dir_all(store.dir()).expect("dir");

@@ -312,6 +312,44 @@ async fn malformed_tool_call_discards_the_turn_and_retries_within_budget() {
     );
 }
 
+/// A 429 from the provider classifies retryable (ENGINE.md's taxonomy:
+/// rate limits retry, everything else is terminal): the loop re-issues the
+/// identical request and the run completes on the recovery turn.
+#[tokio::test]
+async fn a_rate_limited_turn_retries_and_recovers() {
+    use crate::streaming::StreamingChat;
+
+    let model = MockCompletionModel::from_stream_turns([
+        vec![MockStreamEvent::Error(MockError::http(
+            429,
+            "rate limit exceeded",
+        ))],
+        vec![
+            MockStreamEvent::text("recovered"),
+            MockStreamEvent::final_response(Usage::new()),
+        ],
+    ]);
+    let agent = Arc::new(AgentBuilder::new(model.clone()).build());
+
+    let mut stream = agent.stream_chat(vec![Message::user("go")]).await;
+    let mut finished = false;
+    while let Some(item) = stream.next().await {
+        if let Ok(crate::agent::MultiTurnStreamItem::FinalResponse(_)) = item {
+            finished = true;
+        }
+    }
+    assert!(
+        finished,
+        "the rate-limited turn retries; the recovery completes the run"
+    );
+    assert_eq!(model.request_count(), 2, "one 429, one recovery");
+    assert_eq!(
+        request_user_texts(&model.requests()[1]),
+        ["go"],
+        "the retry resent the identical conversation"
+    );
+}
+
 /// Two consecutive malformed turns exhaust the retry: the run fails with a
 /// message naming the defect and the levers, and the history stays clean.
 #[tokio::test]
@@ -898,126 +936,6 @@ fn usage(input_tokens: u64, output_tokens: u64) -> Usage {
         tool_use_prompt_tokens: 0,
         reasoning_tokens: 0,
     }
-}
-
-#[test]
-fn completion_calls_stream_item_serializes_and_deserializes_expected_shape() {
-    let item: MultiTurnStreamItem =
-        MultiTurnStreamItem::CompletionCall(CompletionCall::new(2, usage(3, 4), None));
-
-    let value = serde_json::to_value(&item).expect("serialize completion call event");
-
-    assert_eq!(
-        value,
-        serde_json::json!({
-            "type": "completionCall",
-            "call_index": 2,
-            "usage": {
-                "input_tokens": 3,
-                "output_tokens": 4,
-                "total_tokens": 7,
-                "cached_input_tokens": 0,
-                "cache_creation_input_tokens": 0,"cache_creation_1h_input_tokens": 0,
-                "tool_use_prompt_tokens": 0,
-                "reasoning_tokens": 0,
-            }
-        })
-    );
-
-    let item: MultiTurnStreamItem =
-        serde_json::from_value(value).expect("deserialize completion call event");
-    match item {
-        MultiTurnStreamItem::CompletionCall(call_usage) => {
-            assert_eq!(call_usage, CompletionCall::new(2, usage(3, 4), None));
-        }
-        other => panic!("expected completion call event, got {other:?}"),
-    }
-
-    let item: MultiTurnStreamItem =
-        MultiTurnStreamItem::CompletionCall(CompletionCall::new(3, Usage::new(), None));
-    let value = serde_json::to_value(&item).expect("serialize missing usage event");
-
-    // Unreported usage serializes as a plain zero-valued object (Usage's
-    // documented sentinel for missing provider metrics).
-    assert_eq!(
-        value,
-        serde_json::json!({
-            "type": "completionCall",
-            "call_index": 3,
-            "usage": {
-                "input_tokens": 0,
-                "output_tokens": 0,
-                "total_tokens": 0,
-                "cached_input_tokens": 0,
-                "cache_creation_input_tokens": 0,"cache_creation_1h_input_tokens": 0,
-                "tool_use_prompt_tokens": 0,
-                "reasoning_tokens": 0,
-            }
-        })
-    );
-
-    // Stream items serialized before the Option encoding was dropped used
-    // `"usage": null`; they must still deserialize.
-    let legacy: MultiTurnStreamItem = serde_json::from_value(serde_json::json!({
-        "type": "completionCall",
-        "call_index": 3,
-        "usage": null
-    }))
-    .expect("legacy null-usage event should deserialize");
-    match legacy {
-        MultiTurnStreamItem::CompletionCall(call) => {
-            assert_eq!(call, CompletionCall::new(3, Usage::new(), None));
-        }
-        other => panic!("expected completion call event, got {other:?}"),
-    }
-}
-
-#[test]
-fn final_response_serializes_completion_calls_with_missing_usage() {
-    let item: MultiTurnStreamItem = MultiTurnStreamItem::final_response_with_completion_calls(
-        OneOrMany::one(AssistantContent::text("done")),
-        usage(3, 4),
-        vec![
-            CompletionCall::new(0, Usage::new(), None),
-            CompletionCall::new(1, usage(3, 4), None),
-        ],
-    );
-
-    if let MultiTurnStreamItem::FinalResponse(response) = &item {
-        assert_eq!(response.requests(), 2);
-    }
-
-    let value = serde_json::to_value(&item).expect("serialize final response");
-
-    assert_eq!(
-        value.get("completion_calls"),
-        Some(&serde_json::json!([
-            {
-                "call_index": 0,
-                "usage": {
-                    "input_tokens": 0,
-                    "output_tokens": 0,
-                    "total_tokens": 0,
-                    "cached_input_tokens": 0,
-                    "cache_creation_input_tokens": 0,"cache_creation_1h_input_tokens": 0,
-                    "tool_use_prompt_tokens": 0,
-                    "reasoning_tokens": 0,
-                }
-            },
-            {
-                "call_index": 1,
-                "usage": {
-                    "input_tokens": 3,
-                    "output_tokens": 4,
-                    "total_tokens": 7,
-                    "cached_input_tokens": 0,
-                    "cache_creation_input_tokens": 0,"cache_creation_1h_input_tokens": 0,
-                    "tool_use_prompt_tokens": 0,
-                    "reasoning_tokens": 0,
-                }
-            }
-        ]))
-    );
 }
 
 fn streaming_text_then_final_model() -> MockCompletionModel {

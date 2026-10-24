@@ -15,4 +15,11 @@ pub enum LogError {
         #[source]
         source: std::io::Error,
     },
+    /// The session file is claimed by another live backend (the
+    /// single-writer lock — see `writer::claim_session`).
+    #[error("session `{path}` is in use by another backend")]
+    InUse {
+        /// The session file that is claimed.
+        path: PathBuf,
+    },
 }

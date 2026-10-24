@@ -13,7 +13,11 @@ use crate::events::SessionEvent;
 use serde::{Deserialize, Serialize};
 
 /// The protocol version this build speaks. The child's first line is
-/// its [`ServerControlFrame::Report`] carrying this version; the
+/// its [`ServerControlFrame::Report`] carrying this version, written
+/// at process entry — before config load, the world scan, and the
+/// catalog wait (2026-10: reporting is the first thing launch does,
+/// so the spawner's version check never waits on boot work, and no
+/// mid-boot frame — v26's `catalog_status` — can precede it); the
 /// spawner reads it and kills an incompatible child (owner ruling
 /// 2026-09-25 — the report model: children report first, spawners
 /// decide). v23: `session_closed` — the wire-level child-death
@@ -29,6 +33,11 @@ use serde::{Deserialize, Serialize};
 /// `user_message.text` becomes the authored text (was: the fold),
 /// and `user_message.expanded` carries the full model-visible fold
 /// when door expansions touched the message (absent otherwise).
+/// v26: the catalog channel's boot status — a transient
+/// `catalog_status` control frame when a network check is in
+/// flight (the boot bounded-waits on it, PROVIDERS.md), and the
+/// resolved state + version riding `providers_available`'s new
+/// `catalog` block (re-announced with it on every world change).
 /// v24: the uniform model announcement —
 /// `model_changed` is renamed `model_selected` (it announces the
 /// current selection, initial or switched) and is now emitted at
@@ -56,7 +65,7 @@ use serde::{Deserialize, Serialize};
 /// compaction — the `compact` command and its event family (reshaped
 /// in v15 into the
 /// `compaction_begin`/`compaction_step`/`compaction_end` envelope).
-pub const PROTOCOL_VERSION: u32 = 25;
+pub const PROTOCOL_VERSION: u32 = 26;
 
 /// Which session produced an event. The stamp is the session id
 /// itself (v3: the `"main"` alias is retired — one name per session);
@@ -381,6 +390,15 @@ pub enum ServerControlFrame {
     Report {
         /// The protocol version this child speaks.
         protocol_version: u32,
+    },
+    /// Boot status: a catalog network check is in flight (v26) — the
+    /// boot may take a moment (bounded: the pointer and artifact
+    /// budgets, PROVIDERS.md). Emitted only when the network is
+    /// actually involved; the RESOLVED state rides
+    /// `providers_available`'s catalog block.
+    CatalogStatus {
+        /// Always `checking` on this frame.
+        state: crate::model::CatalogState,
     },
     /// A line the edge could not turn into a command. The connection
     /// stays open.

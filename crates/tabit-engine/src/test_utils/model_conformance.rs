@@ -2093,6 +2093,22 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn extraction_validation_accepts_the_canonical_person_with_usage() {
+        // Case-insensitive names and a substring job match; the Ok path
+        // the scenario asserts against.
+        assert!(
+            validate_extraction_fields(
+                "extraction",
+                Some("ada"),
+                Some("LOVELACE"),
+                Some("English mathematician and writer"),
+                usage(10, 5),
+            )
+            .is_ok()
+        );
+    }
+
     // ------------------------------------------------------------------
     // History helpers
     // ------------------------------------------------------------------

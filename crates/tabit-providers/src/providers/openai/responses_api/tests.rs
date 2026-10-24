@@ -23,12 +23,21 @@ fn thinking_level_realizes_as_reasoning_effort() {
     let body = |level: Option<&str>| {
         serde_json::to_value(build(level).expect("converts")).expect("serialize")
     };
-    assert_eq!(body(Some("high"))["reasoning"]["effort"], "high");
-    assert_eq!(
-        body(Some("off"))["reasoning"]["effort"],
-        "none",
-        "this dialect's off is the explicit none"
-    );
+    for (level, effort) in [
+        ("off", "none"),
+        ("minimal", "minimal"),
+        ("low", "low"),
+        ("medium", "medium"),
+        ("high", "high"),
+        ("xhigh", "xhigh"),
+        ("max", "max"),
+    ] {
+        assert_eq!(
+            body(Some(level))["reasoning"]["effort"],
+            effort,
+            "level {level} realizes as effort {effort}"
+        );
+    }
     assert!(
         body(None).get("reasoning").is_none(),
         "no level sends nothing"
@@ -3154,6 +3163,38 @@ fn responses_usage_add_and_from_cover_every_details_combination() {
     assert_eq!(normalized.total_tokens, 3);
 }
 
+/// When both sides carry details, the `(Some, Some)` arms add them pairwise
+/// — the algebra the streaming usage merge relies on. (No live stream
+/// produces two detail-carrying usage frames today; pin the merge anyway.)
+#[test]
+fn responses_usage_add_merges_details_when_both_sides_carry_them() {
+    let sum = usage_with(
+        Some(InputTokensDetails { cached_tokens: 5 }),
+        Some(OutputTokensDetails {
+            reasoning_tokens: 7,
+        }),
+    ) + usage_with(
+        Some(InputTokensDetails { cached_tokens: 2 }),
+        Some(OutputTokensDetails {
+            reasoning_tokens: 3,
+        }),
+    );
+
+    assert_eq!(sum.input_tokens, 2);
+    assert_eq!(sum.output_tokens, 4);
+    assert_eq!(sum.total_tokens, 6);
+    assert_eq!(
+        sum.input_tokens_details
+            .map(|details| details.cached_tokens),
+        Some(7)
+    );
+    assert_eq!(
+        sum.output_tokens_details
+            .map(|details| details.reasoning_tokens),
+        Some(10)
+    );
+}
+
 /// Every status keeps OpenAI's own wire spelling when rendered into a
 /// finish reason, including the in-flight ones `map_finish_reason` itself
 /// never renders.
@@ -3538,4 +3579,68 @@ fn truncated_arguments_error_and_unknown_outputs_contribute_no_content() {
     let converted: Vec<completion::AssistantContent> =
         unknown.try_into().expect("unknown output should convert");
     assert!(converted.is_empty());
+}
+
+/// The reasoning-text content field tolerates dialect drift: a bare string
+/// is one text, and a non-string/non-array payload decodes to no content
+/// rather than failing the whole reasoning item.
+#[test]
+fn reasoning_text_content_accepts_a_bare_string_and_ignores_scalars() {
+    let reasoning: OpenAIReasoning = serde_json::from_value(json!({
+        "id": "rs_1",
+        "summary": [],
+        "content": "plain string"
+    }))
+    .expect("a bare-string content should deserialize");
+    assert_eq!(reasoning.content, vec!["plain string".to_string()]);
+
+    let reasoning: OpenAIReasoning = serde_json::from_value(json!({
+        "id": "rs_1",
+        "summary": [],
+        "content": 42
+    }))
+    .expect("a scalar content should deserialize to empty");
+    assert!(
+        reasoning.content.is_empty(),
+        "a non-text payload contributes no content"
+    );
+}
+
+/// A user content kind the Responses dialect's message conversion cannot
+/// express (here audio) fails loudly instead of being silently dropped.
+#[test]
+fn unsupported_user_content_fails_the_message_conversion() {
+    let message = crate::completion::Message::User {
+        content: OneOrMany::one(message::UserContent::Audio(message::Audio {
+            data: message::DocumentSourceKind::Base64("aGk=".to_string()),
+            media_type: None,
+            additional_params: None,
+        })),
+    };
+
+    let error = Vec::<InputItem>::try_from(message)
+        .expect_err("unsupported content must fail the conversion");
+    assert!(
+        error.to_string().contains("Unsupported message"),
+        "unexpected error: {error}"
+    );
+}
+
+/// The single-part `UserContent` conversion's catch-all: a content kind it
+/// does not model (here video) is a typed conversion error, not a drop.
+#[test]
+fn unsupported_single_part_user_content_is_a_typed_conversion_error() {
+    let error = responses_user_content(message::UserContent::Video(message::Video {
+        data: message::DocumentSourceKind::Url("https://example.com/clip.mp4".to_string()),
+        media_type: None,
+        additional_params: None,
+    }))
+    .expect_err("unsupported content must fail the conversion");
+
+    assert!(
+        error
+            .to_string()
+            .contains("Unsupported user content for OpenAI Responses API"),
+        "unexpected error: {error}"
+    );
 }

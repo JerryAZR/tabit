@@ -567,7 +567,7 @@ pub(crate) fn expand_invocations(message: Message, skills: &Skills) -> Message {
         return message;
     }
     let mut blocks: Vec<String> = Vec::new();
-    for name in scan_invocation_tags(&text) {
+    for name in crate::session::wire::scan_tags(&text, TAG_OPEN, TAG_CLOSE) {
         let Some(entry) = skills.lookup(name) else {
             tracing::warn!(skill = %name, "invocation tag names no discovered skill — left as-is");
             continue;
@@ -597,23 +597,6 @@ pub(crate) fn expand_invocations(message: Message, skills: &Skills) -> Message {
         content.push(UserContent::text(block));
     }
     Message::User { content }
-}
-
-/// The tag names in order of appearance — everything between
-/// `<skill name="` and `"/>`. A dangling opening (no close) stops the
-/// scan; anything malformed is simply not a tag and passes through.
-fn scan_invocation_tags(text: &str) -> Vec<&str> {
-    let mut names = Vec::new();
-    let mut rest = text;
-    while let Some(start) = rest.find(TAG_OPEN) {
-        let after = &rest[start + TAG_OPEN.len()..];
-        let Some(end) = after.find(TAG_CLOSE) else {
-            break;
-        };
-        names.push(&after[..end]);
-        rest = &after[end + TAG_CLOSE.len()..];
-    }
-    names
 }
 
 /// The body after `---`-delimited frontmatter — the whole content

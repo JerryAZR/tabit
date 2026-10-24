@@ -2942,7 +2942,7 @@ dependencies = [
 
 [[package]]
 name = "tabit-app"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "futures",
  "httpmock",
@@ -2966,7 +2966,7 @@ dependencies = [
 
 [[package]]
 name = "tabit-config"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -2980,7 +2980,7 @@ dependencies = [
 
 [[package]]
 name = "tabit-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "futures",
  "httpmock",
@@ -3001,7 +3001,7 @@ dependencies = [
 
 [[package]]
 name = "tabit-derive"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "convert_case",
@@ -3022,7 +3022,7 @@ dependencies = [
 
 [[package]]
 name = "tabit-engine"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -3048,7 +3048,7 @@ dependencies = [
 
 [[package]]
 name = "tabit-ext"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "futures",
  "serde",
@@ -3065,7 +3065,7 @@ dependencies = [
 
 [[package]]
 name = "tabit-ext-install"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "flate2",
  "httpmock",
@@ -3078,7 +3078,7 @@ dependencies = [
 
 [[package]]
 name = "tabit-ext-sdk"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "futures",
  "reqwest",
@@ -3097,7 +3097,7 @@ dependencies = [
 
 [[package]]
 name = "tabit-gate"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "brush-parser",
  "glob",
@@ -3111,7 +3111,7 @@ dependencies = [
 
 [[package]]
 name = "tabit-log"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "humantime",
  "serde",
@@ -3124,7 +3124,7 @@ dependencies = [
 
 [[package]]
 name = "tabit-protocol"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -3132,7 +3132,7 @@ dependencies = [
 
 [[package]]
 name = "tabit-providers"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "as-any",
@@ -3170,7 +3170,7 @@ dependencies = [
 
 [[package]]
 name = "tabit-rig"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -3201,7 +3201,7 @@ dependencies = [
 
 [[package]]
 name = "tabit-session"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "base64",
  "futures",
@@ -3228,7 +3228,7 @@ dependencies = [
 
 [[package]]
 name = "tabit-tools"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "base64",
  "futures",
@@ -3249,7 +3249,7 @@ dependencies = [
 
 [[package]]
 name = "tabit-wire"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "process-wrap",
  "serde_json",

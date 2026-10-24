@@ -227,6 +227,10 @@ fn all_events() -> Vec<SessionEvent> {
                     auth: crate::ProviderAuth::None,
                 },
             ],
+            catalog: crate::CatalogChannelStatus {
+                state: crate::CatalogState::Fresh,
+                version: Some("20261014-886d930945".to_string()),
+            },
         },
         SessionEvent::NativeItem {
             turn_id: TURN.to_string(),
@@ -426,9 +430,15 @@ fn every_tag_agrees_with_the_wire_the_enum_and_the_list() {
                     auth: crate::ProviderAuth::Stored,
                 },
             ],
+            // The v26 catalog block: the channel's resolved state and
+            // the cache's version.
+            catalog: crate::CatalogChannelStatus {
+                state: crate::CatalogState::Updated,
+                version: Some("20261014-886d930945".to_string()),
+            },
         })
         .expect("serialize"),
-        r#"{"type":"providers_available","providers":[{"id":"env-backed","auth":"env"},{"id":"keyless","auth":"keyless"},{"id":"locked","name":"The Locked provider","auth":"none"},{"id":"stored","auth":"stored"}]}"#
+        r#"{"type":"providers_available","providers":[{"id":"env-backed","auth":"env"},{"id":"keyless","auth":"keyless"},{"id":"locked","name":"The Locked provider","auth":"none"},{"id":"stored","auth":"stored"}],"catalog":{"state":"updated","version":"20261014-886d930945"}}"#
     );
     // The announce's wire spelling: a subagent child carries its
     // parentage and the spawning call's correlation id; a user

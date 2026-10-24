@@ -601,6 +601,18 @@ mod tests {
         assert_eq!(agent.preamble, None);
     }
 
+    #[test]
+    fn append_preamble_extends_a_configured_preamble_on_its_own_line() {
+        let agent = AgentBuilder::new(MockCompletionModel::text("ok"))
+            .preamble("system prompt")
+            .append_preamble("extra guidance")
+            .build();
+        assert_eq!(
+            agent.preamble.as_deref(),
+            Some("system prompt\nextra guidance")
+        );
+    }
+
     fn portable_tool(name: &str) -> PortableDynamicTool {
         PortableDynamicTool::new(
             name,
@@ -652,7 +664,7 @@ mod tests {
 
     /// Once in the builder-tools state, the `dynamic_tool`,
     /// `portable_dynamic_tool`, and `dynamic_tools` methods keep appending
-    /// tools to the same registry.
+    /// tools to the same registry — and every appended tool dispatches.
     #[tokio::test]
     async fn with_builder_tools_appends_dynamic_and_portable_tools() {
         let agent = AgentBuilder::new(MockCompletionModel::text("ok"))
@@ -672,6 +684,17 @@ mod tests {
                 "dyn_two_b".to_string(),
             ]
         );
+
+        // Registration is not just advertising: both fixture kinds execute
+        // through the built server.
+        for name in ["dyn_one", "portable_one"] {
+            let result = agent
+                .tool_server_handle
+                .execute(name, "{}", &mut ToolContext::new())
+                .await;
+            assert!(result.is_success(), "{name} dispatches");
+            assert_eq!(result.output().as_text(), Some("ok"));
+        }
     }
 
     struct NamedTool;

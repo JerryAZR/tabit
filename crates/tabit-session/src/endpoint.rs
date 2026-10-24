@@ -1222,7 +1222,11 @@ impl Lifecycle {
     fn refresh_world(&self, core: &LifecycleCore, auth: tabit_config::AuthConfig) {
         let registry = {
             let current = lock(&core.world).registry();
-            crate::registry::ModelRegistry::new(current.config().clone(), Arc::new(auth))
+            crate::registry::ModelRegistry::new_with_catalog_status(
+                current.config().clone(),
+                Arc::new(auth),
+                current.catalog_status().clone(),
+            )
         };
         // The swap bumps the cell's generation — how a session build
         // racing this refresh (the `new_session`/`open_session`
@@ -1439,8 +1443,29 @@ fn announce_catalog(sink: &HostSink, registry: &crate::registry::ModelRegistry) 
         None,
         SessionEvent::ProvidersAvailable {
             providers: registry.providers_catalog(),
+            catalog: catalog_status_wire(registry.catalog_status()),
         },
     );
+}
+
+/// The registry's boot-outcome status as the wire shape (v26): one
+/// mapping, both announcement sites (boot attach, login/logout
+/// refresh — the rebuild preserves the boot's status, so the
+/// re-announcement repeats it verbatim).
+fn catalog_status_wire(
+    status: &crate::registry::CatalogStatus,
+) -> tabit_protocol::CatalogChannelStatus {
+    use crate::registry::CatalogStatus;
+    use tabit_protocol::{CatalogChannelStatus, CatalogState};
+    let (state, version) = match status {
+        CatalogStatus::Disabled => (CatalogState::Disabled, None),
+        CatalogStatus::Cached { version } => (CatalogState::Cached, version.clone()),
+        CatalogStatus::Fresh { version } => (CatalogState::Fresh, version.clone()),
+        CatalogStatus::Updated { version } => (CatalogState::Updated, Some(version.clone())),
+        CatalogStatus::Pending => (CatalogState::Pending, None),
+        CatalogStatus::Offline { version } => (CatalogState::Offline, version.clone()),
+    };
+    CatalogChannelStatus { state, version }
 }
 
 /// Spawn one session's resident worker: the classic loop — ownership
@@ -1587,7 +1612,13 @@ fn spawn_worker(
                 _ = worker_mailbox.work_signal().notified() => {}
             }
         }
-        lock(&stats).insert(stats_id, session.stats());
+        // closing_stats means FULLY closed: capture the stats, drop
+        // the session (releasing the single-writer claim and flushing
+        // the tail), THEN report — an observer may reopen the file the
+        // moment the stats appear.
+        let final_stats = session.stats();
+        drop(session);
+        lock(&stats).insert(stats_id, final_stats);
     });
     (worker, channel, join)
 }

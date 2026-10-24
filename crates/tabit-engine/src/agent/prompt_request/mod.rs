@@ -7,7 +7,6 @@ use tabit_providers::{
 };
 
 use crate::{completion::Usage, tool::ToolOutput};
-use serde::{Deserialize, Serialize};
 
 /// Generate the request-builder setters that forward verbatim to the inner
 /// `AgentRunner` of the streaming builder. Only the setters whose signature
@@ -165,7 +164,7 @@ macro_rules! forward_prompt_setters {
 pub(crate) use forward_prompt_setters;
 
 /// Details for one successfully completed completion request made by an agent run.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct CompletionCall {
     /// Zero-based index of the completion request within this agent run.
@@ -175,7 +174,6 @@ pub struct CompletionCall {
     /// Zero-valued usage is [`Usage`]'s documented sentinel for missing
     /// provider usage metrics; rig does not distinguish "reported all zeros"
     /// from "unreported".
-    #[serde(default, deserialize_with = "usage_null_as_default")]
     pub usage: Usage,
     /// Why the provider stopped generating, when it reported a reason.
     ///
@@ -183,7 +181,6 @@ pub struct CompletionCall {
     /// truncation-class one is the diagnostic. `None` means the provider
     /// reported no reason — deliberately not smoothed into `Stop`: "finished
     /// normally" and "did not say" are different facts.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub finish_reason: Option<crate::completion::FinishReason>,
 }
 
@@ -202,19 +199,6 @@ impl CompletionCall {
     }
 }
 
-/// Tolerate `null` usage from data serialized before rig dropped the
-/// `Option<Usage>` encoding of missing provider usage metrics.
-///
-/// This tolerance requires a self-describing format such as JSON; data
-/// serialized with non-self-describing formats (e.g. bincode) from before the
-/// change cannot round-trip.
-fn usage_null_as_default<'de, D>(deserializer: D) -> Result<Usage, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    Ok(Option::<Usage>::deserialize(deserializer)?.unwrap_or_default())
-}
-
 /// The result of an agent run, returned by **both** the blocking
 /// ([`PromptRequest`]) and streaming ([`StreamingPromptRequest`]) surfaces so a
 /// call site reads identically whether it used `.prompt()` or `.stream_prompt()`.
@@ -224,14 +208,7 @@ where
 ///
 /// [`StreamingPromptRequest`]: crate::agent::StreamingPromptRequest
 /// [`MultiTurnStreamItem::FinalResponse`]: crate::agent::MultiTurnStreamItem::FinalResponse
-#[derive(Debug, Clone, Serialize, Deserialize)]
-// Serialize *and* deserialize both go through `PromptResponseRepr` so the two
-// directions agree on `content`'s wire shape (an `Option`). Routing only
-// deserialize through the shadow would make serialize write a bare `OneOrMany`
-// while deserialize expects an `Option`, breaking round-trips for positional /
-// non-self-describing formats (e.g. bincode). The repr carries the field serde
-// attributes, so the JSON shape is unchanged.
-#[serde(from = "PromptResponseRepr", into = "PromptResponseRepr")]
+#[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct PromptResponse {
     /// Concatenated assistant text for the final turn.
@@ -250,50 +227,6 @@ pub struct PromptResponse {
     /// Where [`output`](Self::output) is the concatenated text, this preserves
     /// the individual content parts (text, reasoning, images, …).
     pub content: OneOrMany<AssistantContent>,
-}
-
-/// Serde shadow for [`PromptResponse`]. `content` is an `Option` here so runs
-/// serialized before the field existed still deserialize: a missing `content`
-/// reconstructs the structured final turn from `output` (a single text part),
-/// keeping [`PromptResponse::output`] and [`PromptResponse::content`] consistent
-/// for legacy data rather than defaulting to empty text. It carries the field
-/// serde attributes for both directions, keeping the serialized shape identical
-/// (`completion_calls` omitted when empty; `content` always present). History
-/// serialized by older versions (a former `messages` field) is ignored — the
-/// conversation is the transcript's home, not the response.
-#[derive(Serialize, Deserialize)]
-struct PromptResponseRepr {
-    output: String,
-    usage: Usage,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    completion_calls: Vec<CompletionCall>,
-    #[serde(default)]
-    content: Option<OneOrMany<AssistantContent>>,
-}
-
-impl From<PromptResponseRepr> for PromptResponse {
-    fn from(repr: PromptResponseRepr) -> Self {
-        let content = repr
-            .content
-            .unwrap_or_else(|| OneOrMany::one(AssistantContent::text(repr.output.clone())));
-        Self {
-            output: repr.output,
-            usage: repr.usage,
-            completion_calls: repr.completion_calls,
-            content,
-        }
-    }
-}
-
-impl From<PromptResponse> for PromptResponseRepr {
-    fn from(response: PromptResponse) -> Self {
-        Self {
-            output: response.output,
-            usage: response.usage,
-            completion_calls: response.completion_calls,
-            content: Some(response.content),
-        }
-    }
 }
 
 impl std::fmt::Display for PromptResponse {
@@ -402,18 +335,19 @@ pub(crate) fn tool_result_message(
     call_id: Option<String>,
     message: String,
 ) -> UserContent {
-    match tool_result_with(
+    // tool_result_with builds only UserContent::ToolResult — the else is
+    // the sanctioned crash for a broken invariant (AGENTS.md doctrine).
+    #[allow(clippy::unreachable)]
+    let UserContent::ToolResult(mut tool_result) = tool_result_with(
         id,
         call_id,
         OneOrMany::one(ToolResultContent::text(message)),
         None,
-    ) {
-        UserContent::ToolResult(mut tool_result) => {
-            tool_result.status = Some(ToolResultStatus::Failed { code: None });
-            UserContent::ToolResult(tool_result)
-        }
-        other => other,
-    }
+    ) else {
+        unreachable!("tool_result_with builds only UserContent::ToolResult")
+    };
+    tool_result.status = Some(ToolResultStatus::Failed { code: None });
+    UserContent::ToolResult(tool_result)
 }
 
 pub(crate) fn is_empty_assistant_turn(choice: &OneOrMany<AssistantContent>) -> bool {
@@ -422,16 +356,6 @@ pub(crate) fn is_empty_assistant_turn(choice: &OneOrMany<AssistantContent>) -> b
             choice.first(),
             AssistantContent::Text(text) if text.text.is_empty() && text.additional_params.is_none()
         )
-}
-
-pub(crate) fn assistant_text_from_choice(choice: &OneOrMany<AssistantContent>) -> String {
-    choice
-        .iter()
-        .filter_map(|content| match content {
-            AssistantContent::Text(text) => Some(text.text.as_str()),
-            _ => None,
-        })
-        .collect()
 }
 
 #[cfg(test)]

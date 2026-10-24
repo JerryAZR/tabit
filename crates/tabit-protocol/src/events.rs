@@ -344,6 +344,12 @@ pub enum SessionEvent {
     ProvidersAvailable {
         /// Every configured provider, in alphabetical id order.
         providers: Vec<crate::model::ProviderStatus>,
+        /// The downloaded catalog's channel state at this boot
+        /// (v26) — why the provider list is what it is (freshly
+        /// updated, cached, offline, …) and its version.
+        /// Announce-if-cheap: the frontend decides whether to
+        /// render it.
+        catalog: crate::model::CatalogChannelStatus,
     },
     /// A session became visible in this backend: the boot session
     /// (emitted at spawn, ahead of the catalog and any replay), a

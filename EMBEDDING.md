@@ -78,17 +78,20 @@ buffers the response, and answers a `select_one` card from stdin.
 let options = AppOptions { tools: Some("read".into()), ..Default::default() };
 // config by value; its source path (locates the catalog's auto file
 // beside it — PROVIDERS.md); auth as Arc
-let (registry, launchable) = world_registry(&options, config, config_path, Arc::new(auth))?;
 let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
-let mounted = mount_world(launchable, &runtime);
+let _guard = runtime.enter();
+let mut boot = world_scan(&options, config, config_path, Arc::new(auth))?;
+let mounted = mount_world(boot.take_launchable(), &runtime);
+let registry = build_registry(boot, &runtime);
 let (session, notes) = assemble(&options, &registry, &store, ContinueMiss::Fail, Some(mounted.clone()))?;
 ```
 
-That is the whole boot: the default toolset behind your filter, the
-extension world (scan, providers fragments, skills, the supervisor),
-the permission gate, and the session — the same objects `tabit-core`
-serves. `core_tools()`, `host_data()`, and `host_node()` fill in the
-rest.
+That is the whole boot: the local world plus the catalog refresh
+spawned (`world_scan`), the extension handshakes (`mount_world`) while
+the refresh overlaps them, then the registry (`build_registry` awaits
+the refresh within the boot budget and merges the catalog cache), and
+the session — the same objects `tabit-core` serves. `core_tools()`,
+`host_data()`, and `host_node()` fill in the rest.
 
 **The child role.** Subagent children self-spawn the current
 executable with `--json` child-role flags (the "no exceptions"

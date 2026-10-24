@@ -17,7 +17,7 @@ doctest = true
 
 [dependencies]
 humantime = { workspace = true }
-tabit-providers = { path = "../tabit-providers", version = "0.1.0", default-features = false }
+tabit-providers = { path = "../tabit-providers", version = "0.2.0", default-features = false }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

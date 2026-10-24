@@ -72,6 +72,12 @@ fn sse_answer(text: &str) -> String {
 /// leak in; `--list` boots nothing and takes no root.
 fn run_in(dir: &Path, config: &Path, args: &[&str]) -> (Option<i32>, String, String) {
     let mut argv: Vec<String> = Vec::new();
+    // The catalog refresh stays out of tests (rule 5: offline).
+    std::fs::write(
+        dir.join("test-settings.toml"),
+        "[catalog]\nauto_update = false\n",
+    )
+    .expect("settings");
     if !args.contains(&"--list") {
         let empty_root = dir.join("no-extensions");
         std::fs::create_dir_all(&empty_root).expect("empty extension root");
@@ -83,6 +89,7 @@ fn run_in(dir: &Path, config: &Path, args: &[&str]) -> (Option<i32>, String, Str
         .args(&argv)
         .current_dir(dir)
         .env("TABIT_CONFIG", config)
+        .env("TABIT_SETTINGS", dir.join("test-settings.toml"))
         .output()
         .expect("spawn tabit-core");
     (
@@ -154,7 +161,16 @@ fn print_mode_answers_one_prompt_end_to_end() {
     let sessions = dir.join(".tabit").join("sessions");
     assert_eq!(
         std::fs::read_dir(&sessions)
-            .map(|entries| entries.count())
+            .map(|entries| {
+                entries
+                    .filter_map(|entry| entry.ok())
+                    .filter(|entry| {
+                        // The single-writer sidecar (`<session>.jsonl.lock`)
+                        // shares the directory; the count is session FILES.
+                        entry.path().extension().and_then(|e| e.to_str()) == Some("jsonl")
+                    })
+                    .count()
+            })
             .unwrap_or(0),
         1,
         "the run left exactly one session file"
@@ -336,7 +352,16 @@ fn a_promptless_rewind_drops_the_last_user_message_then_branches() {
     let sessions = dir.join(".tabit").join("sessions");
     assert_eq!(
         std::fs::read_dir(&sessions)
-            .map(|entries| entries.count())
+            .map(|entries| {
+                entries
+                    .filter_map(|entry| entry.ok())
+                    .filter(|entry| {
+                        // The single-writer sidecar (`<session>.jsonl.lock`)
+                        // shares the directory; the count is session FILES.
+                        entry.path().extension().and_then(|e| e.to_str()) == Some("jsonl")
+                    })
+                    .count()
+            })
             .unwrap_or(0),
         1,
         "rewind branches within the session file, it does not fork one"
@@ -449,6 +474,19 @@ struct JsonChild {
 /// `TABIT_CONFIG` points at `config` only when given. The extension
 /// root is pinned empty like `run_in`'s.
 fn json_child(dir: &Path, home: &Path, config: Option<&Path>, args: &[&str]) -> JsonChild {
+    // The catalog refresh stays out of tests (rule 5: offline).
+    json_child_with_settings(dir, home, config, args, "[catalog]\nauto_update = false\n")
+}
+
+/// `json_child` with the staged settings file's content chosen by the
+/// test (the default keeps the catalog channel offline).
+fn json_child_with_settings(
+    dir: &Path,
+    home: &Path,
+    config: Option<&Path>,
+    args: &[&str],
+    settings_toml: &str,
+) -> JsonChild {
     use std::io::BufRead as _;
     let empty_root = dir.join("no-extensions");
     std::fs::create_dir_all(&empty_root).expect("empty extension root");
@@ -473,6 +511,9 @@ fn json_child(dir: &Path, home: &Path, config: Option<&Path>, args: &[&str]) -> 
     if let Some(config) = config {
         command.env("TABIT_CONFIG", config);
     }
+    let settings = dir.join("test-settings.toml");
+    std::fs::write(&settings, settings_toml).expect("settings");
+    command.env("TABIT_SETTINGS", &settings);
     let mut child = command.spawn().expect("spawn tabit-core");
     let stdin = child.stdin.take().expect("piped stdin");
     let stdout = child.stdout.take().expect("piped stdout");
@@ -755,6 +796,12 @@ fn the_debug_log_switch_writes_the_trace() {
     let dir = config.parent().expect("config dir").to_path_buf();
     let empty_root = dir.join("no-extensions");
     std::fs::create_dir_all(&empty_root).expect("empty extension root");
+    // The catalog refresh stays out of tests (rule 5: offline).
+    std::fs::write(
+        dir.join("test-settings.toml"),
+        "[catalog]\nauto_update = false\n",
+    )
+    .expect("settings");
 
     let run = |debug_value: &std::path::Path| {
         Command::new(env!("CARGO_BIN_EXE_tabit-core"))
@@ -766,6 +813,7 @@ fn the_debug_log_switch_writes_the_trace() {
             ])
             .current_dir(&dir)
             .env("TABIT_CONFIG", &config)
+            .env("TABIT_SETTINGS", dir.join("test-settings.toml"))
             .env("TABIT_DEBUG_LOG", debug_value)
             .output()
             .expect("spawn tabit-core")
@@ -799,4 +847,33 @@ fn the_debug_log_switch_writes_the_trace() {
     let beside = dir.join(".tabit/sessions/debug.log");
     let log = std::fs::read_to_string(&beside).expect("the `1` form lands beside the session logs");
     assert!(log.contains("wire::model"), "the trace is in there");
+}
+
+#[test]
+fn the_report_leads_even_with_a_catalog_check_in_flight() {
+    // The v26 transient catalog frame may only follow the report —
+    // the wire client's spawn pump hard-fails a non-report first
+    // frame. A cache-less home with the channel enabled makes the
+    // check fire; the mock mirror 404s so the check resolves fast.
+    let server = MockServer::start();
+    server.mock(|when, then| {
+        when.method(GET).path("/latest.toml");
+        then.status(404);
+    });
+    let dir = test_dir("report-first");
+    let home = dir.join("home");
+    std::fs::create_dir_all(&home).expect("home");
+    let settings = format!("[catalog]\nurls = [\"{}\"]\n", server.url(""));
+    let child = json_child_with_settings(&dir, &home, None, &["--json"], &settings);
+    let first = next_frame(&child);
+    assert_eq!(
+        first["type"], "report",
+        "the report is the wire's first line, catalog check or not: {first}"
+    );
+    let second = next_frame(&child);
+    assert_eq!(
+        second["type"], "catalog_status",
+        "the transient frame follows the report: {second}"
+    );
+    assert_eq!(close_and_wait(child), Some(0));
 }

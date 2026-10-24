@@ -52,13 +52,40 @@ conformance harness when that grows its event-level scenarios.
 
 ## Methodology
 
-- `cargo llvm-cov --workspace --html --output-dir target/llvm-cov/html`
+- The recipe (llvm-cov 0.8.7, this workspace — each clause was learned
+  the hard way in the 2026-10 round):
+  1. `cargo build --workspace --examples --target-dir target/llvm-cov-target`
+     — plain, no coverage env. llvm-cov 0.8 runs its tests with
+     `cargo test --tests`, which never builds examples, and the wire
+     `net.rs` tests look for their stub examples beside the test
+     binary. Examples contribute no coverage themselves (they never
+     did — the class-6 note stands); they must only EXIST.
+  2. `cargo llvm-cov --no-clean --workspace --html --output-dir
+     target/llvm-cov/html -- --test-threads=4`. `--no-clean` keeps the
+     pre-built examples (the default clean deletes them); the clean
+     env matters — never run the llvm-cov subcommand in a shell where
+     `show-env` was eval'd (its `CARGO_LLVM_COV_TARGET_DIR` hijacks
+     the target dir and the run lands in `target/`). `--test-threads=4`
+     is not caution but correctness: the tabit-core integration suites'
+     instrumented multi-process children starve past their 30s frame
+     bound at 8-way parallel; 4-way is the known-good.
+  3. If a stale `target/tests/trybuild/rig-*` fixture (pre-rename
+     vendor scratch) reappears, delete it — llvm-cov's report phase
+     runs `cargo metadata` on it and dies.
+  4. Resource caps on this machine: `CARGO_BUILD_JOBS=4` for anything
+     instrumented. A 32-way instrumented build plus 32-way test-child
+     fan-out exhausted memory and crashed the host once.
   (summary: `cargo llvm-cov report --summary-only`; per-line:
   `--lcov --output-path target/llvm-cov/lcov.info`).
 - The whole suite runs offline (cassette replay + test doubles). Doctests
   are NOT included in these numbers (`llvm-cov` was run without
   `--doctests`); they are gated by the same CI run.
-- Current state: **93.1% lines** (3,184 of 46,126; the coverage
+- Current state: **93.14% lines** (3,589 of 52,322; the provider-arc
+  round — 55 commits since the split round, the base +6,196 lines,
+  the spawned-binary exit-flush fix restoring class-6 attribution:
+  serve.rs 0→93.3%, main.rs 0→73.5%, print.rs 21→64.5%; ~108 fill
+  tests and a 42-line proof-quoted delete batch — the round's section
+  below). Before this round: **93.1% lines** (3,184 of 46,126; the coverage
   round's re-collection — the two-leg pass: the llvm-cov
   re-triage plus a four-reviewer functional sweep whose verified
   finds filled ~45 scenario gaps and surfaced one unwired port
@@ -824,6 +851,86 @@ caught it. A false number in a ledger is worse than none — the
 parser fix is in the round's scratch, the lesson is already the
 ledger's own (coverage measures execution; verify the instrument).
 
+## The provider-arc round (2026-10): the exit flush, a delete batch, 108 fills
+
+Scope: the 55 commits since the split round — the provider/catalog arc
+(d4b7a33's config schema rework, b582887/6438d93/c9c0954's catalog
+manager and bounded boot, 82eba86's protocol v26), protocol v23–v25,
+attachments, the first-part law, the debug log. The triage ran as
+three parallel classifications (tabit-app; the rest of the workspace;
+and the class-6 root-cause investigation), then fills as four
+per-crate batches.
+
+**The class-6 collapse, root-caused and fixed.** main.rs's spawned-
+binary attribution had silently died: 61.2% (2026-09-26) → 0% this
+collection. Root cause: `std::process::exit` on Windows is
+`ExitProcess`, which never runs the CRT `atexit` chain where the LLVM
+profile runtime registers its flush — and cd870bc (2026-09-25) had
+routed every exit of the binary through `process::exit` (the routing
+itself stands: the edge's reader thread parks in an uninterruptible
+stdin read, and a runtime drop would wait on it forever). So every
+instrumented tabit-core child — the whole integration suite — exited
+"cleanly" and wrote no profraw; libtest binaries return from `main`
+normally, which is why only the real-binary files collapsed. The fix
+(609a1be): `tabit_app::exit` calls `__llvm_profile_write_file()`
+under `cfg(coverage)` (cargo-llvm-cov sets it; declared in the
+workspace lints' check-cfg) before exiting, and all five terminal
+exit sites route through it. Verified by probe before landing, then
+by this collection: serve.rs 0→93.3%, main.rs 0→73.5%, print.rs
+21→64.5%. What remains class-6: children KILLED (TerminateProcess —
+the abort tests) still lose their profraw, inherent to the kill; and
+trybuild/rustc subprocesses as before.
+
+**The delete batch (42 lines, each proof-quoted in 3b2745e's
+message).** The rule-12 sweep the classification surfaced: `Add for
+Usage` (only `ResponsesUsage` ever adds), two orphan `From` impls in
+completion/message.rs, d89ade6's leftover `From<&StreamingCompletion
+Response> for Usage`, `Default for ToolCallBridge`, the
+`MockStreamEvent::TextAdditionalParams` variant triple (95/49/0
+construction counts), the `OneOrMany::many` arm in the else of an
+is_empty guard, a `skip_serializing_if`-shadowed serializer arm,
+`DynamicTool::execute`'s unconstructible `Err` arm (`IntoToolOutput
+for ToolOutput` is `Ok(self)`), two let-else arms replaced by
+sanctioned-crash `unreachable!`, turn.rs's post-loop delta-error
+check (Final's ingest prechecks the same condition; a comment
+records why it must not be re-added), and `error_usage` +
+`store_error_usage` + six call sites — never-`Some` machinery deleted
+whole.
+
+**The fills (four commits: 849d1fd, 0b0e2d9, d9bfc3a, 44ef02c).**
+~108 tests; the catalogue lives in the commit messages. The ones
+that are findings, not filler:
+- session/run.rs:107's empty-conversation continue: the endpoint
+  test's message-behind-continue ordering had always defeated the arm
+  it named; filled at the session level (parked continue, `pump()`,
+  zero-event `Completed`).
+- session/wire.rs:47 deleted — provably dead by the first-part law
+  (every caller sees part[0] as the authored text and expansion only
+  appends, so the `find_map` skip arm was unrepresentable); a
+  let-else with the sanctioned-crash successor replaced it.
+- streaming/mod.rs: the classified scenario ("re-pause completes the
+  stale parked wait") was REFUTED by `watch::Receiver::wait_for`'s
+  re-read-the-current-value semantics; the landed tests pin the
+  actual behavior (re-pause re-parks; a genuine resume racing the
+  branch completes). Line 869's deterministic pin would need a seam —
+  a design call, recorded in Deferred.
+- catalog_tests' shared `settings()` helper moved to generous budgets
+  after the production-tight 1s pointer budget flaked under full-gate
+  scheduling starvation (a 32-way suite can stall a
+  connection-refused round trip past 1s); the budget tests set their
+  own tight values. A test that doesn't need the budget shouldn't
+  carry it.
+- tabit-core cli.rs:150 (print mode's flag-error arm) is unreachable
+  by flag precedence — recorded as a design observation, not filled.
+
+**Doctrine-drift conversions (c868b7e).** Two arms logged-and-
+degraded where the error doctrine mandates the sanctioned crash —
+multipart's stored-`Mime` re-parse and `ToolOutput::render`'s
+serialize fallback (a `<internal invariant violated>` placeholder is
+exactly the "placeholder that looks like real data" the doctrine
+forbids). Both panic now; their own comments already named the
+violation.
+
 ## Justified residue
 
 The remaining uncovered lines fall into these categories. Where a file is
@@ -868,12 +975,16 @@ named, the classification applies to its current lcov-uncovered ranges.
 6. **Subprocess-executed tests are not attributed**: trybuild compile-fail
    cases and the `dependency_rename` fixture crates run `cargo`/`rustc` as
    subprocesses llvm-cov does not instrument (e.g. the
-   contextual-tool-without-runtime-dep arm in `tabit-derive`). The crash
-   contract (`tests/crash.rs`) joins this class: the panic hook and
-   injection branch run in the spawned `tabit` child, asserted there by
-   exit code 101, the stderr report, and empty stdout.
+   contextual-tool-without-runtime-dep arm in `tabit-derive`). Spawned
+   `tabit-core` children ARE attributed since 2026-10 (the provider-arc
+   round's exit flush — see the round section); the residue inside that
+   class: children the tests KILL (TerminateProcess — the abort/kill
+   paths) flush no profraw, inherent to the kill.
 7. **Live-network scenarios** are `#[ignore]`d by policy (two
-   prompt_request tests requiring API keys; `model_listing` live calls).
+   prompt_request tests requiring API keys; `model_listing` live calls;
+   the catalog manager's `BUILTIN_MIRRORS` arm — executing it offline
+   means dialing the real mirrors, and the ignored
+   `live_jsdelivr_channel_end_to_end` owns those coordinates).
    Their request-construction and conversion code is covered offline;
    only the network leg itself is untested by design.
 8. **Region/line-mapping artifacts**: closing-brace regions, multi-line
@@ -950,15 +1061,30 @@ named, the classification applies to its current lcov-uncovered ranges.
 - `agent/runner.rs` — the blocking driver's mid-run `DriveItem` path: no
   current blocking scenario emits a `DriveItem` mid-run; a test needs a
   blocking-mode scenario that yields one to the fold.
+- `agent/drive.rs` 165–169 — the `StreamingError::Prompt` classify arms:
+  no current engine path produces them, and narrowing that needs a
+  `TurnSource` signature change — an ENGINE.md design thread, not a
+  test. (2026-10 round.)
+- `assemble.rs` `world_scan`'s `Cached`/`Disabled` catalog-plan arms —
+  `world_scan` is once-per-process (the skills `OnceLock`), so the two
+  plans need one integration-test binary each; the ruling itself
+  (`catalog_plan`) is fully unit-tested and the `Check` arm is covered.
+- `streaming/mod.rs` 869 — the resume-racing-the-pause-branch line is
+  reachable only statistically (the re-park semantics are pinned by
+  test); a deterministic pin needs a seam — a design call. (2026-10.)
+- `skills.rs` — the dangling-symlink metadata-failure `continue`:
+  creating a symlink on Windows needs privilege (WinError 1314
+  verified); no portable staging. And the `canonical_base` failure
+  arm: any base failure fails the target's canonicalize first —
+  fault-injection family, class 9. (2026-10.)
 - `client/mod.rs` `optional_env_var` `VarError::NotUnicode` branch: a
   non-Unicode env var cannot be set portably from a Rust test process;
   would need a child-process harness.
 - Doctests are outside the measurement (see Methodology); they run and are
   gated in CI but do not fold into these numbers.
-- The subprocess child-role arms and the `--session` builder arg —
-  see the round section above (child-role execution is the class-6
-  attribution gap; `--session` needs a persisted-child spawn shape
-  the built-in tool never makes).
+- The `--session` builder arg — needs a persisted-child spawn shape
+  the built-in tool never makes (the child-role arms themselves are
+  attributed since the 2026-10 exit flush).
 
 (Removed from this list after the defensive-arm audit: the SSE
 retry-`None` branches — the premise was wrong, `ExponentialBackoff`
@@ -1501,9 +1627,10 @@ typed-prompt/extractor surface (`TypedPrompt`, `TypedPromptRequest`,
 `run_with_error_usage`, the provider composition capability and its
 three provider overrides), and `finalize_streamed_choice` are deleted
 -- the problem they served is gone on the providers tabit keeps, and
-no tabit run ever set a schema. `output_schema` remains as pure
-pass-through to the provider's native structured output
-(`AgentBuilder::output_schema` -> request builder); the
+no tabit run ever set a schema. The `output_schema` pass-through
+this paragraph once recorded as surviving was later deleted too —
+zero `output_schema` remains in any source file (2026-10 review:
+this ledger entry was stale); the
 `RoundtripClosed` item and the session door lose their feedback arm,
 and a user message inside an open tool batch is corruption at the
 parser, the door, and the closed-path check alike. Test fallout: the

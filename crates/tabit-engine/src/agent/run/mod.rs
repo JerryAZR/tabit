@@ -16,7 +16,6 @@
 
 use std::collections::BTreeSet;
 
-use serde::{Deserialize, Serialize};
 use tabit_providers::OneOrMany;
 use tabit_providers::completion::Usage;
 use tabit_providers::message::AssistantContent;
@@ -36,7 +35,7 @@ pub(crate) const TURN_RETRY_CAP: usize = 1;
 /// How a provider failure classifies for the loop-or-exit decision.
 /// Classified by the loop (which observes the raw error) per ENGINE.md's
 /// taxonomy.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProviderErrorClass {
     /// Rate-limit, transient transport: retry the turn, bounded.
     Retryable,
@@ -45,7 +44,7 @@ pub enum ProviderErrorClass {
 }
 
 /// One tool call awaiting execution by the loop's tool phase.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct PendingToolCall {
     /// The tool call emitted by the model.
@@ -58,12 +57,11 @@ pub struct PendingToolCall {
     pub preresolved_result: Option<tabit_providers::message::UserContent>,
     /// Rig-generated identifier correlating this call's stream items, when
     /// the call arrived via a streamed turn.
-    #[serde(default)]
     pub internal_call_id: Option<String>,
 }
 
 /// A completed model turn fed to the loop's SETTLE phase.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct ModelTurn {
     /// Provider-assigned assistant message ID, when available. This is
@@ -74,14 +72,12 @@ pub struct ModelTurn {
     /// Token usage reported by the provider for this completion request.
     pub usage: Usage,
     /// Why the provider stopped generating, when it reported a reason.
-    #[serde(default)]
     pub finish_reason: Option<crate::completion::FinishReason>,
     /// Executable Rig tools advertised to the provider for this turn.
     pub executable_tool_names: BTreeSet<String>,
     /// Tools allowed by the active tool choice for this turn.
     pub allowed_tool_names: BTreeSet<String>,
     /// Streamed-turn correlation ids, paired with their tool-call ids.
-    #[serde(default)]
     pub internal_call_ids: Vec<(String, String)>,
 }
 

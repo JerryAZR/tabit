@@ -223,6 +223,48 @@ fn malformed_skills_skip_without_failing_discovery() {
     assert!(skills.lookup("silent").is_none());
 }
 
+#[test]
+fn an_unreadable_skill_md_skips_without_failing_discovery() {
+    // A SKILL.md that is not UTF-8 fails the read (external,
+    // graceful): the entry skips, discovery carries on.
+    let cwd = temp_dir("unreadable");
+    let root = cwd.join(".agents/skills");
+    skill_dir(&root, "good", "description: good\n", "body");
+    let dir = root.join("garbled");
+    fs::create_dir_all(&dir).expect("skill dir");
+    fs::write(dir.join("SKILL.md"), [0xff, 0xfe, 0x00, 0x41]).expect("raw bytes");
+    let skills = discover_with_home(None, &cwd);
+    assert!(skills.lookup("good").is_some());
+    assert!(skills.lookup("garbled").is_none());
+}
+
+#[test]
+fn a_skill_md_without_frontmatter_is_dropped() {
+    // parse_frontmatter's None arm: no `---` fence means the default
+    // frontmatter — no description, and the description rule drops
+    // the entry (the fallback covers the NAME, never the description).
+    let cwd = temp_dir("no-frontmatter");
+    write(
+        &cwd.join(".agents/skills/plain/SKILL.md"),
+        "just a body, no frontmatter\n",
+    );
+    let skills = discover_with_home(None, &cwd);
+    assert!(skills.lookup("plain").is_none(), "no description, no skill");
+}
+
+#[test]
+fn is_empty_reports_the_discovery_result() {
+    let cwd = temp_dir("empty-flag");
+    assert!(discover_with_home(None, &cwd).is_empty());
+    skill_dir(
+        &cwd.join(".tabit/skills"),
+        "one",
+        "description: one\n",
+        "body",
+    );
+    assert!(!discover_with_home(None, &cwd).is_empty());
+}
+
 // ---- the catalog render
 
 #[test]
@@ -371,6 +413,32 @@ async fn the_tool_lists_a_directory_rel_path() {
 }
 
 #[tokio::test]
+async fn a_directory_listing_marks_subdirectories_with_a_slash() {
+    // The listing's dir marker: a subdirectory entry renders with a
+    // trailing slash, plain files without.
+    let cwd = temp_dir("tool-list-dirs");
+    let dir = skill_dir(
+        &cwd.join(".tabit/skills"),
+        "pack",
+        "description: pack\n",
+        "body",
+    );
+    write(&dir.join("references/a.md"), "a");
+    let skills = discover_with_home(None, &cwd);
+    let mut context = context_for(&skills);
+    let output = skill(&mut context, "pack".to_string(), Some(".".to_string()))
+        .await
+        .expect("runs");
+    let text = output.render().to_string();
+    assert!(text.contains("references/"), "a dir is marked: {text}");
+    assert!(text.contains("SKILL.md"), "the file entry: {text}");
+    assert!(
+        !text.contains("SKILL.md/"),
+        "a file carries no marker: {text}"
+    );
+}
+
+#[tokio::test]
 async fn escapes_are_refused_with_nothing_read() {
     let cwd = temp_dir("tool-escape");
     skill_dir(
@@ -456,6 +524,23 @@ async fn an_unknown_name_lists_what_exists() {
     let message = error.to_string();
     assert!(message.contains("no skill named `nope`"), "{message}");
     assert!(message.contains("known"), "{message}");
+}
+
+#[tokio::test]
+async fn an_unknown_name_over_an_empty_catalog_says_none_were_discovered() {
+    // The names() empty arm: the error teaches the state, not a blank list.
+    let cwd = temp_dir("tool-unknown-empty");
+    let skills = discover_with_home(None, &cwd);
+    let mut context = context_for(&skills);
+    let error = skill(&mut context, "nope".to_string(), None)
+        .await
+        .expect_err("unknown name");
+    let message = error.to_string();
+    assert!(message.contains("no skill named `nope`"), "{message}");
+    assert!(
+        message.contains("none (no skills were discovered)"),
+        "{message}"
+    );
 }
 
 #[tokio::test]
@@ -601,7 +686,7 @@ fn a_tag_appends_the_body_as_its_own_part_and_part_zero_is_the_authored_text() {
     // The joined rendering (the wire fold) is the old string form:
     // authored text, separator, block.
     assert_eq!(
-        crate::session::user_text(&expanded),
+        crate::session::joined_user_text(&expanded),
         format!("{text}\n\n{block}"),
         "the fold owns the separator"
     );
@@ -626,6 +711,18 @@ fn an_unreadable_skill_is_left_as_is() {
     let text = r#"<skill name="commit"/>"#;
     let expanded = expand_invocations(Message::user(text), &skills);
     assert_eq!(text_parts(&expanded), vec![text.to_string()]);
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn non_user_messages_pass_through_untouched() {
+    // The attachments door's twin: expansion is a user-message door —
+    // anything else returns as-is, tags or not.
+    let (root, skills) = expand_catalog("non-user");
+    let assistant = Message::assistant(r#"<skill name="commit"/>"#);
+    let Message::Assistant { .. } = expand_invocations(assistant, &skills) else {
+        panic!("an assistant message is never a door for skill expansion");
+    };
     let _ = fs::remove_dir_all(&root);
 }
 

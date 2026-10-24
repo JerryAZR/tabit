@@ -171,9 +171,9 @@ where
                 .to_string(),
         ));
     }
-    if let Some(error) = assembler.pending_delta_error() {
-        return classify_error(error);
-    }
+    // No pending-delta-error check here: a buffered-delta defect either
+    // surfaced at the Final item's ingest precheck (returned above as an
+    // ingest error) or, without a Final, lost to the truncation return.
     let final_choice = stream.choice.clone();
     let streamed_turn = assembler.finish(stream.message_id.clone(), &final_choice);
     let mut turn = ModelTurn::new(
@@ -375,6 +375,27 @@ mod tests {
             outcome,
             AttemptOutcome::Failed(CompletionError::ResponseError(message))
                 if message.contains("after its final response")
+        ));
+    }
+
+    /// Argument deltas whose name never validated surface at the
+    /// terminal's ingest precheck and classify as a failure (not the
+    /// defect — the call's arguments never became parseable JSON to
+    /// reject; the stream itself was inconsistent).
+    #[tokio::test]
+    async fn deltas_before_their_name_fail_at_the_terminal() {
+        let outcome = consume_turns(
+            vec![vec![
+                MockStreamEvent::tool_call_arguments_delta("call-1", r#"{"path": "x"}"#),
+                MockStreamEvent::final_response_with_default_usage(),
+            ]],
+            &mut Vec::new(),
+        )
+        .await;
+        assert!(matches!(
+            outcome,
+            AttemptOutcome::Failed(CompletionError::ResponseError(message))
+                if message.contains("before a validated tool name")
         ));
     }
 

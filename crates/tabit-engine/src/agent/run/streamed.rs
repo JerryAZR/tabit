@@ -23,8 +23,6 @@
 
 use std::collections::{BTreeSet, HashMap};
 
-use serde::{Deserialize, Serialize};
-
 use tabit_providers::{
     OneOrMany,
     message::{AssistantContent, Reasoning, ToolCall},
@@ -90,9 +88,10 @@ pub(crate) fn assistant_text_items_from_choice(
         .collect()
 }
 
-/// The assembled streamed turn, fed to
-/// [`AgentRun::turn_committed_streamed`](super::AgentRun::turn_committed_streamed).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// The assembled streamed turn, produced by the streamed prompt flow
+/// (`prompt_request::streaming`, which drives the assembler and calls
+/// [`StreamedTurnAssembler::finish`] at the stream's end).
+#[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct StreamedTurn {
     /// Provider-assigned assistant message ID, when available.
@@ -108,7 +107,6 @@ pub struct StreamedTurn {
     /// `(tool_call_id, internal_call_id)` pairs for this turn's tool calls,
     /// in emission order. Carried into the run state so a resumed process
     /// keeps the IDs consumers already saw in tool-call deltas.
-    #[serde(default)]
     pub internal_call_ids: Vec<(String, String)>,
 }
 
@@ -131,9 +129,9 @@ pub enum StreamedTurnEvent {
         /// The (possibly repaired) name or argument delta.
         content: ToolCallDeltaContent,
     },
-    /// The provider supplied its typed final payload. Record its usage (see
-    /// [`AgentRun::record_streamed_completion_call`](super::AgentRun::record_streamed_completion_call));
-    /// this does not establish that the provider stream reached EOF. When
+    /// The provider supplied its typed final payload; the streamed prompt
+    /// flow records its usage when it arrives. This does not establish
+    /// that the provider stream reached EOF. When
     /// `emit_final` is set, the turn streamed text and the driver should buffer
     /// the final item until EOF finalizes the turn.
     Completed {

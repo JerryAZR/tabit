@@ -1197,6 +1197,21 @@ pub(crate) mod tests {
         );
     }
 
+    /// The one-directional compatibility law (EXTENSIONS.md): a
+    /// well-formed frame of a type this SDK predates is IGNORED — the
+    /// host's additions need no bump. Returning at all is the
+    /// assertion: the malformed path dies the process.
+    #[test]
+    fn an_unknown_frame_from_a_newer_host_is_tolerated() {
+        let shared = shared();
+        dispatch_line(
+            &shared,
+            "{\"type\":\"frame_from_a_newer_host\",\"payload\":{}}",
+            &Arc::new(Vec::new()),
+            &Arc::new(Vec::new()),
+        );
+    }
+
     #[tokio::test]
     async fn a_failing_consultation_is_absence_run_for_call_points() {
         let consults = [consult::<tabit_protocol::points::ToolCall, _, _>(

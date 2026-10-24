@@ -94,18 +94,38 @@ reasoning flag) — is **generated externally and downloaded**; nothing
 is compiled in. The local manager:
 
 - At startup, if the cache is absent or older than its TTL (24h,
-  config-overridable), refreshes **after boot, in the background** —
-  startup never blocks on a network.
+  config-overridable), the refresh spawns right after settings load
+  and the boot **bounded-waits** on it after the extension handshakes
+  (the slowest boot phase hides the network): `pointer_budget_ms`
+  (default 1s — the pointer is a 100-byte fetch) plus
+  `artifact_budget_ms` (default 2.5s). Within budget, a new catalog
+  applies to THIS boot; over budget the task detaches, keeps
+  downloading, and installs for next boot (the `pending` wire
+  status). A check in flight is announced on the wire
+  (`catalog_status`, v26); the resolved state and cache version ride
+  `providers_available.catalog`. Subagent children never refresh —
+  the parent's boot owns the network; they merge the cache as-is.
 - Fetches a small mutable `latest.toml` (version + sha256) from an
-  ordered mirror list (`catalog_urls`, config-overridable; defaults
+  ordered mirror list (`catalog.urls` in settings.toml,
+  config-overridable; defaults
   chosen for complementary failure modes: jsDelivr first — reliable
-  from China — then GitHub raw). Version match: done. Else downloads
-  the **immutable versioned artifact** `catalog-<version>.toml`
+  from China — then GitHub raw). Version match with a verified
+  artifact on disk: done (the TTL restarts). Else downloads the
+  **immutable versioned artifact** `catalog-<version>.toml`
   (cache-forever URL, sidesteps CDN branch-cache staleness), verifies
   the sha256, and writes `~/.tabit/providers.auto.toml` atomically
   (temp + rename) under an OS sidecar lock (`std::fs::File::lock` —
   the session-store pattern; a concurrent session that loses the lock
-  skips, since the winner just wrote fresh data).
+  skips, since the winner just wrote fresh data). Each artifact fetch
+  is bounded (`artifact_timeout_ms`, default 60s — a mirror that
+  connects then stalls fails over like any other failure, never
+  parks the refresh task holding the lock) and size-capped (32 MiB).
+- The freshness invariant: the state sidecar and the artifact are
+  checked TOGETHER — a stamp only counts while the artifact it
+  vouches for exists and parses (a deleted or corrupt cache
+  re-downloads rather than reporting fresh forever), and a stamp in
+  the future is clock skew (suspect — re-check, never laundered into
+  fresh by saturating arithmetic).
 - `catalog.auto_update = false` disables the channel outright (the
   one network posture this adds; read-only and failure-soft).
 - Channel down, artifact corrupt, or unknown schema major version:
@@ -135,13 +155,24 @@ worth it. Whole-model wins are explainable and sufficient: with the
 catalog providing full entries, a sparse user entry is the user's own
 choice (delete the entry to get the catalog's).
 
-**The built-in mirror list is empty until the generator ships** its
-coordinates — with no `catalog.urls` configured the channel is inert
-(a documented constant, not a fallback).
+**The built-in mirror list ships the generator's coordinates**
+(`catalog.rs::BUILTIN_MIRRORS`): jsDelivr first (reliable from China),
+GitHub raw second. An empty `catalog.urls` means the built-ins; a
+configured list REPLACES them — the explicit-pointer rule, never a
+silent fallthrough. The generator publishes a `catalog` branch: the
+default list at the root, variant lists (cn, global, openrouter) in
+subdirectories — a subdirectory is just another base URL, so a
+variant is chosen by pointing `catalog.urls` at it (single-select;
+multi-list union was discussed and deferred as unneeded).
 
-## The generator (interface settled; implementation elsewhere)
+## The generator
 
-What it must provide — the contract the core side consumes:
+Lives at `~/Projects/agents/tabit-catalog` (own repo, own CI cadence;
+deps `tabit-config` from crates.io and round-trips every artifact
+through `TabitConfig::from_toml_str` before stamping — the consumer
+is the schema authority). Its CI publishes the `catalog` branch on
+push and daily. What it provides — the contract the core side
+consumes:
 
 - `latest.toml`: `{ version, sha256, min_schema }`; the artifact
   `catalog-<version>.toml`.
@@ -167,7 +198,7 @@ publication) is designed in the generator's project space, not here.
   for duplicated per-model blocks (the owner's glm thinking blocks
   were the exhibit).
 - `thinking_levels`: plain strings (above).
-- `catalog_urls`, `catalog.auto_update`, cache TTL: new config keys.
+- `[catalog]` settings: `urls` (empty = the built-in mirrors), `auto_update`, `ttl_hours`.
 
 ## Validation: how sync is enforced locally
 

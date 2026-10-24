@@ -328,7 +328,26 @@ async fn always_allow_remembers_across_calls_in_the_session() {
     // EXTENSIONS.md ruling: the memory is session state, never persisted —
     // a resumed session (fresh process) asks again.
     let path = handle.info().session_path.clone();
+    // The fresh process: the handle AND the command link drop (a live
+    // link keeps the worker's command channel open — no EOF, no
+    // wind-down).
+    drop(link);
     drop(handle);
+    // The drop's wind-down is async; the fresh process can open the
+    // file once the single-writer claim releases.
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            match tabit_log::claim_session(std::path::Path::new(&path)) {
+                Ok(guard) => {
+                    drop(guard);
+                    break;
+                }
+                Err(_) => tokio::time::sleep(std::time::Duration::from_millis(25)).await,
+            }
+        }
+    })
+    .await
+    .expect("the closed session's claim releases");
     let (session, _report) = Factory::new(vec![tool_turn("t3", "bash"), text_turn("again")])
         .into_builder(store.clone())
         .dynamic_tool(gated_tool())

@@ -395,7 +395,10 @@ cache_write = 0.0
     assert!((recorded - spent).abs() < 1e-12, "{recorded} vs {spent}");
 
     // Resume under a halved rate card: the spend that left is the
-    // spend that left.
+    // spend that left. The first session closes before the resume —
+    // a fresh open refuses a second live writer (the single-writer
+    // claim).
+    drop(session);
     let (resumed, _) = Factory::new(vec![text_turn("never runs")])
         .into_builder_with_config(store.clone(), config(0.5), ModelSelection::new("p", "m"))
         .resume(&path, "C:/w")?;
@@ -878,6 +881,9 @@ async fn a_dangling_tool_roundtrip_fails_the_resume_loudly() -> Result<(), Sessi
         tabit_log::WriteBuffer::enqueue(&mut writer, &[crate::entry::FileRecord::Node(assistant)]);
     assert!(error.is_ok(), "write assistant: {error:?}");
     let path = writer.path().to_path_buf();
+    // The staging writer closes first: a resume is a fresh open, and
+    // the single-writer claim refuses a second live writer.
+    drop(writer);
 
     let resumed = Factory::new(vec![text_turn("never runs")])
         .into_builder(store.clone())
@@ -2157,6 +2163,9 @@ async fn rewind_targets_steers_like_prompts() -> Result<(), SessionError> {
         },
     );
     let path = writer.path().to_path_buf();
+    // The staging writer closes first: a resume is a fresh open, and
+    // the single-writer claim refuses a second live writer.
+    drop(writer);
 
     let (mut session, _report) = Factory::new(vec![text_turn("ok")])
         .into_builder(store.clone())
@@ -2238,6 +2247,9 @@ async fn rewinding_into_an_open_roundtrip_resolves_forward() -> Result<(), Sessi
         },
     );
     let path = writer.path().to_path_buf();
+    // The staging writer closes first: a resume is a fresh open, and
+    // the single-writer claim refuses a second live writer.
+    drop(writer);
 
     let (mut session, _report) = Factory::new(vec![text_turn("ok")])
         .into_builder(store.clone())
@@ -2319,6 +2331,9 @@ async fn rewind_to_the_root_leaves_the_register_untouched() -> Result<(), Sessio
         },
     );
     let path = writer.path().to_path_buf();
+    // The staging writer closes first: a resume is a fresh open, and
+    // the single-writer claim refuses a second live writer.
+    drop(writer);
     let mut session = Factory::new(vec![text_turn("fresh answer"), text_turn("next")])
         .into_builder(store.clone())
         .resume(&path, "C:/w")
@@ -2403,6 +2418,9 @@ async fn a_ghost_model_in_history_does_not_block_a_rewind() -> Result<(), Sessio
         },
     );
     let path = writer.path().to_path_buf();
+    // The staging writer closes first: a resume is a fresh open, and
+    // the single-writer claim refuses a second live writer.
+    drop(writer);
 
     let (mut session, _report) = Factory::new(vec![text_turn("ok"), text_turn("after")])
         .into_builder(store.clone())
@@ -2419,9 +2437,8 @@ async fn a_ghost_model_in_history_does_not_block_a_rewind() -> Result<(), Sessio
 }
 
 /// Configured request parameters are pure forwarding: the model's
-/// `max_tokens` and sampling knobs, and the `extra_body` chain (provider →
-/// model → active thinking level, later sources win), reach the request the
-/// model serves.
+/// `max_tokens` and sampling knobs, and the active thinking level,
+/// reach the request the model serves.
 #[tokio::test]
 async fn configured_request_parameters_reach_the_model() -> Result<(), SessionError> {
     let store = temp_store("params-forwarding");
@@ -2643,7 +2660,9 @@ async fn resumed_sessions_probe_ids_from_earlier_processes() -> Result<(), Sessi
     let off_chain = file_nodes(file_path(&session))
         .into_iter()
         .find_map(|entry| match &entry.kind {
-            EntryKind::UserMessage { message } if crate::session::user_text(message) == "two" => {
+            EntryKind::UserMessage { message }
+                if crate::session::joined_user_text(message) == "two" =>
+            {
                 Some(entry.id.clone())
             }
             _ => None,
@@ -2858,6 +2877,97 @@ async fn a_never_selected_session_records_no_model_change_and_resumes_selection_
     drop(session);
     let parsed = store.open_path(&path).expect("reload");
     assert_eq!(parsed.register, None, "resume wrote no register either");
+    std::fs::remove_dir_all(store.dir()).ok();
+    Ok(())
+}
+
+#[tokio::test]
+async fn set_thinking_level_on_a_selection_less_session_is_a_named_error()
+-> Result<(), SessionError> {
+    // A selection-less session (the zero-config boot) has nothing to
+    // re-level: the loud, named error, not a silent no-op.
+    let store = temp_store("level-selectionless");
+    let mut session =
+        SessionBuilder::new(store.clone(), test_config(), test_auth(), None)?.create("C:/w")?;
+    assert_eq!(session.selection(), None, "selection-less from birth");
+    let error = session
+        .set_thinking_level(Some("high"))
+        .expect_err("nothing to re-level");
+    match error {
+        SessionError::Config { message } => {
+            assert!(message.contains("no model selected"), "{message}");
+        }
+        other => panic!("expected a config error, got {other:?}"),
+    }
+    std::fs::remove_dir_all(store.dir()).ok();
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_parked_continue_over_an_empty_conversation_is_a_zero_event_completion()
+-> Result<(), SessionError> {
+    // The continue intent with nothing to continue: the pump takes the
+    // parked intent, sees the empty conversation, and completes without
+    // opening a run (a selection-less session proves no run opened —
+    // one would fail at the model door).
+    let store = temp_store("continue-empty");
+    let mut session =
+        SessionBuilder::new(store.clone(), test_config(), test_auth(), None)?.create("C:/w")?;
+    session.mailbox_handle().continue_run();
+    let mut events = Vec::new();
+    let summary = session.pump(&mut |event| events.push(event)).await;
+    assert!(
+        matches!(summary.outcome, RunOutcome::Completed),
+        "a no-op continue completes: {:?}",
+        summary.outcome
+    );
+    assert!(
+        summary.events.is_empty() && events.is_empty(),
+        "zero events — nothing to continue"
+    );
+    std::fs::remove_dir_all(store.dir()).ok();
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_zero_max_turns_is_rejected_at_every_assembly_door() -> Result<(), SessionError> {
+    // The engine's entry contract (every outer loop runs at least one
+    // turn) enforced at the builder — through create AND resume.
+    let store = temp_store("zero-max-turns");
+    let result = SessionBuilder::new(store.clone(), test_config(), test_auth(), None)?
+        .max_turns(0)
+        .create("C:/w");
+    let error = match result {
+        Err(error) => error,
+        Ok(_) => panic!("a zero budget is rejected"),
+    };
+    match error {
+        SessionError::Config { message } => {
+            assert!(message.contains("max_turns"), "{message}");
+        }
+        other => panic!("expected a config error, got {other:?}"),
+    }
+
+    // The resume door: a real file to open, the same rejection.
+    let mut session = Factory::new(vec![text_turn("hi")])
+        .into_builder(store.clone())
+        .create("C:/w")?;
+    session.prompt("hello").await;
+    let path = file_path(&session).to_path_buf();
+    drop(session);
+    let result = SessionBuilder::new(store.clone(), test_config(), test_auth(), None)?
+        .max_turns(0)
+        .resume(&path, "C:/w");
+    let error = match result {
+        Err(error) => error,
+        Ok(_) => panic!("a zero budget is rejected at resume too"),
+    };
+    match error {
+        SessionError::Config { message } => {
+            assert!(message.contains("max_turns"), "{message}");
+        }
+        other => panic!("expected a config error, got {other:?}"),
+    }
     std::fs::remove_dir_all(store.dir()).ok();
     Ok(())
 }
@@ -3096,4 +3206,44 @@ id = "z1"
         "the refresh cleared the cache; the open rebuilt through the surviving factory"
     );
     std::fs::remove_dir_all(store.dir()).ok();
+}
+
+/// The single-writer lock at the session level (2026-10, after a real
+/// two-backend corruption): a second live open of the same file
+/// refuses loud, the read paths never claim, and the released claim
+/// lets the next open through.
+#[tokio::test]
+async fn a_second_live_open_of_the_same_session_fails_loud() -> Result<(), SessionError> {
+    let store = temp_store("single-writer");
+    let mut session = Factory::new(vec![text_turn("hi")])
+        .into_builder(store.clone())
+        .create("C:/w")?;
+    session.prompt("hello").await;
+    let path = file_path(&session).to_path_buf();
+
+    // The read path never claims: parsing a live session is fine.
+    store.open_path(&path)?;
+
+    let error = match Factory::new(vec![text_turn("never runs")])
+        .into_builder(store.clone())
+        .resume(&path, "C:/w")
+    {
+        Err(error) => error,
+        Ok(_) => panic!("a second live open must refuse"),
+    };
+    assert!(
+        error.to_string().contains("in use by another backend"),
+        "{error}"
+    );
+
+    drop(session);
+    let (_resumed, _report) = match Factory::new(vec![text_turn("never runs")])
+        .into_builder(store.clone())
+        .resume(&path, "C:/w")
+    {
+        Ok(opened) => opened,
+        Err(error) => panic!("the released claim lets the next open through: {error}"),
+    };
+    std::fs::remove_dir_all(store.dir()).ok();
+    Ok(())
 }

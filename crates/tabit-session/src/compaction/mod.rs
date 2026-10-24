@@ -645,7 +645,7 @@ Directives from the user for this compaction:
                         }
                     }
                 }
-                let summary = assistant_text(&turn);
+                let summary = tabit_providers::completion::assistant_text_from_choice(&turn.choice);
                 if summary.trim().is_empty() {
                     return PassOutcome::Failed {
                         message: "the summarizer returned an empty summary".to_string(),
@@ -659,20 +659,6 @@ Directives from the user for this compaction:
             }
         }
     }
-}
-
-/// The assembled turn's text (canonical order puts all text ahead of
-/// any trailing items; the concatenation covers non-canonical shapes
-/// too).
-fn assistant_text(turn: &tabit_engine::agent::ModelTurn) -> String {
-    use tabit_providers::message::AssistantContent;
-    turn.choice
-        .iter()
-        .filter_map(|item| match item {
-            AssistantContent::Text(text) => Some(text.text.as_str()),
-            _ => None,
-        })
-        .collect()
 }
 
 /// What a request-level failure means for the retry loop.

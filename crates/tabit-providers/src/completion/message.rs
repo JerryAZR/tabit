@@ -1206,14 +1206,6 @@ impl From<&str> for Message {
     }
 }
 
-impl From<&String> for Message {
-    fn from(text: &String) -> Self {
-        Message::User {
-            content: OneOrMany::one(UserContent::Text(text.into())),
-        }
-    }
-}
-
 impl From<Text> for Message {
     fn from(text: Text) -> Self {
         Message::User {
@@ -1243,12 +1235,6 @@ impl From<Document> for Message {
         Message::User {
             content: OneOrMany::one(UserContent::Document(document)),
         }
-    }
-}
-
-impl From<String> for ToolResultContent {
-    fn from(text: String) -> Self {
-        ToolResultContent::text(text)
     }
 }
 
@@ -1353,9 +1339,35 @@ impl From<MessageError> for CompletionError {
     }
 }
 
+/// The assistant turn's text: every text part, in order, concatenated.
+/// The one fold of `OneOrMany<AssistantContent>` to plain text —
+/// engine's drive/streaming paths and session's compaction summary
+/// share it (a second implementation is a rule-7 duplicate).
+pub fn assistant_text_from_choice(choice: &OneOrMany<AssistantContent>) -> String {
+    choice
+        .iter()
+        .filter_map(|content| match content {
+            AssistantContent::Text(text) => Some(text.text.as_str()),
+            _ => None,
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tool_result_content_as_text_is_text_only() {
+        assert_eq!(ToolResultContent::text("ok").as_text(), Some("ok"));
+        let image = ToolResultContent::Image(Image {
+            data: DocumentSourceKind::Base64("aGk=".to_string()),
+            media_type: None,
+            detail: None,
+            additional_params: None,
+        });
+        assert_eq!(image.as_text(), None, "an image block is not text");
+    }
 
     #[test]
     fn tool_result_status_serializes_snake_case_and_defaults_absent() {
@@ -1961,11 +1973,8 @@ mod tests {
         let source = Message::user("clone me");
         assert_eq!(Message::from(&source), source);
 
-        let borrowed: &String = &"from &String".to_string();
-        assert_eq!(
-            Message::from(borrowed.clone()),
-            Message::user("from &String")
-        );
+        let borrowed = "from &str";
+        assert_eq!(Message::from(borrowed), Message::user("from &str"));
 
         assert_eq!(
             Message::from(Text::new("from Text")),

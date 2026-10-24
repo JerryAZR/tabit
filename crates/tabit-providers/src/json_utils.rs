@@ -422,4 +422,34 @@ mod tests {
             "unexpected message: {error}"
         );
     }
+
+    /// A deserializer whose `deserialize_any` reports `none`: serde_json's
+    /// own null decodes route `visit_unit`, so the visitors' `visit_none`
+    /// arms are reachable only through a deserializer that says so.
+    struct AlwaysNone;
+
+    impl<'de> serde::Deserializer<'de> for AlwaysNone {
+        type Error = serde::de::value::Error;
+
+        fn deserialize_any<V>(self, visitor: V) -> Result<V::Value, Self::Error>
+        where
+            V: serde::de::Visitor<'de>,
+        {
+            visitor.visit_none()
+        }
+
+        serde::forward_to_deserialize_any! {
+            bool i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 f32 f64 char str string
+            bytes byte_buf unit unit_struct newtype_struct seq tuple
+            tuple_struct map struct enum identifier ignored_any option
+        }
+    }
+
+    #[test]
+    fn test_visit_none_arms_yield_empty_vecs() {
+        let items = string_or_vec::<String, _>(AlwaysNone).expect("none is empty");
+        assert!(items.is_empty());
+        let items = null_or_vec::<String, _>(AlwaysNone).expect("none is empty");
+        assert!(items.is_empty());
+    }
 }

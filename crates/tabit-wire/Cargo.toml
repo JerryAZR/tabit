@@ -26,8 +26,8 @@ process-wrap = { version = "10", default-features = false, features = [
 serde_json = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true, features = ["v7"] }
-tabit-log = { path = "../tabit-log", version = "0.1.0" }
-tabit-protocol = { path = "../tabit-protocol", version = "0.1.0" }
+tabit-log = { path = "../tabit-log", version = "0.2.0" }
+tabit-protocol = { path = "../tabit-protocol", version = "0.2.0" }
 tokio = { workspace = true, features = [
     "io-util",
     "macros",

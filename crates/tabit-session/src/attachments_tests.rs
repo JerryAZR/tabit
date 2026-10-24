@@ -125,7 +125,7 @@ fn a_resolvable_tag_appends_label_and_image_after_the_text() {
         "the label is the bare basename — the wire fold owns the separator"
     );
     assert_eq!(
-        crate::session::user_text(&expanded),
+        crate::session::joined_user_text(&expanded),
         format!("{text}\n\nshot.png"),
         "the joined rendering separates the label from the text"
     );
@@ -154,7 +154,7 @@ fn multiple_tags_append_in_tag_order() {
     assert_eq!(text_of(&parts[3]), Some("second.png"));
     assert!(image_of(&parts[4]).is_some());
     assert_eq!(
-        crate::session::user_text(&expanded),
+        crate::session::joined_user_text(&expanded),
         format!("{text}\n\nfirst.png\n\nsecond.png"),
         "the fold joins the text parts with the one separator"
     );
@@ -200,6 +200,29 @@ fn an_image_with_a_text_extension_attaches_by_sniffing() {
         image_of(&parts[2]).expect("image").1,
         &Some(ImageMediaType::PNG)
     );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_gif_attaches_by_magic_bytes() {
+    // The sniff table's GIF arm: magic bytes decide (the name carries
+    // no image extension), the decoded image passes the caps check,
+    // and an under-cap image crosses byte-identical.
+    let dir = temp_dir("gif");
+    let img = image::RgbImage::from_pixel(8, 6, image::Rgb([30, 200, 30]));
+    let mut bytes = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgb8(img)
+        .write_to(&mut bytes, image::ImageFormat::Gif)
+        .expect("encode gif");
+    let gif = bytes.into_inner();
+    assert!(gif.starts_with(b"GIF8"), "the fixture carries GIF magic");
+    let path = plant(&dir, "animation.bin", &gif);
+    let expanded = expand_attachments(Message::user(format!("<attachment path=\"{path}\"/>")));
+    let parts = parts(&expanded);
+    assert_eq!(parts.len(), 3, "text, label, image: {parts:?}");
+    let (data, media) = image_of(&parts[2]).expect("the image part");
+    assert_eq!(media, &Some(ImageMediaType::GIF));
+    assert_eq!(decode_base64(data), gif, "under-cap: byte-identical");
     let _ = std::fs::remove_dir_all(&dir);
 }
 

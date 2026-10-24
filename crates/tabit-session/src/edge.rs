@@ -2,8 +2,10 @@
 //! protocol (JSON mode). LF-JSONL in both directions — the client's
 //! lines are bare [`SessionCommand`]s (the report model: no
 //! handshake — commands may flow from the spawner's first line), the
-//! server's lines are its self-report, stamped [`EventFrame`]s, plus
-//! transport-error control frames. Only protocol bytes reach
+//! server's lines are stamped [`EventFrame`]s plus transport-error
+//! control frames; the `report` self-report is the CALLER's prelude
+//! (the process's first line, written at launch before any boot work
+//! — 2026-10). Only protocol bytes reach
 //! stdout; human banners stay on stderr.
 //!
 //! This is the wire's server half living with the host it drives (the
@@ -14,7 +16,7 @@
 
 use std::io::{BufRead, Write};
 use tabit_protocol::EventFrame;
-use tabit_protocol::{PROTOCOL_VERSION, ServerControlFrame, ServerFrame, SessionCommand};
+use tabit_protocol::{ServerControlFrame, ServerFrame, SessionCommand};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -23,29 +25,16 @@ use crate::endpoint::SessionHost;
 /// Serve the backend over `reader`/`writer` until the client closes its
 /// input (or the stream behind the edge ends). Returns the process
 /// exit code: 0 normally, 1 on a broken reader.
-pub async fn serve<R, W>(mut host: SessionHost, reader: R, mut writer: W) -> i32
+///
+/// The caller owns the prelude: the `report` self-report is the
+/// process's first line, written before any boot work (the one caller
+/// is the app's `serve_json_stdio`, which writes it at entry). The
+/// edge's first line on the wire is the boot's first event.
+pub async fn serve<R, W>(mut host: SessionHost, reader: R, writer: W) -> i32
 where
     R: BufRead + Send + 'static,
     W: Write + Send + 'static,
 {
-    // The self-report — this child's FIRST line on the channel (owner
-    // ruling 2026-09-25, the report model: a spawned child can assume
-    // its spawner is there and pump, while the spawner can assume
-    // nothing until the child self-reports) — is written HERE,
-    // synchronously, before any task exists: nothing can precede it
-    // because nothing else has started. Protocol facts only; the
-    // spawner version-checks and kills an incompatible child, and
-    // every session fact arrives by event (the boot's
-    // `session_opened` first). A failing write is the client already
-    // gone — the wind-down below is the same either way.
-    let report = ServerFrame::Control(ServerControlFrame::Report {
-        protocol_version: PROTOCOL_VERSION,
-    });
-    let report_line = tabit_protocol::to_wire_line(&report);
-    tracing::trace!(target: "wire::frontend::out", "{report_line}");
-    let _ = writeln!(writer, "{report_line}");
-    let _ = writer.flush();
-
     // One feed into the writer — the reader's protocol errors and the
     // forwarder's events, in send order. The writer ends on the
     // stream's end signal with a drain, never on the feed's close:
@@ -407,6 +396,19 @@ id = "m"
         }
     }
 
+    /// The caller's prelude, staged the way the production caller
+    /// (serve_json_stdio) stages it: the report is the wire's first
+    /// line, written at process entry — before the edge serves.
+    fn stage_prelude(out: &SharedOut) {
+        let line =
+            tabit_protocol::to_wire_line(&ServerFrame::Control(ServerControlFrame::Report {
+                protocol_version: tabit_protocol::PROTOCOL_VERSION,
+            }));
+        let mut guard = out.0.lock().unwrap();
+        guard.extend_from_slice(line.as_bytes());
+        guard.push(b'\n');
+    }
+
     /// Run the bridge over a fixed input script; returns the exit code
     /// and the parsed server lines. For scripts that never send a
     /// command (the session id is only knowable after the announce).
@@ -423,6 +425,7 @@ id = "m"
             test_data(unusable_create()),
         );
         let out = SharedOut::default();
+        stage_prelude(&out);
         let code = serve(handle, Cursor::new(input.as_bytes().to_vec()), out.clone()).await;
         let written = String::from_utf8(out.0.lock().unwrap().clone()).expect("utf-8");
         let frames = written
@@ -601,6 +604,7 @@ id = "m"
             test_data(unusable_create()),
         );
         let out = SharedOut::default();
+        stage_prelude(&out);
         let (tx_in, rx_in) = std::sync::mpsc::channel::<String>();
         let serve_task = tokio::spawn(serve(
             handle,
@@ -709,6 +713,7 @@ id = "m"
             test_data(unusable_create()),
         );
         let out = SharedOut::default();
+        stage_prelude(&out);
         let (tx_in, rx_in) = std::sync::mpsc::channel::<String>();
         let serve_task = tokio::spawn(serve(
             handle,
@@ -790,6 +795,7 @@ id = "m"
             test_data(unusable_create()),
         );
         let out = SharedOut::default();
+        stage_prelude(&out);
         let (tx_in, rx_in) = std::sync::mpsc::channel::<String>();
         let serve_task = tokio::spawn(serve(
             handle,
@@ -834,6 +840,7 @@ id = "m"
             test_data(unusable_create()),
         );
         let out = SharedOut::default();
+        stage_prelude(&out);
         let (tx_in, rx_in) = std::sync::mpsc::channel::<String>();
         let serve_task = tokio::spawn(serve(
             handle,
@@ -1110,6 +1117,7 @@ id = "m"
         );
 
         let out = SharedOut::default();
+        stage_prelude(&out);
         let (tx_in, rx_in) = std::sync::mpsc::channel::<String>();
         let serve_task = tokio::spawn(serve(
             handle,

@@ -218,3 +218,18 @@ fn build_system_prompt_reads_the_real_home() {
     assert!(prompt.starts_with("You are tabit"));
     assert!(prompt.contains(&format!("cwd: {}\n", normalize(&cwd))));
 }
+
+#[test]
+fn build_system_prompt_with_base_reads_the_real_home() {
+    // The preamble-override door: same home resolution as the default
+    // wrapper, the base swapped. Machine-independent assertions only.
+    let cwd = temp_dir("wrapper-base-cwd");
+    let prompt =
+        build_system_prompt_with_base("custom base", &cwd, &Default::default()).expect("build");
+    assert!(prompt.starts_with("custom base"), "{prompt}");
+    assert!(
+        !prompt.contains("You are tabit"),
+        "the default base is gone"
+    );
+    assert!(prompt.contains(&format!("cwd: {}\n", normalize(&cwd))));
+}

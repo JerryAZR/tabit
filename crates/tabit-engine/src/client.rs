@@ -41,3 +41,38 @@ pub trait AgentModelExt: tabit_providers::completion::CompletionModel + Sized {
 }
 
 impl<M> AgentModelExt for M where M: tabit_providers::completion::CompletionModel {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agent::MultiTurnStreamItem;
+    use crate::streaming::StreamingChat;
+    use crate::test_utils::{MockCompletionModel, MockStreamEvent};
+    use futures::StreamExt;
+    use tabit_providers::completion::Usage;
+    use tabit_providers::message::Message;
+
+    /// The model-side construction sugar: a portable completion model
+    /// converts into the classic builder, and the built agent runs a
+    /// prompt to completion.
+    #[tokio::test]
+    async fn into_agent_builder_builds_a_runnable_agent() {
+        let agent = MockCompletionModel::from_stream_turns([[
+            MockStreamEvent::text("built from the model"),
+            MockStreamEvent::final_response(Usage::new()),
+        ]])
+        .into_agent_builder()
+        .preamble("be brief")
+        .build();
+
+        let mut stream = agent.stream_chat([Message::user("go")]).await;
+        let mut final_response = None;
+        while let Some(item) = stream.next().await {
+            if let Ok(MultiTurnStreamItem::FinalResponse(response)) = item {
+                final_response = Some(response);
+            }
+        }
+        let final_response = final_response.expect("the run completes");
+        assert_eq!(final_response.output(), "built from the model");
+    }
+}

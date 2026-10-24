@@ -5,7 +5,7 @@ use crate::{
     agent::drive::PhaseEvent,
     agent::drive::{DriveStream, TurnSource, drive_tool_calls},
     agent::hook::{AgentHook, HookContext},
-    agent::prompt_request::{assistant_text_from_choice, is_empty_assistant_turn},
+    agent::prompt_request::is_empty_assistant_turn,
     agent::run::{
         ModelTurn, PendingToolCall, RunLedger,
         streamed::{StreamedTurnAssembler, StreamedTurnEvent},
@@ -15,7 +15,6 @@ use crate::{
     tool::{ToolContext, server::ToolRegistrySnapshot},
 };
 use futures::{Stream, StreamExt};
-use serde::{Deserialize, Serialize};
 use std::{collections::VecDeque, pin::Pin, sync::Arc};
 use tracing_futures::Instrument;
 
@@ -37,8 +36,7 @@ pub type StreamingResult =
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 pub type StreamingResult = Pin<Box<dyn Stream<Item = Result<MultiTurnStreamItem, StreamingError>>>>;
 
-#[derive(Deserialize, Serialize, Debug, Clone)]
-#[serde(tag = "type", rename_all = "camelCase")]
+#[derive(Debug, Clone)]
 #[non_exhaustive]
 pub enum MultiTurnStreamItem {
     /// A model-call attempt committed — the request is about to be issued.
@@ -171,9 +169,12 @@ fn final_response_from_content(
     aggregated_usage: crate::completion::Usage,
     completion_calls: Vec<CompletionCall>,
 ) -> PromptResponse {
-    PromptResponse::new(assistant_text_from_choice(&content), aggregated_usage)
-        .with_content(content)
-        .with_completion_calls(completion_calls)
+    PromptResponse::new(
+        tabit_providers::completion::assistant_text_from_choice(&content),
+        aggregated_usage,
+    )
+    .with_content(content)
+    .with_completion_calls(completion_calls)
 }
 
 impl MultiTurnStreamItem {

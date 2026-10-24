@@ -25,11 +25,16 @@ default-members = [
 exclude = []
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/JerryAZR/tabit"
 homepage = "https://github.com/JerryAZR/tabit"
+
+[workspace.lints.rust]
+# cargo-llvm-cov builds with `--cfg coverage`; tabit_app::exit flushes
+# the profile under it.
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(coverage)"] }
 
 [workspace.lints.clippy]
 dbg_macro = "forbid"

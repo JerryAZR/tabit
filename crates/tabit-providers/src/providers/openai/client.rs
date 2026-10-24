@@ -313,6 +313,23 @@ mod tests {
     }
 
     #[test]
+    fn api_error_response_stringifies_a_non_string_error_envelope() {
+        // A `{"error": {...}}` envelope whose `error` is an object (not a
+        // message string) is preserved verbatim as the error text.
+        let response: super::ApiErrorResponse = serde_json::from_str(
+            r#"{"error": {"type": "invalid_request_error", "message": "bad model"}}"#,
+        )
+        .expect("error envelope should deserialize");
+
+        let round_tripped: serde_json::Value =
+            serde_json::from_str(&response.message).expect("message should be verbatim JSON");
+        assert_eq!(
+            round_tripped,
+            serde_json::json!({"type": "invalid_request_error", "message": "bad model"})
+        );
+    }
+
+    #[test]
     fn from_env_uses_openai_base_url_for_responses_and_completions_clients() {
         let _guard = ENV_LOCK.lock().expect("env lock should not be poisoned");
         let _api_key = EnvVarGuard::set("OPENAI_API_KEY", "dummy-key");

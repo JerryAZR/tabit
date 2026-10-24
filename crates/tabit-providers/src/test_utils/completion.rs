@@ -466,6 +466,43 @@ mod tests {
         assert_eq!(model.requests().len(), 2);
     }
 
+    /// An error turn converts to exactly one stream error event — the
+    /// bridge for driving the streaming surface with authored error turns.
+    #[test]
+    fn error_turn_converts_to_a_single_stream_error_event() {
+        let events = MockTurn::error("boom").into_stream_events();
+        let [MockStreamEvent::Error(error)] = events.as_slice() else {
+            panic!("an error turn is exactly one error event");
+        };
+        assert!(matches!(error, MockError::Provider(message) if message == "boom"));
+    }
+
+    /// A reasoning turn expresses as one reasoning stream event (the
+    /// grammar carries one block per event) with the default minted id,
+    /// ahead of the terminal record.
+    #[test]
+    fn reasoning_turn_converts_to_a_reasoning_stream_event() {
+        let events =
+            MockTurn::from_content(AssistantContent::reasoning("thinking")).into_stream_events();
+
+        let (id, content) = events
+            .iter()
+            .find_map(|event| match event {
+                MockStreamEvent::Reasoning { id, content } => Some((id, content)),
+                _ => None,
+            })
+            .expect("the turn carries a reasoning event");
+        assert_eq!(id, "reasoning-0", "no explicit id mints the default");
+        assert!(matches!(
+            content,
+            ReasoningContent::Text { text, .. } if text == "thinking"
+        ));
+        assert!(
+            matches!(events.last(), Some(MockStreamEvent::FinalResponse(_))),
+            "the terminal record closes the turn"
+        );
+    }
+
     #[tokio::test]
     async fn missing_completion_turn_returns_provider_error() {
         let model = MockCompletionModel::default();

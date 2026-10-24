@@ -100,6 +100,26 @@ fn default_selection_stale_resumed_degrades_with_a_note() {
 }
 
 #[test]
+fn a_resumed_selection_whose_provider_has_no_key_degrades_with_a_note() {
+    // preference_error's no-key arm: the selection resolves against
+    // config (the provider and model exist) but the provider cannot
+    // run — no key, not keyless — so the preference degrades with a
+    // note instead of serving.
+    let registry = registry_with(TWO_MODELS, "");
+    let (selection, notes) = registry
+        .default_selection(None, Some(ModelSelection::new("local", "m")))
+        .expect("degrades instead of failing");
+    assert_eq!(selection, None, "nothing usable at this registry");
+    assert!(
+        notes.iter().any(|note| {
+            note.contains("resumed session's model `local/m`")
+                && note.contains("has no key and is not declared keyless")
+        }),
+        "the note names the selection and the reason: {notes:?}"
+    );
+}
+
+#[test]
 fn default_selection_preference_includes_thinking_level() {
     let registry = registry_with(
         &format!("default_model = {{ model = \"m\", thinking_level = \"high\" }}\n{TWO_MODELS}"),
@@ -437,6 +457,38 @@ api_key = "dummy"
     let message = error.to_string();
     assert!(
         message.contains("not a header!") && message.contains("local"),
+        "the error names the header and the provider: {message}"
+    );
+}
+
+#[test]
+fn an_invalid_configured_header_value_fails_loudly() {
+    // The name arm's twin: a legal name with a value no HTTP header
+    // can carry (a control character) fails the build just as loudly.
+    let registry = registry_with(
+        // TOML's `\n` escape decodes to a real newline — a value no
+        // HTTP header can carry.
+        r#"
+[providers.local]
+base_url = "http://127.0.0.1:1234/v1"
+api = "openai-completions"
+
+[providers.local.headers]
+x-custom = "bad\nvalue"
+"#,
+        r#"
+[providers.local]
+api_key = "dummy"
+"#,
+    );
+    let provider = registry.config().provider("local").expect("provider");
+    let error = match registry.client_for("local", provider, &api_key()) {
+        Err(error) => error,
+        Ok(_) => panic!("an invalid header value must fail the build"),
+    };
+    let message = error.to_string();
+    assert!(
+        message.contains("x-custom") && message.contains("local"),
         "the error names the header and the provider: {message}"
     );
 }

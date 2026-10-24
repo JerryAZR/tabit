@@ -69,6 +69,46 @@ pub struct AvailableProvider {
 /// [`AvailableProvider`] this covers EVERY configured provider,
 /// usable or not — the login/logout view's data (the models catalog
 /// stays the picker's). Providers arrive in alphabetical id order.
+/// The downloaded model catalog's channel state (v26), carried by
+/// `providers_available` — announce-if-cheap: the frontend decides
+/// whether to render it (a picker footnote, a boot-status line).
+/// The version is the cache's catalog version, absent when no cache
+/// exists.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CatalogChannelStatus {
+    /// What the channel did this boot.
+    pub state: CatalogState,
+    /// The cache's catalog version, when one exists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+}
+
+/// The catalog channel's states (v26). `Checking` appears only on
+/// the boot's transient `catalog_status` control frame (a check is
+/// in flight, boot may take a moment); the `providers_available`
+/// block carries the RESOLVED state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CatalogState {
+    /// A network check is in flight (transient control frame only).
+    Checking,
+    /// No channel: `catalog.auto_update` off, or no config path.
+    Disabled,
+    /// The cache merged without a check: within TTL, or a child
+    /// session (a child never refreshes — the parent's boot owns
+    /// the network).
+    Cached,
+    /// Checked this boot; already current.
+    Fresh,
+    /// A new catalog downloaded, verified, and applied by THIS boot.
+    Updated,
+    /// The check outlived the boot budget; the download continues in
+    /// the background and applies next boot.
+    Pending,
+    /// The check failed; the cache (if any) merged.
+    Offline,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProviderStatus {
     /// The provider's config key (the id `login`/`logout` address).

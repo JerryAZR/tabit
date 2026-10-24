@@ -14,9 +14,16 @@ const TEXT_PART_SEPARATOR: &str = "\n\n";
 /// [`TEXT_PART_SEPARATOR`] — the one joined rendering (events, the
 /// subagent task text). The door's tag scans read [`authored_text`]
 /// instead: they scan what the user typed, never the expansion.
-pub(crate) fn user_text(message: &Message) -> String {
+/// (The `joined_` name keeps it distinct from the providers crate's
+/// `Message::user_text`, whose semantic — Some only for exactly one
+/// text part — is a different fold.)
+#[allow(clippy::panic)] // sanctioned crash: a queued message is always a user message
+pub(crate) fn joined_user_text(message: &Message) -> String {
+    // Callers (user_message_event's queued messages, the subagent
+    // bridge's task text) pass user messages by construction — the
+    // same invariant authored_text panics on, twenty lines below.
     let Message::User { content } = message else {
-        return String::new();
+        panic!("joined_user_text: a queued message is always a user message");
     };
     content
         .iter()
@@ -28,6 +35,26 @@ pub(crate) fn user_text(message: &Message) -> String {
         .join(TEXT_PART_SEPARATOR)
 }
 
+/// The tag scanner both doors (skills, attachments) share:
+/// everything between `open` and `close`, in order of appearance. A
+/// dangling opening (no close) stops the scan; anything malformed is
+/// simply not a tag and passes through. One scanner — the first-part
+/// law's semantics (what counts as a tag) must not drift between
+/// doors.
+pub(crate) fn scan_tags<'a>(text: &'a str, open: &str, close: &str) -> Vec<&'a str> {
+    let mut spans = Vec::new();
+    let mut rest = text;
+    while let Some(start) = rest.find(open) {
+        let after = &rest[start + open.len()..];
+        let Some(end) = after.find(close) else {
+            break;
+        };
+        spans.push(&after[..end]);
+        rest = &after[end + close.len()..];
+    }
+    spans
+}
+
 /// The AUTHORED text of a user message: its first text part, tags
 /// intact — what the user typed, before the door's expansions
 /// appended parts. The first-part law makes this structural:
@@ -35,18 +62,19 @@ pub(crate) fn user_text(message: &Message) -> String {
 /// `message_queued` and `messages_discarded` hand this back — the
 /// salvaged draft carries no expansion, so re-sending re-expands
 /// exactly once.
-#[allow(clippy::panic, clippy::expect_used)] // sanctioned crash: the door admits text-only user messages (the wire's `message` command is text-only)
+#[allow(clippy::panic)] // sanctioned crash: the door admits text-only user messages (the wire's `message` command is text-only)
 pub(crate) fn authored_text(message: &Message) -> String {
     let Message::User { content } = message else {
         panic!("authored_text: a queued message is always a user message");
     };
-    content
-        .iter()
-        .find_map(|part| match part {
-            UserContent::Text(text) => Some(text.text.clone()),
-            _ => None,
-        })
-        .expect("authored_text: the door's one-text-part guarantee")
+    // Every caller (the mailbox's acknowledgment, both door scans)
+    // sees part[0] as the authored text — the door admits text-only
+    // messages and expansion only appends, so scanning past a
+    // non-text prefix is unrepresentable.
+    let Some(UserContent::Text(text)) = content.iter().next() else {
+        panic!("authored_text: part[0] is the authored text by the first-part law");
+    };
+    text.text.clone()
 }
 
 /// The one `user_message` event assembly (v25): the AUTHORED text
@@ -62,7 +90,7 @@ pub(crate) fn user_message_event(
     message: &Message,
 ) -> tabit_protocol::SessionEvent {
     let authored = authored_text(message);
-    let fold = user_text(message);
+    let fold = joined_user_text(message);
     tabit_protocol::SessionEvent::UserMessage {
         entry_id,
         expanded: (fold != authored).then_some(fold),
@@ -136,17 +164,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn user_text_reads_only_the_text_parts_of_user_messages() {
-        // A non-user message carries no user text.
-        let assistant = Message::Assistant {
-            id: None,
-            content: tabit_providers::OneOrMany::one(
-                tabit_providers::message::AssistantContent::text("hi"),
-            ),
-        };
-        assert!(user_text(&assistant).is_empty());
-        // Non-text parts contribute nothing; text parts join with
-        // the fold-owned separator — parts carry no join punctuation.
+    fn joined_user_text_reads_only_the_text_parts_of_user_messages() {
+        // A non-user message is a producer bug — joined_user_text panics on
+        // it (the sanctioned crash, as authored_text); only the fold
+        // is tested here.
         let message = Message::User {
             content: tabit_providers::OneOrMany::many(vec![
                 tabit_providers::message::UserContent::image_base64("aGk=", None, None),
@@ -155,7 +176,9 @@ mod tests {
             ])
             .expect("three parts"),
         };
-        assert_eq!(user_text(&message), "first\n\nsecond");
+        // Non-text parts contribute nothing; text parts join with
+        // the fold-owned separator — parts carry no join punctuation.
+        assert_eq!(joined_user_text(&message), "first\n\nsecond");
     }
 
     #[test]

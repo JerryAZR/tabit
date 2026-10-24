@@ -173,12 +173,6 @@ pub(crate) fn reasoning_choices_from_done_item(
     choices
 }
 
-impl From<&StreamingCompletionResponse> for crate::completion::Usage {
-    fn from(response: &StreamingCompletionResponse) -> Self {
-        Self::from(&response.usage)
-    }
-}
-
 /// A response chunk from OpenAI's response API.
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ResponseChunk {
@@ -3518,5 +3512,214 @@ data: {completed}
             terminal.is_some(),
             "stream should still emit its terminal record"
         );
+    }
+
+    /// The provider `error` envelope reports through the raw body whether or
+    /// not it carries a `message` string: the message only feeds the warn
+    /// log, the body is always the error payload.
+    #[test]
+    fn error_event_value_reports_the_body_with_or_without_a_message() {
+        let with_message =
+            json!({"type": "error", "error": {"message": "boom", "code": "server_error"}});
+        let data = with_message.to_string();
+        let err = super::provider_response_from_responses_error_value(&with_message, &data);
+        assert_eq!(err.provider_response_body(), Some(data.as_str()));
+
+        let without_message = json!({"type": "error", "error": {"code": "server_error"}});
+        let data = without_message.to_string();
+        let err = super::provider_response_from_responses_error_value(&without_message, &data);
+        assert_eq!(err.provider_response_body(), Some(data.as_str()));
+    }
+
+    /// A `function_call` done-item with no `id` and no preceding `added`
+    /// frame mints the slot identity from the output index, so the finalized
+    /// call still assembles under a stable key.
+    #[test]
+    fn id_less_done_item_mints_the_slot_identity() {
+        let events = [
+            json!({
+                "type": "response.output_item.done",
+                "output_index": 0,
+                "sequence_number": 1,
+                "item": {
+                    "type": "function_call",
+                    "call_id": "call_a",
+                    "name": "tool_a",
+                    "arguments": "{}",
+                    "status": "completed",
+                },
+            }),
+            json!({
+                "type": "response.completed",
+                "sequence_number": 2,
+                "response": sample_response(ResponseStatus::Completed),
+            }),
+        ];
+        let body = events
+            .iter()
+            .map(|event| format!("data: {event}\n"))
+            .collect::<String>();
+
+        let choices = raw_choices_from_sse_body(&body, ResponsesUsage::new())
+            .expect("an id-less done item must decode");
+
+        let end = choices
+            .iter()
+            .find_map(|choice| match choice {
+                RawStreamingChoice::ToolInputEnd(end) => Some(end),
+                _ => None,
+            })
+            .expect("the done item must produce a tool-input end");
+        assert_eq!(
+            end.id,
+            crate::streaming::MintKind::Output.for_wire_index(0),
+            "an id-less done item mints the slot identity"
+        );
+        assert!(
+            end.tool_id.is_none(),
+            "no wire id was restated, so none is reported"
+        );
+    }
+
+    /// The buffered body's framing skips blank lines and the `[DONE]`
+    /// sentinel; genuine frames on either side still decode.
+    #[test]
+    fn done_sentinel_and_blank_lines_are_skipped_in_the_buffered_body() {
+        let completed = json!({
+            "type": "response.completed",
+            "sequence_number": 1,
+            "response": sample_response(ResponseStatus::Completed),
+        });
+        let body = format!("\ndata: [DONE]\n\ndata: {completed}\n\n");
+
+        let choices = raw_choices_from_sse_body(&body, ResponsesUsage::new())
+            .expect("blank lines and the DONE sentinel must be skipped");
+        assert!(
+            choices
+                .iter()
+                .any(|choice| matches!(choice, RawStreamingChoice::FinalResponse(_))),
+            "the genuine terminal must still be recorded"
+        );
+    }
+
+    /// The terminal-body merge takes message items only: a non-message output
+    /// (here a function call the replay never streamed) must not leak into
+    /// the merged choice.
+    #[tokio::test]
+    async fn terminal_body_non_message_outputs_are_filtered_from_the_merge() {
+        use crate::providers::openai::responses_api::Output;
+
+        let raw_choices = vec![RawStreamingChoice::ReasoningDelta {
+            id: crate::streaming::PartId::wire("rs_1"),
+            reasoning: "thinking".to_string(),
+        }];
+
+        let mut raw_response = sample_response(ResponseStatus::Completed);
+        raw_response.output = vec![
+            serde_json::from_value::<Output>(json!({
+                "type": "function_call",
+                "id": "fc_1",
+                "call_id": "call_1",
+                "name": "tool_a",
+                "arguments": "{}",
+                "status": "completed",
+            }))
+            .expect("output function call should deserialize"),
+            serde_json::from_value::<Output>(json!({
+                "type": "message",
+                "id": "msg_body_1",
+                "status": "completed",
+                "role": "assistant",
+                "content": [{ "type": "output_text", "annotations": [], "text": "full answer" }]
+            }))
+            .expect("output message should deserialize"),
+        ];
+
+        let response =
+            super::completion_response_from_raw_choices("openai", raw_choices, &raw_response)
+                .await
+                .expect("replay should normalize")
+                .expect("a reasoning-bearing replay is not empty");
+
+        let text: String = response
+            .choice
+            .iter()
+            .filter_map(|content| match content {
+                crate::completion::AssistantContent::Text(text) => Some(text.text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(text, "full answer");
+        assert!(
+            !response
+                .choice
+                .iter()
+                .any(|content| matches!(content, crate::completion::AssistantContent::ToolCall(_))),
+            "a non-message body output must not merge into the choice"
+        );
+    }
+
+    /// After a `response.failed` ends the turn, the adapter drops every later
+    /// frame: the failure is terminal, not a blip the stream recovers from.
+    #[test]
+    fn frames_after_a_failed_response_are_dropped() {
+        use crate::providers::internal::adapter::{WireAdapter, WireFrame};
+        use crate::providers::internal::wire::WireEvent;
+
+        let mut response = sample_response(ResponseStatus::Failed);
+        response.error = Some(ResponseError {
+            code: "server_error".to_string(),
+            message: "boom".to_string(),
+        });
+        let failed = json!({
+            "type": "response.failed",
+            "sequence_number": 1,
+            "response": response,
+        })
+        .to_string();
+
+        let mut adapter = super::ResponsesAdapter::live();
+        let WireEvent::Known(event) = adapter.classify(WireFrame::Text(failed)) else {
+            panic!("a response.failed frame must classify as Known");
+        };
+        let mut out = Vec::new();
+        adapter.interpret(event, &mut out);
+        assert!(
+            out.iter().any(|item| item.is_err()),
+            "the failure must surface as an error"
+        );
+
+        let delta = json!({
+            "type": "response.output_text.delta",
+            "item_id": "msg_1",
+            "output_index": 0,
+            "content_index": 0,
+            "sequence_number": 2,
+            "delta": "too late",
+        })
+        .to_string();
+        let WireEvent::Known(event) = adapter.classify(WireFrame::Text(delta)) else {
+            panic!("a delta frame must classify as Known");
+        };
+        let mut out = Vec::new();
+        adapter.interpret(event, &mut out);
+        assert!(
+            out.is_empty(),
+            "frames after the terminal failure must be dropped"
+        );
+    }
+
+    /// A content part with no `type` key at all decodes to `Unknown`,
+    /// preserving the value verbatim — an absent tag is unmodeled, not
+    /// defective (unlike a non-string tag, which errors).
+    #[test]
+    fn type_less_content_part_is_preserved_as_unknown() {
+        let wire = json!({"text": "hi"});
+        let part: ContentPartChunkPart = serde_json::from_value(wire.clone()).unwrap();
+        let ContentPartChunkPart::Unknown(value) = &part else {
+            panic!("a type-less part must fall back to Unknown");
+        };
+        assert_eq!(value, &wire);
+        assert_eq!(serde_json::to_value(&part).unwrap(), wire);
     }
 }

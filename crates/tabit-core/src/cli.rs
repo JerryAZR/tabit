@@ -633,6 +633,66 @@ mod tests {
     }
 
     #[test]
+    fn options_converts_every_assembly_field() {
+        let parsed = args(&[
+            "--json",
+            "--session",
+            "s.jsonl",
+            "--model",
+            "p/m",
+            "--max-turns",
+            "5",
+            "--parent",
+            "p1",
+            "--parent-call",
+            "c7",
+            "--tools",
+            "read,bash",
+            "--without",
+            "edit",
+            "--preamble",
+            "probe",
+            "--extensions",
+            "C:/tmp/ext",
+        ])
+        .expect("valid");
+        assert_eq!(parsed.without.as_deref(), Some("edit"));
+
+        let options = parsed.options();
+        assert_eq!(
+            options.session.as_deref(),
+            Some(std::path::Path::new("s.jsonl"))
+        );
+        assert_eq!(options.continue_newest, parsed.continue_newest);
+        assert_eq!(options.model.as_deref(), Some("p/m"));
+        assert_eq!(options.max_turns, Some(5));
+        assert_eq!(options.parent.as_deref(), Some("p1"));
+        assert_eq!(options.parent_call.as_deref(), Some("c7"));
+        assert_eq!(options.tools.as_deref(), Some("read,bash"));
+        assert_eq!(options.without.as_deref(), Some("edit"));
+        assert_eq!(options.ephemeral, parsed.ephemeral);
+        assert_eq!(options.preamble.as_deref(), Some("probe"));
+        assert_eq!(
+            options.extensions.as_deref(),
+            Some(std::path::Path::new("C:/tmp/ext"))
+        );
+    }
+
+    #[test]
+    fn subcommands_are_exclusive_with_each_other() {
+        let error = args(&["install", "npm:a", "install", "npm:b"]).expect_err("one per run");
+        assert!(error.contains("one subcommand per run"), "{error}");
+        let error = args(&["install", "npm:a", "extensions", "list"]).expect_err("one per run");
+        assert!(error.contains("one subcommand per run"), "{error}");
+        let error = args(&["extensions", "list", "install", "npm:a"]).expect_err("one per run");
+        assert!(error.contains("one subcommand per run"), "{error}");
+
+        // The extensions mode's rejection names its own mode.
+        let error = args(&["extensions", "list", "--json"]).expect_err("exclusive mode");
+        assert!(error.contains("extensions mode accepts only"), "{error}");
+    }
+
+    #[test]
     fn model_strings_resolve_against_the_config() {
         let config = test_config();
         assert_eq!(

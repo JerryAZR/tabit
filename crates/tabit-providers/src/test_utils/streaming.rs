@@ -31,8 +31,6 @@ pub enum MockStreamEvent {
         id: String,
         additional_params: Option<serde_json::Value>,
     },
-    /// Provider-specific metadata for the current text content block.
-    TextAdditionalParams(serde_json::Value),
     /// Complete tool call event.
     ToolCall {
         id: String,
@@ -102,11 +100,6 @@ impl MockStreamEvent {
             id: id.into(),
             additional_params,
         }
-    }
-
-    /// Add provider-specific metadata to the current text content block.
-    pub fn text_additional_params(additional_params: serde_json::Value) -> Self {
-        Self::TextAdditionalParams(additional_params)
     }
 
     /// Create a complete tool call event.
@@ -223,9 +216,6 @@ impl MockStreamEvent {
                 id: fixture_part_id(id),
                 additional_params,
             }),
-            Self::TextAdditionalParams(additional_params) => {
-                Ok(RawStreamingChoice::TextAdditionalParams(additional_params))
-            }
             Self::ToolCall {
                 id,
                 name,
