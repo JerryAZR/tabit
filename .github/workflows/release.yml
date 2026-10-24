@@ -1,0 +1,70 @@
+name: Release
+
+# The release trigger: tag the version line. `tui/package.json`'s version is
+# the one line for the lockstepped pair (TUI and core bump alike — AGENTS.md's
+# roadmap); the publish job refuses a tag that doesn't match it. Publish goes
+# through tui/scripts/pack.ts --publish --provenance, the same path as the
+# manual first publish — trusted publishing (OIDC, no tokens) is configured
+# per package on npmjs.com against THIS file's name.
+on:
+  push:
+    tags: ["v*"]
+
+# A release is never canceled mid-publish by a newer push.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  # One core per matrix entry, handed to the publish job as artifacts.
+  core:
+    name: core ${{ matrix.platform }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, platform: linux-x64, exe: tabit-core }
+          - { os: windows-latest, platform: win32-x64, exe: tabit-core.exe }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release -p tabit-core
+      - uses: actions/upload-artifact@v4
+        with:
+          name: core-${{ matrix.platform }}
+          path: target/release/${{ matrix.exe }}
+          if-no-files-found: error
+
+  publish:
+    name: npm publish
+    needs: core
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write # OIDC — trusted publishing and --provenance ride this
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: tui/package-lock.json
+      # Trusted publishing needs npm >= 11.5.1; the bundled one can lag.
+      - run: npm install -g npm@latest
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: core-*
+          path: cores
+      # Artifacts lose the exec bit; the tarball must carry an executable core.
+      - run: chmod +x cores/core-linux-x64/tabit-core cores/core-win32-x64/tabit-core.exe
+      - name: Tag matches the version line
+        run: test "${{ github.ref_name }}" = "v$(node -p "require('./tui/package.json').version")"
+      - run: npm ci
+        working-directory: tui
+      - name: Pack + publish
+        working-directory: tui
+        run: node scripts/pack.ts --core linux-x64=../cores/core-linux-x64/tabit-core --core win32-x64=../cores/core-win32-x64/tabit-core.exe --publish --provenance
