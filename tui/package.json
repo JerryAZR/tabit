@@ -1,7 +1,7 @@
 {
 	"type": "module",
 	"name": "tabit-agent",
-	"version": "0.1.0",
+	"version": "0.2.0",
 	"description": "tabit: the alt-screen terminal frontend for the tabit agent stack — bundles the lockstepped tabit-core backend via platform packages",
 	"license": "MIT",
 	"publishConfig": {
