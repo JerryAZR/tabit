@@ -996,6 +996,7 @@ describe("InteractiveMode", () => {
 				{ id: "local", auth: "keyless" },
 				{ id: "openai", auth: "none" },
 			],
+			catalog: { state: "cached" },
 		});
 		assert.strictEqual(mode.modelsCatalog.length, 2);
 		assert.strictEqual(mode.modelsCatalog[0]!.id, "anthropic");
@@ -1004,21 +1005,42 @@ describe("InteractiveMode", () => {
 
 		// Re-announcement replaces wholesale (login landed elsewhere).
 		feed({ type: "models_available", providers: [{ id: "openai", models: [{ id: "gpt", reasoning: false, input: ["text"], thinking_levels: [] }] }] });
-		feed({ type: "providers_available", providers: [{ id: "openai", auth: "stored" }] });
+		feed({ type: "providers_available", providers: [{ id: "openai", auth: "stored" }], catalog: { state: "fresh" } });
 		assert.deepStrictEqual(mode.modelsCatalog.map(p => p.id), ["openai"]);
 		assert.strictEqual(mode.providerStatuses.length, 1);
 
 		// Empty catalog + key-less providers: config exists, nothing
 		// usable — login fixes in-app.
 		feed({ type: "models_available", providers: [] });
-		feed({ type: "providers_available", providers: [{ id: "openai", auth: "none" }] });
+		feed({ type: "providers_available", providers: [{ id: "openai", auth: "none" }], catalog: { state: "offline" } });
+		assert.ok(view.notes.some(n => n.kind === "warn" && n.text.includes("catalog check failed")));
 		assert.strictEqual(view.notes.at(-1)?.kind, "warn");
 		assert.ok((view.notes.at(-1)?.text ?? "").includes("missing keys for: openai"));
 
 		// No providers at all: no config — the restart path.
 		feed({ type: "models_available", providers: [] });
-		feed({ type: "providers_available", providers: [] });
+		feed({ type: "providers_available", providers: [], catalog: { state: "disabled" } });
 		assert.ok((view.notes.at(-1)?.text ?? "").includes("providers.toml"));
+	});
+
+	test("the catalog channel (v26): the checking frame notes; notable states speak, quiet ones don't", () => {
+		const { view, feed, control } = harness();
+		boot(control, feed);
+
+		// The transient control frame exists to be shown.
+		control({ type: "catalog_status", state: "checking" });
+		assert.ok(view.notes.some(n => n.text.includes("checking the model catalog")));
+
+		const quiet = view.notes.length;
+		feed({ type: "providers_available", providers: [], catalog: { state: "disabled" } });
+		feed({ type: "providers_available", providers: [], catalog: { state: "cached" } });
+		feed({ type: "providers_available", providers: [], catalog: { state: "fresh" } });
+		assert.strictEqual(view.notes.length, quiet + 3); // only the empty-world warnings
+
+		feed({ type: "providers_available", providers: [], catalog: { state: "updated", version: "2026.10" } });
+		assert.ok(view.notes.some(n => n.text === "model catalog updated (v2026.10)"));
+		feed({ type: "providers_available", providers: [], catalog: { state: "pending" } });
+		assert.ok(view.notes.some(n => n.text.includes("continues in background")));
 	});
 
 	test("the zero-config boot (v21/v24): no model_selected at creation, the teaching note warns", () => {

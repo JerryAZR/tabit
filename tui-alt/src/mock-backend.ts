@@ -495,6 +495,8 @@ const announceWorld = () => {
 	emitNow({
 		type: "providers_available",
 		providers: world.map(({ id, name, auth }) => ({ id, name, auth })),
+		// v26: the mock's channel is the quiet one — cached, no check.
+		catalog: { state: "cached" },
 	});
 };
 

@@ -45,7 +45,7 @@
 import { log } from "./log.ts";
 import { SessionTree } from "./session-tree.ts";
 import { PROTOCOL_VERSION } from "./protocol.ts";
-import type { AvailableExtension, AvailableProvider, ModelCost, ParsedServerFrame, ProviderStatus, ServerControlFrame, SessionEvent, Usage } from "./protocol.ts";
+import type { AvailableExtension, AvailableProvider, CatalogChannelStatus, ModelCost, ParsedServerFrame, ProviderStatus, ServerControlFrame, SessionEvent, Usage } from "./protocol.ts";
 
 export interface PendingMessage {
 	id: string;
@@ -349,6 +349,9 @@ export class InteractiveMode {
 	 *  unconditional, folded last-wins with each world refresh. Login
 	 *  targets re-derive from it (`auth: "none"`); `env` is display-only. */
 	#providerStatuses: ProviderStatus[] = [];
+	/** The catalog channel's resolved state (v26) — folded, notable
+	 *  states noted; nothing else reads it yet. */
+	#catalogStatus: CatalogChannelStatus | undefined;
 	#keybindings: KeybindingFact[] = [];
 	/** Open cards by id, each carrying the stream its answer routes to —
 	 *  cards are view-independent (owner ruling), never per-transcript. */
@@ -831,6 +834,12 @@ export class InteractiveMode {
 			}
 			return;
 		}
+		if (frame.type === "catalog_status") {
+			// v26: a network check is genuinely in flight and the boot is
+			// bounded-waiting on it — the frame's whole purpose is being shown.
+			this.#view.addNote(undefined, "checking the model catalog…", "info");
+			return;
+		}
 		this.#view.addNote(undefined, `protocol error: ${frame.message}`, "error");
 	}
 
@@ -1005,6 +1014,22 @@ export class InteractiveMode {
 				// v22: unconditional, one act with models_available. The setup
 				// predicate (§3.2) branches the first-run teaching here.
 				this.#providerStatuses = event.providers;
+				// v26: the catalog channel's resolved state — announce-if-cheap;
+				// only the notable states speak (a quiet channel says nothing).
+				this.#catalogStatus = event.catalog;
+				switch (event.catalog.state) {
+					case "updated":
+						this.#view.addNote(undefined, `model catalog updated${event.catalog.version !== undefined ? ` (v${event.catalog.version})` : ""}`, "info");
+						break;
+					case "offline":
+						this.#view.addNote(undefined, "model catalog check failed — using the cache", "warn");
+						break;
+					case "pending":
+						this.#view.addNote(undefined, "model catalog refresh continues in background — applies next boot", "info");
+						break;
+					default:
+						break; // disabled / cached / fresh: nothing to say
+				}
 				if (event.providers.length === 0) {
 					this.#view.addNote(undefined, "no providers configured at this backend — write ~/.tabit/providers.toml and restart", "warn");
 					return;

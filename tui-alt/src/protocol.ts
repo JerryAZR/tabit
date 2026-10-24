@@ -51,10 +51,16 @@
  * the pipe's EOF, cascading per dead session; children only —
  * user-facing sessions die with the process, and run completion is not
  * death). Advisory by owner ruling: mark the stream, never chase it —
- * views stay while focused or listed.
+ * views stay while focused or listed. v24: `model_changed` renamed
+ * `model_selected`, emitted at every visibility incl. creation;
+ * `session_opened.model` removed. v25: `user_message.expanded`. v26:
+ * the catalog channel's boot status — a transient `catalog_status {
+ * state: "checking" }` control frame while a network check is in
+ * flight, and the resolved state + version riding
+ * `providers_available.catalog` (announce-if-cheap).
  */
 
-export const PROTOCOL_VERSION = 25;
+export const PROTOCOL_VERSION = 26;
 
 // ---------------------------------------------------------------------------
 // Commands (frontend → backend). Fire-and-forget; outcomes arrive as
@@ -90,7 +96,11 @@ export type ClientFrame = SessionCommand;
 
 export type ServerControlFrame =
 	| { type: "report"; protocol_version: number }
-	| { type: "protocol_error"; message: string };
+	| { type: "protocol_error"; message: string }
+	/** v26: the catalog channel's boot status — emitted between the
+	 *  report and the catalogs ONLY while a network check is in flight
+	 *  (the boot bounded-waits on it). A TTL-fresh boot never sends it. */
+	| { type: "catalog_status"; state: "checking" };
 /** One model in a `models_available` provider row (v21): the id a `model`
  *  command addresses plus the facts config states. Every optional field
  *  follows the v11 rule — absent means the config does not state it,
@@ -132,6 +142,18 @@ export interface ProviderStatus {
 	id: string;
 	name?: string;
 	auth: ProviderAuth;
+}
+
+/** The downloaded catalog channel's resolved state (v26), riding
+ *  `providers_available.catalog` — why the provider list is what it is
+ *  this boot. `checking` never appears here (the transient frame's
+ *  only). The version is the cache's catalog version, absent when no
+ *  cache exists. */
+export type CatalogState = "disabled" | "cached" | "fresh" | "updated" | "pending" | "offline";
+
+export interface CatalogChannelStatus {
+	state: CatalogState;
+	version?: string;
 }
 
 /** Per-million-token pricing, USD — the mirror of tabit-config's cost record. */
@@ -317,7 +339,7 @@ export type SessionEvent =
 			parent_call?: string;
 	  }
 	| { type: "models_available"; providers: AvailableProvider[] }
-	| { type: "providers_available"; providers: ProviderStatus[] }
+	| { type: "providers_available"; providers: ProviderStatus[]; catalog: CatalogChannelStatus }
 	| {
 			type: "model_selected";
 			provider: string;
@@ -352,7 +374,7 @@ export type ParsedServerFrame =
 	| { kind: "event"; stream?: string; origin?: string; event: SessionEvent }
 	| { kind: "unknown"; raw: string; type?: string };
 
-const CONTROL_TYPES = new Set(["report", "protocol_error"]);
+const CONTROL_TYPES = new Set(["report", "protocol_error", "catalog_status"]);
 
 const EVENT_TYPES = new Set([
 	"run_aborted",
