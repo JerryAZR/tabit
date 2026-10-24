@@ -25,6 +25,24 @@
  * don't exist on the registry. Platform package manifests deliberately
  * carry no `exports` field — the entry resolves `<name>/package.json`
  * through node resolution (the ladder's npm rung).
+ *
+ * `--publish` uploads the tarballs just packed — platform packages first,
+ * the meta last (a fresh install's optional deps must resolve from the
+ * registry the moment the meta is visible) — and is the ONE publish path
+ * for both flows:
+ *
+ *   manual   `node scripts/pack.ts --matrix linux-x64 --publish` — rides
+ *            the logged-in account's 2FA prompt (stdio is inherited).
+ *            The first publish of a package is always this one: npm's
+ *            trusted publishing links only an existing package.
+ *   CI       `node scripts/pack.ts --core win32-x64=<path> --core
+ *            linux-x64=<path> --publish --provenance` — `--provenance`
+ *            needs the runner's OIDC (`id-token: write`) and the trusted
+ *            publisher configured on npmjs.com; the matrix jobs hand the
+ *            cores in, nothing builds here.
+ *
+ * Without `--publish` the run stops at the tarballs and prints the
+ * local-install line — the local loop.
  */
 
 import { spawnSync } from "node:child_process";
@@ -65,6 +83,8 @@ const argv = process.argv.slice(2);
 /** platform token → core binary path (CI's artifact handoff). */
 const cores = new Map<string, string>();
 let matrix = MATRIX;
+let publish = false;
+let provenance = false;
 for (let i = 0; i < argv.length; i++) {
 	if (argv[i] === "--core") {
 		const spec = argv[++i] ?? "";
@@ -76,10 +96,18 @@ for (let i = 0; i < argv.length; i++) {
 		cores.set(spec.slice(0, eq), spec.slice(eq + 1));
 	} else if (argv[i] === "--matrix") {
 		matrix = (argv[++i] ?? "").split(",").filter(s => s !== "");
+	} else if (argv[i] === "--publish") {
+		publish = true;
+	} else if (argv[i] === "--provenance") {
+		provenance = true;
 	} else {
-		console.error(`pack: unknown argument ${argv[i]} (usage: [--core <platform>=<path>]... [--matrix a,b])`);
+		console.error(`pack: unknown argument ${argv[i]} (usage: [--core <platform>=<path>]... [--matrix a,b] [--publish] [--provenance])`);
 		process.exit(1);
 	}
+}
+if (provenance && !publish) {
+	console.error("pack: --provenance only rides --publish");
+	process.exit(1);
 }
 
 const meta = JSON.parse(readFileSync(join(pkgRoot, "package.json"), "utf8")) as {
@@ -189,10 +217,22 @@ for (const dir of [metaDir, ...[...toPack].map(p => join(staging, `tabit-agent-$
 }
 
 console.log(`\npacked tabit-agent@${version} + [${[...toPack].join(", ")}] into ${dist}`);
-// The local install IS the published install — npm publish only uploads
-// these same tarballs. Listing the platform tarballs explicitly lets npm
-// satisfy the optional dependencies offline (they 404 on the registry
-// until published; an unpublished optional dep is skipped, and the core
-// would be silently missing). Reinstalling the same version over itself
-// is fine — iterate without version bumps.
-console.log(`install locally: npm i -g ${["tabit-agent", ...[...toPack].map(p => `tabit-agent-${p}`)].map(n => join(dist, `${n}-${version}.tgz`)).join(" ")}`);
+
+if (publish) {
+	// Upload exactly the tarballs packed above (never re-tar a staging
+	// dir): platform packages first, the meta last — a fresh install's
+	// optional deps must resolve from the registry the moment the meta
+	// becomes visible.
+	for (const tgz of [...[...toPack].map(p => join(dist, `tabit-agent-${p}-${version}.tgz`)), join(dist, `tabit-agent-${version}.tgz`)]) {
+		run(["npm", "publish", tgz, ...(provenance ? ["--provenance"] : [])]);
+	}
+	console.log(`published tabit-agent@${version} + [${[...toPack].join(", ")}]`);
+} else {
+	// The local install IS the published install — npm publish only uploads
+	// these same tarballs. Listing the platform tarballs explicitly lets npm
+	// satisfy the optional dependencies offline (they 404 on the registry
+	// until published; an unpublished optional dep is skipped, and the core
+	// would be silently missing). Reinstalling the same version over itself
+	// is fine — iterate without version bumps.
+	console.log(`install locally: npm i -g ${["tabit-agent", ...[...toPack].map(p => `tabit-agent-${p}`)].map(n => join(dist, `${n}-${version}.tgz`)).join(" ")}`);
+}
