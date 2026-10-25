@@ -241,7 +241,9 @@ startup speed, the sources live on GitHub) with bin `tabit` — shipping
 under `node_modules`). pi-tui stays an external dependency: its napi
 clipboard prebuilds load by path from its own package. The core rides in
 one os/cpu-gated platform package per matrix entry
-(`tabit-agent-win32-x64`, `tabit-agent-linux-x64`; darwin-arm64 joins
+(`tabit-agent-windows-x64`, `tabit-agent-linux-x64` — win32 spells out
+to windows in the name: npm's spam filter blocked
+`tabit-agent-win32-x64` at first publish, 2026-10; darwin-arm64 joins
 after a mac test), each carrying the cargo release binary. The meta's
 `optionalDependencies` pin the platform packages at the same version,
 injected at pack time so the dev checkout never resolves unpublished
@@ -261,7 +263,7 @@ loud on skew).
 
 **The local install IS the published install**: `npm publish` only
 uploads the tarballs `npm pack` already produced, so `npm i -g
-dist/tabit-agent-*.tgz dist/tabit-agent-win32-x64-*.tgz` exercises the
+dist/tabit-agent-*.tgz dist/tabit-agent-windows-x64-*.tgz` exercises the
 exact registry path (the explicit platform tarball satisfies the
 optional dependency offline — unpublished, it would 404 and be silently
 skipped, leaving the core missing). Reinstalling the same version over

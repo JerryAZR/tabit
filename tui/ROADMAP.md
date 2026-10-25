@@ -180,7 +180,9 @@ badge. The design's stated leftovers live in **Parked** below.
   single-file esbuild bundle (plain JS, fast startup — Node refuses
   type-stripping under `node_modules`, so `.ts` sources can't ship) as
   **`tabit-agent`** on npm (bin `tabit`); the core rides in per-platform
-  optional-dependency packages (`tabit-agent-<platform>`, esbuild
+  optional-dependency packages (`tabit-agent-<platform>` — win32
+  spells out to windows in the name, npm spam-blocked the win32
+  spelling — esbuild
   pattern, no postinstall, exact-versioned — the lockstep). One version
   line for the bundle: TUI and core changes bump it alike. Matrix:
   win-x64 + linux-x64 first (the owner-testable pair), darwin-arm64

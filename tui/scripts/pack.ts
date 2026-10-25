@@ -13,6 +13,9 @@
  *                             every platform package at the same
  *                             version (the lockstep ruling made atomic)
  *   tabit-agent-<platform>    one cargo release core each, os/cpu-gated
+ *                             (the name derives via platformPackageName —
+ *                             win32 spells out to windows, npm blocked
+ *                             `tabit-agent-win32-x64` as spam 2026-10)
  *
  * Local: `node scripts/pack.ts` builds the host core (`cargo build
  * --release -p tabit-core`) and packs the meta package plus the host's
@@ -51,6 +54,8 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { build } from "esbuild";
+
+import { hostPlatform, platformPackageName } from "../src/platform-package.ts";
 
 /** The release matrix (owner ruling): the two testable platforms first;
  *  darwin-arm64 joins after someone tests a mac; the rest are deferred. */
@@ -123,7 +128,7 @@ const version = meta.version;
 
 // The platforms we pack this run: every --core entry, plus the host when
 // no core was handed in for it (the local loop builds it).
-const host = `${process.platform}-${process.arch}`;
+const host = hostPlatform();
 const toPack = new Set(cores.keys());
 if (!cores.has(host)) toPack.add(host);
 
@@ -175,7 +180,7 @@ writeFileSync(
 			dependencies: {
 				"@earendil-works/pi-tui": (meta.dependencies as Record<string, string>)["@earendil-works/pi-tui"],
 			},
-			optionalDependencies: Object.fromEntries(matrix.map(p => [`tabit-agent-${p}`, version])),
+			optionalDependencies: Object.fromEntries(matrix.map(p => [platformPackageName(p), version])),
 		},
 		null,
 		"\t",
@@ -191,7 +196,7 @@ for (const platform of toPack) {
 	const dash = platform.indexOf("-");
 	const [os, arch] = [platform.slice(0, dash), platform.slice(dash + 1)];
 	const exe = os === "win32" ? "tabit-core.exe" : "tabit-core";
-	const dir = join(staging, `tabit-agent-${platform}`);
+	const dir = join(staging, platformPackageName(platform));
 	mkdirSync(dir, { recursive: true });
 	cpSync(core, join(dir, exe));
 	cpSync(join(repoRoot, "LICENSE"), join(dir, "LICENSE"));
@@ -199,7 +204,7 @@ for (const platform of toPack) {
 		join(dir, "package.json"),
 		`${JSON.stringify(
 			{
-				name: `tabit-agent-${platform}`,
+				name: platformPackageName(platform),
 				version,
 				description: `the tabit-core backend binary (${platform}) for tabit-agent`,
 				license: "MIT",
@@ -218,7 +223,7 @@ for (const platform of toPack) {
 	);
 }
 
-for (const dir of [metaDir, ...[...toPack].map(p => join(staging, `tabit-agent-${p}`))]) {
+for (const dir of [metaDir, ...[...toPack].map(p => join(staging, platformPackageName(p)))]) {
 	run(["npm", "pack", "--pack-destination", dist], { cwd: dir });
 }
 
@@ -229,7 +234,7 @@ if (publish) {
 	// dir): platform packages first, the meta last — a fresh install's
 	// optional deps must resolve from the registry the moment the meta
 	// becomes visible.
-	for (const tgz of [...[...toPack].map(p => join(dist, `tabit-agent-${p}-${version}.tgz`)), join(dist, `tabit-agent-${version}.tgz`)]) {
+	for (const tgz of [...[...toPack].map(p => join(dist, `${platformPackageName(p)}-${version}.tgz`)), join(dist, `tabit-agent-${version}.tgz`)]) {
 		run(["npm", "publish", tgz, ...(provenance ? ["--provenance"] : [])]);
 	}
 	console.log(`published tabit-agent@${version} + [${[...toPack].join(", ")}]`);
@@ -240,5 +245,5 @@ if (publish) {
 	// until published; an unpublished optional dep is skipped, and the core
 	// would be silently missing). Reinstalling the same version over itself
 	// is fine — iterate without version bumps.
-	console.log(`install locally: npm i -g ${["tabit-agent", ...[...toPack].map(p => `tabit-agent-${p}`)].map(n => join(dist, `${n}-${version}.tgz`)).join(" ")}`);
+	console.log(`install locally: npm i -g ${["tabit-agent", ...[...toPack].map(p => platformPackageName(p))].map(n => join(dist, `${n}-${version}.tgz`)).join(" ")}`);
 }

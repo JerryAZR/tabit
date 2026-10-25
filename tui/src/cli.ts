@@ -17,11 +17,13 @@ import { InteractiveMode } from "./mode.ts";
 import { PROTOCOL_VERSION } from "./protocol.ts";
 import { AltRoot } from "./root.ts";
 import { log } from "./log.ts";
+import { hostPlatform, platformPackageName } from "./platform-package.ts";
 
 /**
  * Backend resolution — the zero-tuning ladder: `--mock[=scenario]`
  * (dev-only) → `--bin <path>` → `TABIT_CORE_BIN` → the installed
- * **platform package** (`tabit-agent-<platform>-<arch>` — the npm
+ * **platform package** (the name derives via [`platformPackageName`]
+ * — the npm
  * optionalDependencies/esbuild pattern, the published app's core) → the
  * **entry's own sibling** (the release-archive layout: `tabit-core`
  * rides next to `cli.ts`) → this repo's cargo outputs (dev) →
@@ -62,7 +64,7 @@ export function resolveBackendCommand(argv: string[], deps: ResolveDeps = {}): {
 	if (envBin !== undefined && envBin !== "") return { bin: envBin, args: base };
 	const exe = process.platform === "win32" ? "tabit-core.exe" : "tabit-core";
 	// The published app: the lockstepped platform package carries the core.
-	const pkgDir = resolvePackage(`tabit-agent-${process.platform}-${process.arch}`);
+	const pkgDir = resolvePackage(platformPackageName(hostPlatform()));
 	if (pkgDir !== undefined) {
 		const candidate = join(pkgDir, exe);
 		if (exists(candidate)) return { bin: candidate, args: base };

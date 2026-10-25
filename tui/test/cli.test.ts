@@ -60,7 +60,10 @@ describe("the backend resolution ladder", () => {
 					return "/pkg/dir";
 				},
 			});
-			assert.deepStrictEqual(asked, [`tabit-agent-${process.platform}-${process.arch}`]);
+			// Independent re-derivation of the name rule (win32 spells
+			// out to windows — npm blocked the win32 name, 2026-10).
+			const os = process.platform === "win32" ? "windows" : process.platform;
+			assert.deepStrictEqual(asked, [`tabit-agent-${os}-${process.arch}`]);
 			assert.ok(resolved.bin.replaceAll("\\", "/").startsWith("/pkg/dir/"));
 			assert.ok(resolved.bin.includes("tabit-core"));
 		});
