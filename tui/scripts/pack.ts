@@ -208,6 +208,9 @@ for (const platform of toPack) {
 				// The publish target rides the manifest (a mirror may ride dev
 				// installs; uploads go only to the official registry).
 				publishConfig: { registry: "https://registry.npmjs.org" },
+				// Provenance (--provenance) cross-checks the attestation's repo
+				// against repository.url — inherit the meta's, verbatim.
+				repository: meta.repository,
 			},
 			null,
 			"\t",
