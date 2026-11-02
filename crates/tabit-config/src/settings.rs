@@ -57,8 +57,14 @@ pub struct CatalogSettings {
     /// milliseconds. The pointer is the cheap high-information fetch:
     /// same-version means done, new-version commits to the artifact
     /// phase with its own budget. Over budget: the old cache merges
-    /// and the refresh continues in the background.
+    /// and the refresh continues in the background — the task itself
+    /// is bounded per fetch (`pointer_timeout_ms`), never by this.
     pub pointer_budget_ms: u64,
+    /// Per-fetch timeout for a `latest.toml` pointer attempt (the
+    /// artifact phase's `artifact_timeout_ms` counterpart): a
+    /// connected-but-stalled mirror fails over to the next instead
+    /// of parking the refresh task — and the lock it holds.
+    pub pointer_timeout_ms: u64,
     /// Boot's additional patience for the artifact phase, in
     /// milliseconds, paid only when the pointer proved an update
     /// exists. Over budget: the download continues in the background
@@ -78,6 +84,7 @@ impl Default for CatalogSettings {
             ttl_hours: 24,
             urls: Vec::new(),
             pointer_budget_ms: 1000,
+            pointer_timeout_ms: 10_000,
             artifact_budget_ms: 2500,
             artifact_timeout_ms: 60_000,
         }

@@ -38,6 +38,85 @@ const BUILTIN_MIRRORS: &[&str] = &[
     "https://raw.githubusercontent.com/JerryAZR/tabit-catalog/catalog",
 ];
 
+/// One TCP connect attempt's budget — and, because `RacingResolver`
+/// races ALL of a host's candidates in parallel, the whole connect
+/// phase's. Sized for slow links: a lost SYN costs a 1s retransmit
+/// and high-latency networks show multi-second connects. (Was 750ms,
+/// which hyper-util then split EVENLY across a host's addresses —
+/// 187ms per attempt on a 4-address mirror — so on a slow link every
+/// candidate timed out and the connect failed outright, where a
+/// Happy-Eyeballs client like curl sailed through.)
+const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// The catalog client's DNS resolver — the connect strategy
+/// hyper-util will not give us. Its connector walks a host's
+/// addresses sequentially per family and splits the connect timeout
+/// evenly across them (see CONNECT_TIMEOUT). So resolution itself
+/// races a bare TCP connect to every candidate in parallel, each
+/// with the full budget, and yields only the winner: division by
+/// one, the full budget per attempt.
+///
+/// The probe targets port 443 — hyper's `Name` carries no port and
+/// the channel speaks https. The probe's socket is dropped and
+/// reqwest reconnects to the winner: one redundant bare handshake
+/// per host per boot (reqwest's DNS cache and connection pool absorb
+/// the rest). A single-candidate host skips the probe (nothing to
+/// rank). When the probe finds no winner the UNRANKED list is
+/// returned — hyper-util's own (slower, divided) strategy then runs,
+/// so a mirror on a non-443 port still connects, never breaks.
+#[derive(Debug, Clone, Copy)]
+struct RacingResolver;
+
+impl reqwest::dns::Resolve for RacingResolver {
+    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        let host = name.as_str().to_owned();
+        Box::pin(async move {
+            let addrs: Vec<std::net::SocketAddr> = tokio::net::lookup_host((host.as_str(), 443))
+                .await?
+                .collect();
+            let winner = match addrs.as_slice() {
+                [] => None,
+                [only] => Some(*only),
+                _ => race_connect(&addrs, CONNECT_TIMEOUT).await,
+            };
+            // Port 0: reqwest fills in the URI's port (explicit, or
+            // the scheme's default).
+            let ranked: Vec<std::net::SocketAddr> = match winner {
+                Some(addr) => vec![std::net::SocketAddr::new(addr.ip(), 0)],
+                None => addrs
+                    .iter()
+                    .map(|addr| std::net::SocketAddr::new(addr.ip(), 0))
+                    .collect(),
+            };
+            Ok(Box::new(ranked.into_iter()) as reqwest::dns::Addrs)
+        })
+    }
+}
+
+/// Race bare TCP connects to every candidate, each with the full
+/// timeout; first success wins and the losers are dropped with their
+/// sockets. `select_ok` is the one combinator: first `Ok`, or the
+/// last error when all fail. No winner: None — the caller falls back
+/// to the unranked list.
+async fn race_connect(
+    addrs: &[std::net::SocketAddr],
+    timeout: std::time::Duration,
+) -> Option<std::net::SocketAddr> {
+    let attempts = addrs.iter().map(|addr| {
+        Box::pin(async move {
+            match tokio::time::timeout(timeout, tokio::net::TcpStream::connect(addr)).await {
+                Ok(Ok(_stream)) => Ok(*addr),
+                Ok(Err(err)) => Err(err),
+                Err(_) => Err(std::io::Error::from(std::io::ErrorKind::TimedOut)),
+            }
+        })
+    });
+    futures::future::select_ok(attempts)
+        .await
+        .ok()
+        .map(|(addr, _losers)| addr)
+}
+
 /// The state sidecar next to the auto file: what we have and when we
 /// got it. Freshness is the fetched-at stamp, not the file's mtime
 /// (a user copying the file around must not reset the clock).
@@ -154,14 +233,15 @@ pub(crate) fn merge_auto(config: &mut TabitConfig, auto_path: &Path, warnings: &
 }
 
 /// Refresh the catalog when stale. Budgets (PROVIDERS.md): the
-/// pointer phase is internally bounded (`pointer_budget_ms` — a
-/// 100-byte fetch that cannot land in time means the artifact would
-/// not either); the artifact phase's bound is the boot's patience
-/// (the outer timeout in `build_registry` — on expiry the detached
-/// task keeps downloading and installs for the next boot) — but each
-/// artifact FETCH is bounded (`artifact_timeout_ms`): a mirror that
-/// connects and stalls fails over like any other failure, never
-/// parks the task (and the lock it holds) for the process's life.
+/// boot's patience (`pointer_budget_ms` + `artifact_budget_ms` in
+/// `build_registry`) bounds how long BOOT waits — on expiry the
+/// detached task keeps downloading and installs for the next boot.
+/// Inside the task every FETCH is bounded instead: connects race
+/// under `CONNECT_TIMEOUT`, each pointer fetch gets
+/// `pointer_timeout_ms`, each artifact fetch `artifact_timeout_ms` —
+/// a mirror that connects and stalls fails over like any other
+/// failure, never parks the task (and the lock it holds) for the
+/// process's life.
 pub(crate) async fn refresh(settings: &CatalogSettings, auto_path: &Path) -> RefreshOutcome {
     if !settings.auto_update {
         return RefreshOutcome::Offline {
@@ -208,23 +288,13 @@ pub(crate) async fn refresh(settings: &CatalogSettings, auto_path: &Path) -> Ref
         settings.urls.clone()
     };
     let client = reqwest::Client::builder()
-        .connect_timeout(std::time::Duration::from_millis(750))
+        .connect_timeout(CONNECT_TIMEOUT)
+        .dns_resolver(RacingResolver)
         .build()
         .unwrap_or_else(|_| reqwest::Client::new());
-    let pointer_phase = fetch_pointer(&client, &urls);
-    let pointer = match tokio::time::timeout(
-        std::time::Duration::from_millis(settings.pointer_budget_ms),
-        pointer_phase,
-    )
-    .await
-    {
-        Ok(Ok(found)) => found,
-        Ok(Err(reason)) => return RefreshOutcome::Offline { reason },
-        Err(_) => {
-            return RefreshOutcome::Offline {
-                reason: format!("pointer over budget ({}ms)", settings.pointer_budget_ms),
-            };
-        }
+    let pointer = match fetch_pointer(&client, &urls, settings).await {
+        Ok(found) => found,
+        Err(reason) => return RefreshOutcome::Offline { reason },
     };
     let outcome = apply_pointer(&client, &urls, settings, pointer, auto_path).await;
     match &outcome {
@@ -237,24 +307,40 @@ pub(crate) async fn refresh(settings: &CatalogSettings, auto_path: &Path) -> Ref
 }
 
 /// The pointer phase: the first mirror whose `latest.toml` fetches
-/// and parses wins.
+/// and parses wins. Each fetch is bounded (`pointer_timeout_ms` —
+/// the artifact phase's `artifact_timeout_ms` counterpart): a mirror
+/// that connects then stalls fails over to the next instead of
+/// parking the refresh (and the lock it holds).
 async fn fetch_pointer(
     client: &reqwest::Client,
     urls: &[String],
+    settings: &CatalogSettings,
 ) -> Result<(usize, Latest), String> {
+    let fetch_timeout = std::time::Duration::from_millis(settings.pointer_timeout_ms);
     let mut failures = Vec::new();
     for (index, base) in urls.iter().enumerate() {
         let base = base.trim_end_matches('/');
-        match get(client, &format!("{base}/{LATEST}")).await {
-            Ok(raw) => {
-                let raw = String::from_utf8(raw)
-                    .map_err(|err| format!("{base}: pointer not UTF-8: {err}"))?;
+        let fetch =
+            tokio::time::timeout(fetch_timeout, get(client, &format!("{base}/{LATEST}"))).await;
+        match fetch {
+            Ok(Ok(raw)) => {
+                let raw = match String::from_utf8(raw) {
+                    Ok(raw) => raw,
+                    Err(err) => {
+                        failures.push(format!("{base}: pointer not UTF-8: {err}"));
+                        continue;
+                    }
+                };
                 match toml::from_str::<Latest>(&raw) {
                     Ok(latest) => return Ok((index, latest)),
                     Err(err) => failures.push(format!("{base}: bad pointer: {err}")),
                 }
             }
-            Err(reason) => failures.push(reason),
+            Ok(Err(reason)) => failures.push(reason),
+            Err(_) => failures.push(format!(
+                "{base}: pointer fetch stalled ({}ms)",
+                settings.pointer_timeout_ms
+            )),
         }
     }
     Err(format!("every mirror failed ({})", failures.join("; ")))

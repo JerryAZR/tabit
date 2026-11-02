@@ -97,11 +97,16 @@ is compiled in. The local manager:
   config-overridable), the refresh spawns right after settings load
   and the boot **bounded-waits** on it after the extension handshakes
   (the slowest boot phase hides the network): `pointer_budget_ms`
-  (default 1s — the pointer is a 100-byte fetch) plus
+  (default 1s) plus
   `artifact_budget_ms` (default 2.5s). Within budget, a new catalog
   applies to THIS boot; over budget the task detaches, keeps
   downloading, and installs for next boot (the `pending` wire
-  status). A check in flight is announced on the wire
+  status). The budgets are the boot's patience, never the task's —
+  on slow links connect+TLS dominates the pointer as much as the
+  artifact (a fast pointer proves nothing about artifact viability),
+  so no pointer-phase deadline exists inside the task; every fetch
+  is bounded individually (next bullet). A check in flight is
+  announced on the wire
   (`catalog_status`, v26); the resolved state and cache version ride
   `providers_available.catalog`. Subagent children never refresh —
   the parent's boot owns the network; they merge the cache as-is.
@@ -116,10 +121,17 @@ is compiled in. The local manager:
   the sha256, and writes `~/.tabit/providers.auto.toml` atomically
   (temp + rename) under an OS sidecar lock (`std::fs::File::lock` —
   the session-store pattern; a concurrent session that loses the lock
-  skips, since the winner just wrote fresh data). Each artifact fetch
-  is bounded (`artifact_timeout_ms`, default 60s — a mirror that
-  connects then stalls fails over like any other failure, never
-  parks the refresh task holding the lock) and size-capped (32 MiB).
+  skips, since the winner just wrote fresh data). Connects race ALL
+  of a host's resolved addresses in parallel, 5s per attempt (a
+  reqwest DNS-resolver probe on port 443 picks the winner —
+  hyper-util's connector walks the candidates sequentially with the
+  timeout divided across them, fast-link-only behavior that reads as
+  the channel down from slow networks). Each fetch is bounded
+  (`pointer_timeout_ms`, default 10s, per pointer fetch;
+  `artifact_timeout_ms`, default 60s, per artifact fetch — a mirror
+  that connects then stalls fails over like any other failure, never
+  parks the refresh task holding the lock); the artifact is
+  size-capped (32 MiB).
 - The freshness invariant: the state sidecar and the artifact are
   checked TOGETHER — a stamp only counts while the artifact it
   vouches for exists and parses (a deleted or corrupt cache

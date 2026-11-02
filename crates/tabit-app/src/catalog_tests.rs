@@ -18,6 +18,7 @@ fn settings(urls: Vec<String>) -> CatalogSettings {
         ttl_hours: 24,
         urls,
         pointer_budget_ms: 30_000,
+        pointer_timeout_ms: 60_000,
         artifact_budget_ms: 60_000,
         artifact_timeout_ms: 60_000,
     }
@@ -494,78 +495,135 @@ async fn live_jsdelivr_channel_end_to_end() {
 }
 
 #[tokio::test]
-async fn a_pointer_over_budget_is_offline_and_never_fetches_the_artifact() {
+async fn the_refresh_is_not_bounded_by_the_boots_patience() {
+    // pointer_budget_ms bounds the BOOT's wait (build_registry),
+    // never the refresh task: a pointer phase slower than the boot's
+    // patience still completes — the boot detaches (the `pending`
+    // status) and the install lands for next boot.
     let dir = temp_dir("slow-pointer");
     let auto = dir.join("providers.auto.toml");
     let server = httpmock::MockServer::start_async().await;
-    let artifact = server.mock(|when, then| {
-        when.path("/catalog-v1.toml");
-        then.status(200).body(CATALOG_V1);
-    });
+    let latest = format!(
+        "version = \"v1\"\nsha256 = \"{}\"\nmin_schema = 1\n",
+        sha256_hex(CATALOG_V1)
+    );
     server.mock(|when, then| {
         when.path("/latest.toml");
         then.status(200)
             .delay(std::time::Duration::from_millis(300))
-            .body(
-                "version = \"v1\"
-sha256 = \"00\"
-min_schema = 1
-",
-            );
+            .body(&latest);
     });
-    let mut slow = settings(vec![server.url("")]);
-    slow.pointer_budget_ms = 50;
+    server.mock(|when, then| {
+        when.path("/catalog-v1.toml");
+        then.status(200).body(CATALOG_V1);
+    });
+    let mut slow_boot = settings(vec![server.url("")]);
+    slow_boot.pointer_budget_ms = 50;
 
-    let outcome = refresh(&slow, &auto).await;
+    let outcome = refresh(&slow_boot, &auto).await;
 
     assert!(
-        matches!(outcome, RefreshOutcome::Offline { .. }),
-        "{outcome:?}"
+        matches!(outcome, RefreshOutcome::Updated { .. }),
+        "the boot's patience never kills the refresh: {outcome:?}"
+    );
+    assert!(auto.exists());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn a_stalled_pointer_mirror_fails_over() {
+    // The pointer fetch's per-mirror bound (`pointer_timeout_ms`):
+    // a mirror that connects then stalls fails over to the next
+    // instead of parking the refresh (and its lock).
+    let dir = temp_dir("stall-pointer");
+    let auto = dir.join("providers.auto.toml");
+    let latest = format!(
+        "version = \"v1\"\nsha256 = \"{}\"\nmin_schema = 1\n",
+        sha256_hex(CATALOG_V1)
+    );
+    let stalled = httpmock::MockServer::start_async().await;
+    stalled.mock(|when, then| {
+        when.path("/latest.toml");
+        then.status(200)
+            .body(&latest)
+            .delay(std::time::Duration::from_secs(5));
+    });
+    let fallback = httpmock::MockServer::start_async().await;
+    fallback.mock(|when, then| {
+        when.path("/latest.toml");
+        then.status(200).body(&latest);
+    });
+    let fallback_artifact = fallback.mock(|when, then| {
+        when.path("/catalog-v1.toml");
+        then.status(200).body(CATALOG_V1);
+    });
+    let mut settings = settings(vec![stalled.url(""), fallback.url("")]);
+    settings.pointer_timeout_ms = 50;
+
+    let outcome =
+        tokio::time::timeout(std::time::Duration::from_secs(4), refresh(&settings, &auto))
+            .await
+            .expect("the stall fails over instead of parking");
+
+    assert!(
+        matches!(outcome, RefreshOutcome::Updated { .. }),
+        "the fallback mirror served the catalog: {outcome:?}"
     );
     assert_eq!(
-        artifact.calls_async().await,
-        0,
-        "a pointer over budget abandons the attempt"
+        fallback_artifact.calls_async().await,
+        1,
+        "the fallback was used"
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[tokio::test]
-async fn the_artifact_phase_has_its_own_budget_beyond_the_pointer() {
-    // The pointer lands fast; the artifact takes longer than the
-    // pointer budget but lands within the artifact budget — the
-    // update applies.
-    let dir = temp_dir("slow-artifact");
-    let auto = dir.join("providers.auto.toml");
-    let server = httpmock::MockServer::start_async().await;
-    let latest = format!(
-        "version = \"v1\"
-sha256 = \"{}\"
-min_schema = 1
-",
-        sha256_hex(CATALOG_V1)
-    );
-    server.mock(|when, then| {
-        when.path("/latest.toml");
-        then.status(200).body(&latest);
-    });
-    server.mock(|when, then| {
-        when.path("/catalog-v1.toml");
-        then.status(200)
-            .delay(std::time::Duration::from_millis(200))
-            .body(CATALOG_V1);
-    });
-    let mut split = settings(vec![server.url("")]);
-    split.pointer_budget_ms = 50;
+async fn the_race_picks_the_reachable_candidate() {
+    // A dead candidate (TEST-NET-1, unroutable — hangs until the
+    // timeout) listed FIRST; a live listener second. Parallel
+    // attempts: the listener wins long before the dead one's
+    // timeout.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
+    let live = listener.local_addr().expect("addr");
+    let dead: std::net::SocketAddr = "192.0.2.1:443".parse().expect("TEST-NET-1");
+    let start = std::time::Instant::now();
 
-    let outcome = refresh(&split, &auto).await;
+    let winner = race_connect(&[dead, live], std::time::Duration::from_millis(500)).await;
 
-    assert!(
-        matches!(outcome, RefreshOutcome::Updated { .. }),
-        "{outcome:?}"
-    );
-    assert!(auto.exists());
-    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(winner, Some(live));
+    assert!(start.elapsed() < std::time::Duration::from_millis(500));
+    drop(listener);
+}
+
+#[tokio::test]
+async fn the_race_reports_no_winner() {
+    // Refused-fast candidates: None without waiting out the timeout.
+    let refused1: std::net::SocketAddr = "127.0.0.1:1".parse().expect("addr");
+    let refused2: std::net::SocketAddr = "127.0.0.1:2".parse().expect("addr");
+    let start = std::time::Instant::now();
+    let winner = race_connect(&[refused1, refused2], std::time::Duration::from_secs(30)).await;
+    assert_eq!(winner, None);
+    assert!(start.elapsed() < std::time::Duration::from_secs(5));
+    // Stalled candidates: None when the timeout fires — the race is
+    // bounded even when nothing refuses.
+    let dead: std::net::SocketAddr = "192.0.2.1:443".parse().expect("TEST-NET-1");
+    let start = std::time::Instant::now();
+    let winner = race_connect(&[dead], std::time::Duration::from_millis(200)).await;
+    assert_eq!(winner, None);
+    assert!(start.elapsed() < std::time::Duration::from_secs(2));
+}
+
+#[tokio::test]
+async fn the_resolver_skips_the_probe_for_a_single_candidate() {
+    // One candidate: nothing to rank — the address comes back as-is
+    // (port 0: reqwest fills in the URI's port). The mock-server
+    // tests above exercise this path end to end.
+    let name: reqwest::dns::Name = "127.0.0.1".parse().expect("name");
+    let addrs: Vec<_> = reqwest::dns::Resolve::resolve(&RacingResolver, name)
+        .await
+        .expect("resolves")
+        .collect();
+    assert_eq!(addrs, vec![std::net::SocketAddr::from(([127, 0, 0, 1], 0))]);
 }
 
 /// Boot-shape test harness: a staged home, config path, and offline
