@@ -22,6 +22,7 @@
  */
 
 import type { FooterFacts } from "../mode.ts";
+import { createCatalogBadge } from "./badges/catalog.ts";
 import { createContextBadge } from "./badges/context.ts";
 import { createCostBadge } from "./badges/cost.ts";
 import { createModelBadge } from "./badges/model.ts";
@@ -48,6 +49,7 @@ export type FooterBadgeFactory = (ctx: FooterBadgeContext) => FooterBadge;
 export const FOOTER_BADGES: FooterBadgeFactory[] = [
 	createStreamBadge,
 	createModelBadge,
+	createCatalogBadge,
 	createContextBadge,
 	createCostBadge,
 	createUsageBadge,

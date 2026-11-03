@@ -20,7 +20,11 @@ fn main() {
         stream: Some(StreamId::new("mismatch-sess")),
         origin: None,
         ttl: None,
-        event: SessionEvent::error_session("the mismatched child's event".to_string()),
+        event: SessionEvent::notice_transient(
+            "session.command",
+            tabit_protocol::NoticeLevel::Warn,
+            "the mismatched child's event".to_string(),
+        ),
     }));
     // ONE write: the pump reads the event the moment after the
     // mismatch, long before the spawner's kill.

@@ -151,17 +151,17 @@ fn event_frames_serialize_flat_with_the_stream_beside_the_tag() {
 
 #[test]
 fn backend_level_lines_parse_as_events_with_no_stream() {
-    // The optional-stream ruling on the wire: a backend error carries
-    // no faked stamp, and the untagged ServerFrame still resolves it
-    // to the event variant (a GUI-side regression once left this
-    // shape unparsed-looking; the parse was always fine, the stamp
-    // was not).
-    let line = r#"{"type":"error","kind":"session","message":"no session with id `019a`"}"#;
+    // The optional-stream ruling on the wire: a backend notice
+    // carries no faked stamp, and the untagged ServerFrame still
+    // resolves it to the event variant (a GUI-side regression once
+    // left this shape unparsed-looking; the parse was always fine,
+    // the stamp was not).
+    let line = r#"{"type":"notice","id":"session.command","level":"warn","text":"no session with id `019a`"}"#;
     match serde_json::from_str::<ServerFrame>(line).expect("the unstamped line parses") {
         ServerFrame::Event(frame) => {
             assert_eq!(frame.stream, None);
             assert!(
-                matches!(frame.event, SessionEvent::Error { ref message, .. } if message.contains("019a"))
+                matches!(frame.event, SessionEvent::Notice { ref text, .. } if text.contains("019a"))
             );
         }
         other => panic!("the event variant, got {other:?}"),

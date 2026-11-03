@@ -24,10 +24,9 @@
 //! - `grammar` — report watching `session_opened` and
 //!   `interaction_settled`; emit one `message` command and one
 //!   `interaction_request` (id `g-1`); then echo every inbound line
-//!   that is not a lane frame back out as an `error { kind:
-//!   session }` event whose message is the line verbatim — so the
-//!   tests can see exactly what the host mirrored or routed down
-//!   the pipe.
+//!   that is not a lane frame back out as a `notice` whose text is
+//!   the line verbatim — so the tests can see exactly what the host
+//!   mirrored or routed down the pipe.
 //!
 //! Tool-lane behaviors (task 2): report with one declared tool, then
 //! serve it on the pipe:
@@ -181,8 +180,8 @@ fn serve_grammar() {
         "payload": {"title": "The extension asks", "body": "grammar demo", "options": [], "free_text": true},
     }));
     // Everything inbound that is not a lane frame is the grammar
-    // coming home: mirror it out as an error event so the test's
-    // event recorder sees it.
+    // coming home: mirror it out as a notice so the test's event
+    // recorder sees it.
     loop {
         let line = read_line();
         let Ok(frame) = serde_json::from_str::<Value>(&line) else {
@@ -204,7 +203,7 @@ fn serve_grammar() {
             emit(json!({"type": "interaction_settled", "id": id}));
         }
         emit(json!({
-            "type": "error", "kind": "session", "message": line.trim(),
+            "type": "notice", "id": "extension.report", "level": "info", "text": line.trim(),
         }));
     }
 }

@@ -700,7 +700,7 @@ stdin.on("line", line => {
 			const modelId = String(frame.model);
 			const row = world.find(p => p.id === provider && p.auth !== "none")?.models.find(m => m.id === modelId);
 			if (row === undefined) {
-				emitEvent(String(frame.session), { type: "error", kind: "model", message: `unknown model: ${provider}/${modelId}` });
+				emitEvent(String(frame.session), { type: "notice", id: "model.command", level: "warn", text: `unknown model: ${provider}/${modelId}` });
 				return;
 			}
 			emitEvent(String(frame.session), {
@@ -722,16 +722,17 @@ stdin.on("line", line => {
 			const key = String(frame.api_key ?? "");
 			const entry = world.find(p => p.id === provider);
 			if (entry === undefined) {
-				emitNow({ type: "error", kind: "auth", message: `unknown provider: ${provider}` });
+				emitNow({ type: "notice", id: "auth.failed", level: "error", text: `unknown provider: ${provider}` });
 				return;
 			}
 			if (key.trim() === "") {
-				emitNow({ type: "error", kind: "auth", message: "empty key — nothing stored" });
+				emitNow({ type: "notice", id: "auth.failed", level: "error", text: "empty key — nothing stored" });
 				return;
 			}
 			// Already-usable providers succeed unchanged in the catalog
 			// (auth.toml wins over the env/keyless source — the explicit act).
 			entry.auth = "stored";
+			emitNow({ type: "notice_cleared", id: "auth.failed" });
 			announceWorld();
 			return;
 		}
@@ -744,6 +745,7 @@ stdin.on("line", line => {
 			if (entry !== undefined && entry.auth === "stored") {
 				entry.auth = entry.keyless === true ? "keyless" : "none";
 			}
+			emitNow({ type: "notice_cleared", id: "auth.failed" });
 			announceWorld();
 			return;
 		}

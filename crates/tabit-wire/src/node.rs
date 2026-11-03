@@ -27,7 +27,7 @@
 //!    plain subscription config with no machinery beside the fan.
 //! 2. **Session-addressed commands route by the learning table** —
 //!    one lookup, no separate worker map; a miss is the uniform
-//!    unstamped `error { kind: session }` (the failure belongs to no
+//!    unstamped `notice { id: "session.command" }` (the failure belongs to no
 //!    session — FRONTEND.md's stamp law).
 //! 3. **Non-session commands route by type** to the functional
 //!    layer's handler table (the same router mechanism, keyed by
@@ -587,7 +587,7 @@ impl<C: Routed> Node<C> {
                             stream: None,
                             origin: None,
                             ttl: Some(HOP_BUDGET),
-                            event: SessionEvent::error_session(format!(
+                            event: SessionEvent::notice_transient("session.command", tabit_protocol::NoticeLevel::Warn, format!(
                                 "a `{}` answered a `{}` question (`{id}`) — a contract break, dropped",
                                 command.route_key(),
                                 kind,
@@ -615,9 +615,11 @@ impl<C: Routed> Node<C> {
                             stream: None,
                             origin: None,
                             ttl: Some(HOP_BUDGET),
-                            event: SessionEvent::error_session(format!(
-                                "no session `{session}` on this node"
-                            )),
+                            event: SessionEvent::notice_transient(
+                                "session.command",
+                                tabit_protocol::NoticeLevel::Warn,
+                                format!("no session `{session}` on this node"),
+                            ),
                         },
                         Locality::Local,
                     );

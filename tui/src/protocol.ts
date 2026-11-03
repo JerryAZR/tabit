@@ -1,5 +1,5 @@
 /**
- * The tabit frontend wire vocabulary (FRONTEND.md, protocol v25), mirrored
+ * The tabit frontend wire vocabulary (FRONTEND.md, protocol v27), mirrored
  * from `crates/tabit-protocol` as TypeScript types, plus the lenient parse
  * a hand-rolled client owes the contract: JSON.parse first, switch on
  * known `type`s to a typed union, and hand everything unrecognized back as
@@ -39,7 +39,7 @@
  * `missing_keys` — the login widget's targets), always emitted even
  * empty, re-announced when the world changes (last-wins); the
  * backend-level `login`/`logout` commands (the re-announced catalog is
- * the ack, `error { kind: "auth" }` the failure); zero config boots —
+ * the ack, `notice { id: "auth.failed" }` the failure); zero config boots —
  * `session_opened.model` is nullable (null = no selection, serialized
  * present). v22: `providers_available` — every configured provider with
  * its winning key source (`stored`/`env`/`keyless`/`none`), announced
@@ -57,10 +57,15 @@
  * the catalog channel's boot status — a transient `catalog_status {
  * state: "checking" }` control frame while a network check is in
  * flight, and the resolved state + version riding
- * `providers_available.catalog` (announce-if-cheap).
+ * `providers_available.catalog` (announce-if-cheap). v27: the notice
+ * model — `error { kind }` retires for `notice { id, level, text }` +
+ * `notice_cleared { id }`. The producer owns severity and lifetime:
+ * `error` pins until its `notice_cleared` (a condition); `info`/`warn`
+ * are transient (the frontend ages them on its own turn clock). The
+ * transcript is conversation; notices live in the dock.
  */
 
-export const PROTOCOL_VERSION = 26;
+export const PROTOCOL_VERSION = 27;
 
 // ---------------------------------------------------------------------------
 // Commands (frontend → backend). Fire-and-forget; outcomes arrive as
@@ -314,7 +319,8 @@ export type SessionEvent =
 			completed_at_ms: number;
 	  }
 	| { type: "run_failed"; message: string; kind: string; started_at_ms: number; completed_at_ms: number }
-	| { type: "error"; kind: string; message: string; pending?: number }
+	| { type: "notice"; id: string; level: "info" | "warn" | "error"; text: string }
+	| { type: "notice_cleared"; id: string }
 	| { type: "replay_begin"; total: number }
 	| { type: "replay_end" }
 	| { type: "checked_out"; entry_id: string; base_id: string | null }
@@ -392,7 +398,8 @@ const EVENT_TYPES = new Set([
 	"completion_call",
 	"run_finished",
 	"run_failed",
-	"error",
+	"notice",
+	"notice_cleared",
 	"replay_begin",
 	"replay_end",
 	"checked_out",

@@ -306,7 +306,7 @@ async fn the_ask_example_routes_its_answer() {
         wait_for(|| {
             recorded.events().iter().any(|e| {
                 e.starts_with("echo|")
-                    && e.contains("error")
+                    && e.contains("notice")
                     && e.contains(&format!("saw card `{id}` settle"))
             })
         })

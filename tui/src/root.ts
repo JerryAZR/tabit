@@ -1,7 +1,7 @@
 /**
  * The alt-screen root: the presentation host. Builds the `TuiAltScreen`
  * layout — the transcript slot over the pinned dock (card slot, queued
- * steering, status strip, editor, subagent list, footer) — and implements
+ * steering, status strip, notice line, editor, subagent list, footer) — and implements
  * `ModeView` by delegating to the component classes under `components/`.
  * The root owns construction, hosting, and focus; each component owns its
  * state, its presentation, and its own repaint request.
@@ -45,6 +45,7 @@ import { NoteBlock } from "./components/note-block.ts";
 import { PendingQueue } from "./components/pending-queue.ts";
 import { ReasoningBlock } from "./components/reasoning-block.ts";
 import { StatusBar } from "./components/status-bar.ts";
+import { NoticeBar, type DockedNotice } from "./components/notice-bar.ts";
 import { ToolBlock } from "./components/tool-block.ts";
 import { UserBlock } from "./components/user-block.ts";
 import { SubagentList } from "./components/subagent-list.ts";
@@ -110,6 +111,7 @@ export class AltRoot implements ModeView {
 	readonly #cardSlot = new Container();
 	readonly #pendingQueue: PendingQueue;
 	readonly #status: StatusBar;
+	readonly #notice: NoticeBar;
 	readonly #subagentList: SubagentList;
 	readonly #footer: FooterBar;
 	/** Panes by stream id; the "" key is the pre-boot scratch pane (global
@@ -143,6 +145,7 @@ export class AltRoot implements ModeView {
 		this.#attachProvider(); // empty until bind — no mode, no command table
 		this.#pendingQueue = new PendingQueue(() => this.#touch());
 		this.#status = new StatusBar(this.tui, () => this.#touch());
+		this.#notice = new NoticeBar(() => this.#touch());
 		this.#footer = new FooterBar(() => this.#touch());
 		this.#subagentList = new SubagentList({
 			onFocus: stream => this.#mode?.focusStream(stream),
@@ -165,6 +168,7 @@ export class AltRoot implements ModeView {
 				{ component: this.#cardSlot, shrink: 1, minSize: 0 },
 				{ component: this.#pendingQueue, shrink: 1, minSize: 0 },
 				{ component: this.#status, shrink: 1, minSize: 0 },
+				{ component: this.#notice, shrink: 1, minSize: 0 },
 				{ component: this.editor, shrink: 1, minSize: 3 },
 				{ component: this.#subagentList, shrink: 1, minSize: 0 },
 				{ component: this.#footer, shrink: 1, minSize: 1 },
@@ -421,6 +425,10 @@ export class AltRoot implements ModeView {
 
 	setStatus(text: string): void {
 		this.#status.set(text);
+	}
+
+	setNotice(notice: DockedNotice | undefined, overflow: number): void {
+		this.#notice.set(notice, overflow);
 	}
 
 	/** The mode's dedup'd report crosses to the terminal (OSC 7501 —

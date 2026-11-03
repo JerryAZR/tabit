@@ -130,7 +130,9 @@ async fn startup_degradations_are_the_workers_first_frames() {
         .expect("session");
     let mut handle = SessionHost::spawn(
         session,
-        vec!["default_model `gone` is not usable".to_string()],
+        vec![tabit_protocol::StartupNotice::preference(
+            "default_model `gone` is not usable",
+        )],
         plain_wiring(&store),
         plain_data(),
     );
@@ -148,9 +150,12 @@ async fn startup_degradations_are_the_workers_first_frames() {
         Some(SessionEvent::SessionOpened { .. })
     ));
     match frames.get(1).map(|f| &f.event) {
-        Some(SessionEvent::Error { kind, message, .. }) => {
-            assert_eq!(kind, tabit_protocol::ErrorKind::MODEL);
-            assert!(message.contains("default_model"), "{message}");
+        Some(SessionEvent::Notice {
+            id, level, text, ..
+        }) => {
+            assert_eq!(id, tabit_protocol::NoticeId::MODEL_PREFERENCE);
+            assert_eq!(*level, tabit_protocol::NoticeLevel::Warn);
+            assert!(text.contains("default_model"), "{text}");
         }
         other => panic!("the degradation must follow session_opened, got {other:?}"),
     }
@@ -162,7 +167,7 @@ async fn startup_degradations_are_the_workers_first_frames() {
     assert!(
         frames
             .iter()
-            .filter(|f| matches!(f.event, SessionEvent::Error { .. }))
+            .filter(|f| matches!(f.event, SessionEvent::Notice { .. }))
             .count()
             == 1,
         "exactly one error frame for one note"
@@ -1175,7 +1180,7 @@ async fn open_session_loads_a_stored_session_and_replays_it() {
         match frame.event {
             SessionEvent::ReplayBegin { .. } => {}
             SessionEvent::ReplayEnd => break,
-            SessionEvent::Error { message, .. } => panic!("open failed: {message}"),
+            SessionEvent::Notice { text, .. } => panic!("open failed: {text}"),
             event => pass.push(kind_of(&event)),
         }
     }
@@ -1219,14 +1224,14 @@ async fn open_session_loads_a_stored_session_and_replays_it() {
                 event,
                 SessionEvent::ReplayBegin { .. }
                     | SessionEvent::ReplayEnd
-                    | SessionEvent::Error { .. }
+                    | SessionEvent::Notice { .. }
             )
         })
         .await;
         match frame.event {
             SessionEvent::ReplayBegin { .. } => pass_two += 1,
             SessionEvent::ReplayEnd => break,
-            SessionEvent::Error { message, .. } => panic!("re-open failed: {message}"),
+            SessionEvent::Notice { text, .. } => panic!("re-open failed: {text}"),
             _ => {}
         }
     }
@@ -1278,7 +1283,9 @@ async fn open_session_emits_its_model_notes_ahead_of_the_replay() {
                 .map(|(session, _)| {
                     (
                         session,
-                        vec!["the stored model is not configured".to_string()],
+                        vec![tabit_protocol::StartupNotice::preference(
+                            "the stored model is not configured",
+                        )],
                     )
                 })
                 .map_err(|error| error.to_string())
@@ -1295,7 +1302,7 @@ async fn open_session_emits_its_model_notes_ahead_of_the_replay() {
     });
     let note = until_event(
         &mut handle,
-        |event| matches!(event, SessionEvent::Error { kind, .. } if kind == "model"),
+        |event| matches!(event, SessionEvent::Notice { id, .. } if id == tabit_protocol::NoticeId::MODEL_PREFERENCE),
     )
     .await;
     assert_eq!(
@@ -1304,7 +1311,7 @@ async fn open_session_emits_its_model_notes_ahead_of_the_replay() {
         "the note rides the opened session's stream"
     );
     assert!(
-        matches!(&note.event, SessionEvent::Error { message, .. } if message.contains("not configured")),
+        matches!(&note.event, SessionEvent::Notice { text, .. } if text.contains("not configured")),
         "the note text passes through: {:?}",
         note.event
     );
@@ -1332,7 +1339,7 @@ async fn an_unknown_session_target_is_a_backend_level_session_error() {
     });
     let error = until_event(
         &mut handle,
-        |event| matches!(event, SessionEvent::Error { kind, .. } if kind == "session"),
+        |event| matches!(event, SessionEvent::Notice { id, .. } if id == tabit_protocol::NoticeId::SESSION_COMMAND),
     )
     .await;
     assert_eq!(
@@ -1340,8 +1347,8 @@ async fn an_unknown_session_target_is_a_backend_level_session_error() {
         "routing errors are backend-level — the message names the id"
     );
     match &error.event {
-        SessionEvent::Error { message, .. } => {
-            assert!(message.contains("no-such"), "{message}");
+        SessionEvent::Notice { text, .. } => {
+            assert!(text.contains("no-such"), "{text}");
         }
         other => panic!("the routing error, got {other:?}"),
     }
@@ -1466,7 +1473,7 @@ async fn a_catalog_failure_is_the_carrier_in_place_of_the_announcement() {
 
     let catalog_error = until_event(
         &mut handle,
-        |event| matches!(event, SessionEvent::Error { kind, .. } if kind == "session"),
+        |event| matches!(event, SessionEvent::Notice { id, .. } if id == tabit_protocol::NoticeId::SESSION_COMMAND),
     )
     .await;
     assert_eq!(
@@ -1520,7 +1527,7 @@ async fn lifecycle_failures_and_notes_ride_the_carrier() {
     link.send(SessionCommand::NewSession);
     let error = until_event(
         &mut handle,
-        |event| matches!(event, SessionEvent::Error { kind, .. } if kind == "session"),
+        |event| matches!(event, SessionEvent::Notice { id, .. } if id == tabit_protocol::NoticeId::SESSION_COMMAND),
     )
     .await;
     assert_eq!(error.stream, None, "untargeted failure is backend-level");
@@ -1532,13 +1539,13 @@ async fn lifecycle_failures_and_notes_ride_the_carrier() {
     });
     let error = until_event(
         &mut handle,
-        |event| matches!(event, SessionEvent::Error { kind, .. } if kind == "session"),
+        |event| matches!(event, SessionEvent::Notice { id, .. } if id == tabit_protocol::NoticeId::SESSION_COMMAND),
     )
     .await;
     assert_eq!(error.stream, None);
     match &error.event {
-        SessionEvent::Error { message, .. } => {
-            assert!(message.contains("no-such-session"), "{message}")
+        SessionEvent::Notice { text, .. } => {
+            assert!(text.contains("no-such-session"), "{text}")
         }
         other => panic!("the open failure, got {other:?}"),
     }
@@ -1571,7 +1578,9 @@ async fn a_created_sessions_selection_notes_follow_its_stream() {
                     .map(|session| {
                         (
                             session,
-                            vec!["default_model `gone` is not usable".to_string()],
+                            vec![tabit_protocol::StartupNotice::preference(
+                                "default_model `gone` is not usable",
+                            )],
                         )
                     })
                     .map_err(|error| error.to_string())
@@ -1606,7 +1615,7 @@ async fn a_created_sessions_selection_notes_follow_its_stream() {
     );
     let note = until_event(
         &mut handle,
-        |event| matches!(event, SessionEvent::Error { kind, .. } if kind == "model"),
+        |event| matches!(event, SessionEvent::Notice { id, .. } if id == tabit_protocol::NoticeId::MODEL_PREFERENCE),
     )
     .await;
     assert_eq!(
@@ -1957,12 +1966,12 @@ async fn a_replay_request_for_a_running_session_answers_after_its_terminal() {
     );
     loop {
         let frame = until_event(&mut handle, |event| {
-            matches!(event, SessionEvent::ReplayEnd | SessionEvent::Error { .. })
+            matches!(event, SessionEvent::ReplayEnd | SessionEvent::Notice { .. })
         })
         .await;
         match frame.event {
             SessionEvent::ReplayEnd => break,
-            SessionEvent::Error { message, .. } => panic!("replay failed: {message}"),
+            SessionEvent::Notice { text, .. } => panic!("replay failed: {text}"),
             _ => {}
         }
     }
@@ -2421,7 +2430,7 @@ async fn a_bad_model_ref_errors_at_receive_and_parks_nothing() {
     collect_until(&mut handle, &mut frames, terminal).await;
     handle.model(&id, ModelSelection::new("nope", "m9"));
     collect_until(&mut handle, &mut frames, |event| {
-        matches!(event, SessionEvent::Error { .. })
+        matches!(event, SessionEvent::Notice { .. })
     })
     .await;
 
@@ -2448,14 +2457,17 @@ async fn a_bad_model_ref_errors_at_receive_and_parks_nothing() {
 
     // The error itself: model-kind, naming the bad ref.
     match frames.iter().find_map(|frame| match &frame.event {
-        SessionEvent::Error { kind, message, .. } => Some((kind, message)),
+        SessionEvent::Notice {
+            id, level, text, ..
+        } => Some((id, level, text)),
         _ => None,
     }) {
-        Some((kind, message)) => {
-            assert_eq!(*kind, tabit_protocol::ErrorKind::MODEL);
-            assert!(message.contains("nope"), "{message}");
+        Some((id, level, text)) => {
+            assert_eq!(*id, tabit_protocol::NoticeId::MODEL_COMMAND);
+            assert_eq!(*level, tabit_protocol::NoticeLevel::Warn);
+            assert!(text.contains("nope"), "{text}");
         }
-        other => panic!("expected a model-kind error, got {other:?}"),
+        other => panic!("expected a model-command notice, got {other:?}"),
     }
     std::fs::remove_dir_all(store.dir()).ok();
 }
@@ -3037,7 +3049,7 @@ async fn an_unknown_entry_checkout_is_an_error_and_a_no_op() {
     collect_until(&mut handle, &mut frames, terminal).await;
     handle.checkout(&id, "no-such-entry");
     collect_until(&mut handle, &mut frames, |e| {
-        matches!(e, SessionEvent::Error { .. })
+        matches!(e, SessionEvent::Notice { .. })
     })
     .await;
     handle.message(&id, "two");
@@ -3047,8 +3059,8 @@ async fn an_unknown_entry_checkout_is_an_error_and_a_no_op() {
     // changed nothing: no checked_out, no discard, the conversation
     // continues untouched.
     assert!(frames.iter().any(|frame| matches!(&frame.event,
-        SessionEvent::Error { kind, message, .. }
-            if kind == tabit_protocol::ErrorKind::CHECKOUT && message.contains("no-such-entry"))));
+        SessionEvent::Notice { id, text, .. }
+            if id == tabit_protocol::NoticeId::CHECKOUT && text.contains("no-such-entry"))));
     assert!(
         !frames
             .iter()
@@ -3097,8 +3109,8 @@ async fn an_unknown_checkout_during_a_run_errors_immediately() {
         .iter()
         .position(|frame| {
             matches!(&frame.event,
-            SessionEvent::Error { kind, message, .. }
-                if kind == tabit_protocol::ErrorKind::CHECKOUT && message.contains("no-such-entry"))
+            SessionEvent::Notice { id, text, .. }
+                if id == tabit_protocol::NoticeId::CHECKOUT && text.contains("no-such-entry"))
         })
         .expect("the verification error");
     let terminal_at = frames
@@ -3266,7 +3278,7 @@ async fn an_id_announced_mid_run_is_validatable_the_moment_it_is_knowable() {
                 steer_entry = Some(entry_id.clone());
                 handle.checkout(&id, entry_id.clone());
             }
-            SessionEvent::Error { kind, .. } if kind == tabit_protocol::ErrorKind::CHECKOUT => {
+            SessionEvent::Notice { id, .. } if id == tabit_protocol::NoticeId::CHECKOUT => {
                 panic!("a committed, announced id validated at receive");
             }
             SessionEvent::CheckedOut { .. } => saw_checked_out = true,
@@ -3340,7 +3352,7 @@ async fn a_checkout_targeting_a_queued_steer_misses_and_is_a_no_op() {
         .iter()
         .position(|frame| {
             matches!(&frame.event,
-            SessionEvent::Error { kind, .. } if kind == tabit_protocol::ErrorKind::CHECKOUT)
+            SessionEvent::Notice { id, .. } if id == tabit_protocol::NoticeId::CHECKOUT)
         })
         .expect("the validation miss");
     let terminal_at = frames
@@ -3574,7 +3586,7 @@ async fn a_blocked_store_blocks_starts_and_recovers() {
     // The degrade notice rides after the terminal in the stream
     // (conclude emits the terminal, then the notice) — collect it.
     collect_until(&mut handle, &mut frames, |event| {
-        matches!(event, SessionEvent::Error { .. })
+        matches!(event, SessionEvent::Notice { .. })
     })
     .await;
     assert!(
@@ -3587,8 +3599,8 @@ async fn a_blocked_store_blocks_starts_and_recovers() {
     assert!(
         frames.iter().any(|frame| matches!(
             &frame.event,
-            SessionEvent::Error { kind, .. }
-                if kind == tabit_protocol::ErrorKind::PERSIST_DEGRADED
+            SessionEvent::Notice { id, level, .. }
+                if id == tabit_protocol::NoticeId::PERSIST_DEGRADED && *level == tabit_protocol::NoticeLevel::Error
         )),
         "the commit's failed write announced the degrade"
     );
@@ -3618,8 +3630,8 @@ async fn a_blocked_store_blocks_starts_and_recovers() {
     assert!(
         frames.iter().any(|frame| matches!(
             &frame.event,
-            SessionEvent::Error { kind, .. }
-                if kind == tabit_protocol::ErrorKind::PERSIST_RECOVERED
+            SessionEvent::NoticeCleared { id }
+                if id == tabit_protocol::NoticeId::PERSIST_DEGRADED
         )),
         "the drain's success was announced"
     );
@@ -4089,7 +4101,11 @@ async fn the_stream_is_live_from_the_mount_in_arrival_order() {
             stream: None,
             origin: None,
             ttl: None,
-            event: crate::SessionEvent::error_session("the early extension speaks".to_string()),
+            event: crate::SessionEvent::notice_transient(
+                tabit_protocol::NoticeId::SESSION_COMMAND,
+                tabit_protocol::NoticeLevel::Warn,
+                "the early extension speaks".to_string(),
+            ),
         },
     );
 
@@ -4102,7 +4118,7 @@ async fn the_stream_is_live_from_the_mount_in_arrival_order() {
         // (the model/provider catalogs are the v21/v22 unconditional
         // boot emissions)
         vec![
-            "error",
+            "notice",
             "session_opened",
             "sessions_available",
             "models_available",
@@ -4873,7 +4889,9 @@ async fn a_selection_less_boot_announces_null_and_fails_runs_at_open() {
     let session = selectionless_session(store.clone(), "");
     let mut handle = SessionHost::spawn(
         session,
-        vec!["no usable model at this backend — create ~/.tabit/providers.toml".to_string()],
+        vec![tabit_protocol::StartupNotice::model_unusable(
+            "no models available — create ~/.tabit/providers.toml",
+        )],
         plain_wiring(&store),
         plain_data(),
     );
@@ -4891,11 +4909,14 @@ async fn a_selection_less_boot_announces_null_and_fails_runs_at_open() {
         other => panic!("session_opened first, got {other:?}"),
     }
     match frames.get(1).map(|f| &f.event) {
-        Some(SessionEvent::Error { kind, message, .. }) => {
-            assert_eq!(kind, tabit_protocol::ErrorKind::MODEL);
-            assert!(message.contains("no usable model"), "{message}");
+        Some(SessionEvent::Notice {
+            id, level, text, ..
+        }) => {
+            assert_eq!(id, tabit_protocol::NoticeId::MODEL_UNUSABLE);
+            assert_eq!(*level, tabit_protocol::NoticeLevel::Error);
+            assert!(text.contains("no models available"), "{text}");
         }
-        other => panic!("the teaching note follows session_opened, got {other:?}"),
+        other => panic!("the zero-config notice follows session_opened, got {other:?}"),
     }
     assert!(
         !frames
@@ -4967,8 +4988,8 @@ id = "m"
     let frames = drain(&mut handle).await;
     assert!(
         frames.iter().any(|f| matches!(&f.event,
-            SessionEvent::Error { kind, message, .. }
-                if kind == tabit_protocol::ErrorKind::MODEL && message.contains("ghost"))),
+            SessionEvent::Notice { id, text, .. }
+                if id == tabit_protocol::NoticeId::MODEL_COMMAND && text.contains("ghost"))),
         "the unknown ref is the immediate model error"
     );
     let failure = frames
@@ -5114,7 +5135,7 @@ async fn login_stores_the_key_and_re_announces_the_catalog() {
     // No auth-kind error anywhere.
     assert!(
         !frames.iter().any(
-            |frame| matches!(&frame.event, SessionEvent::Error { kind, .. } if kind == "auth")
+            |frame| matches!(&frame.event, SessionEvent::Notice { id, .. } if id == tabit_protocol::NoticeId::AUTH_FAILED)
         ),
         "no auth error"
     );
@@ -5155,7 +5176,11 @@ async fn login_to_an_unknown_provider_errors_auth_and_changes_nothing() {
     let errors: Vec<&str> = frames
         .iter()
         .filter_map(|frame| match &frame.event {
-            SessionEvent::Error { kind, message, .. } if kind == "auth" => Some(message.as_str()),
+            SessionEvent::Notice { id, text, .. }
+                if id == tabit_protocol::NoticeId::AUTH_FAILED =>
+            {
+                Some(text.as_str())
+            }
             _ => None,
         })
         .collect();
@@ -5165,7 +5190,7 @@ async fn login_to_an_unknown_provider_errors_auth_and_changes_nothing() {
     // follows a failed login, and nothing was written.
     let auth_error = frames
         .iter()
-        .find(|frame| matches!(&frame.event, SessionEvent::Error { kind, .. } if kind == "auth"))
+        .find(|frame| matches!(&frame.event, SessionEvent::Notice { id, .. } if id == tabit_protocol::NoticeId::AUTH_FAILED))
         .expect("the auth error");
     assert_eq!(auth_error.stream, None, "backend-level");
     let (models, providers) = catalogs(&frames);
@@ -5238,7 +5263,7 @@ async fn logout_drops_the_provider_to_none_and_is_idempotent() {
     );
     assert!(
         !frames.iter().any(
-            |frame| matches!(&frame.event, SessionEvent::Error { kind, .. } if kind == "auth")
+            |frame| matches!(&frame.event, SessionEvent::Notice { id, .. } if id == tabit_protocol::NoticeId::AUTH_FAILED)
         ),
         "no auth error — logout is total"
     );
@@ -5399,7 +5424,11 @@ async fn a_login_without_a_resolvable_auth_path_errors_auth() {
     let errors: Vec<&str> = frames
         .iter()
         .filter_map(|frame| match &frame.event {
-            SessionEvent::Error { kind, message, .. } if kind == "auth" => Some(message.as_str()),
+            SessionEvent::Notice { id, text, .. }
+                if id == tabit_protocol::NoticeId::AUTH_FAILED =>
+            {
+                Some(text.as_str())
+            }
             _ => None,
         })
         .collect();
@@ -5482,7 +5511,7 @@ id = "m"
     );
     assert!(
         !frames.iter().any(
-            |frame| matches!(&frame.event, SessionEvent::Error { kind, .. } if kind == "auth")
+            |frame| matches!(&frame.event, SessionEvent::Notice { id, .. } if id == tabit_protocol::NoticeId::AUTH_FAILED)
         ),
         "logout is total"
     );
@@ -5517,7 +5546,11 @@ async fn login_with_an_empty_key_errors_auth_and_writes_nothing() {
     let errors: Vec<&str> = frames
         .iter()
         .filter_map(|frame| match &frame.event {
-            SessionEvent::Error { kind, message, .. } if kind == "auth" => Some(message.as_str()),
+            SessionEvent::Notice { id, text, .. }
+                if id == tabit_protocol::NoticeId::AUTH_FAILED =>
+            {
+                Some(text.as_str())
+            }
             _ => None,
         })
         .collect();
@@ -5737,7 +5770,7 @@ async fn a_logout_before_attach_parks_and_serves_at_attach() {
     );
     assert!(
         !frames.iter().any(
-            |frame| matches!(&frame.event, SessionEvent::Error { kind, .. } if kind == "auth")
+            |frame| matches!(&frame.event, SessionEvent::Notice { id, .. } if id == tabit_protocol::NoticeId::AUTH_FAILED)
         ),
         "a no-op logout is no error — logout is total"
     );
@@ -5773,7 +5806,11 @@ async fn a_login_whose_auth_write_fails_errors_auth() {
     let errors: Vec<&str> = frames
         .iter()
         .filter_map(|frame| match &frame.event {
-            SessionEvent::Error { kind, message, .. } if kind == "auth" => Some(message.as_str()),
+            SessionEvent::Notice { id, text, .. }
+                if id == tabit_protocol::NoticeId::AUTH_FAILED =>
+            {
+                Some(text.as_str())
+            }
             _ => None,
         })
         .collect();
@@ -5805,7 +5842,11 @@ async fn a_logout_without_a_resolvable_auth_path_errors_auth() {
     let errors: Vec<&str> = frames
         .iter()
         .filter_map(|frame| match &frame.event {
-            SessionEvent::Error { kind, message, .. } if kind == "auth" => Some(message.as_str()),
+            SessionEvent::Notice { id, text, .. }
+                if id == tabit_protocol::NoticeId::AUTH_FAILED =>
+            {
+                Some(text.as_str())
+            }
             _ => None,
         })
         .collect();
@@ -5846,7 +5887,11 @@ async fn a_logout_whose_auth_file_is_malformed_errors_auth() {
     let errors: Vec<&str> = frames
         .iter()
         .filter_map(|frame| match &frame.event {
-            SessionEvent::Error { kind, message, .. } if kind == "auth" => Some(message.as_str()),
+            SessionEvent::Notice { id, text, .. }
+                if id == tabit_protocol::NoticeId::AUTH_FAILED =>
+            {
+                Some(text.as_str())
+            }
             _ => None,
         })
         .collect();

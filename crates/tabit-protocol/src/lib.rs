@@ -36,8 +36,8 @@ mod usage;
 pub use events::tags;
 pub use events::{
     AvailableExtension, AvailableExtensionTool, AvailableSession, AvailableSkill, DiscardedMessage,
-    ErrorKind, ExtensionConflict, ExtensionConflictKind, ExtensionsCatalog, RunFailedKind,
-    SessionEvent, ToolResultStatus,
+    ExtensionConflict, ExtensionConflictKind, ExtensionsCatalog, NoticeId, NoticeLevel,
+    RunFailedKind, SessionEvent, StartupNotice, ToolResultStatus,
 };
 pub use model::{
     AvailableModel, AvailableProvider, CatalogChannelStatus, CatalogState, Cost, ModelFacts,

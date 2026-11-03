@@ -212,13 +212,13 @@ impl ModelRegistry {
     /// install is normal, the session boots selection-less, and the
     /// run-open failure is the carrier. The notes are data — the
     /// session worker surfaces them to the frontend as
-    /// `error { kind: model }` frames (stderr printing at construction
+    /// `notice` frames (stderr printing at construction
     /// is ruled out: events are the only thing a frontend can see).
     pub fn default_selection(
         &self,
         explicit: Option<ModelSelection>,
         resumed: Option<ModelSelection>,
-    ) -> Result<(Option<ModelSelection>, Vec<String>), SessionError> {
+    ) -> Result<(Option<ModelSelection>, Vec<tabit_protocol::StartupNotice>), SessionError> {
         let mut notes = Vec::new();
         if let Some(explicit) = explicit {
             validate_selection(&explicit, &self.inner.config)?;
@@ -232,11 +232,11 @@ impl ModelRegistry {
         if let Some(resumed) = resumed {
             match self.preference_error(&resumed) {
                 None => return Ok((Some(resumed), notes)),
-                Some(error) => notes.push(format!(
+                Some(error) => notes.push(tabit_protocol::StartupNotice::preference(format!(
                     "the resumed session's model `{}/{}` is not usable ({}); \
                      the default selection resolves without it",
                     resumed.provider, resumed.model, error
-                )),
+                ))),
             }
         }
         // `default_model` is a preference, not a hard reference: a
@@ -248,16 +248,16 @@ impl ModelRegistry {
                 Ok(selection) if self.usable(&selection.provider) => {
                     return Ok((Some(selection), notes));
                 }
-                Ok(_) => notes.push(format!(
+                Ok(_) => notes.push(tabit_protocol::StartupNotice::preference(format!(
                     "default_model `{}` is not usable (its provider has no key and \
                      is not declared keyless); the default selection falls through it",
                     default.model
-                )),
-                Err(message) => notes.push(format!(
+                ))),
+                Err(message) => notes.push(tabit_protocol::StartupNotice::preference(format!(
                     "default_model `{}` is not usable ({message}); the default selection \
                      falls through it",
                     default.model
-                )),
+                ))),
             }
         }
         match self.first_usable_model() {
@@ -270,21 +270,26 @@ impl ModelRegistry {
             // providers.toml and a restart; `auth: "none"` entries
             // are exactly `login`'s targets, in-app.
             None => {
-                notes.push(if self.inner.config.providers.is_empty() {
-                    "no usable model at this backend — there is no providers.toml at all, \
-                     which is the normal fresh-install state. Create ~/.tabit/providers.toml \
-                     with a provider (a key via ~/.tabit/auth.toml or the provider's \
-                     `api_key_env`; declare local servers `keyless = true`) and restart the \
-                     backend; the session runs selection-less until then"
-                        .to_string()
+                // One line: what happened plus the fix actions — never
+                // behind-the-scenes mechanics (the frontend's persistent
+                // notice carries the state; print mode needs the line).
+                let text = if self.inner.config.providers.is_empty() {
+                    // Empty despite the catalog channel: the channel
+                    // is off, mid-first-download, or failed — name
+                    // which (the registry is stamped with the boot's
+                    // CatalogStatus).
+                    match &self.inner.catalog_status {
+                        CatalogStatus::Pending => "no models available yet — the catalog's first download is still in flight and applies next boot; to go now, create ~/.tabit/providers.toml and restart"
+                            .to_string(),
+                        CatalogStatus::Disabled => "no models available — no providers.toml, and the catalog channel is off; create ~/.tabit/providers.toml or re-enable it (`catalog.auto_update`), and restart"
+                            .to_string(),
+                        _ => "no models available — no providers.toml and no usable catalog cache; create ~/.tabit/providers.toml and restart"
+                            .to_string(),
+                    }
                 } else {
-                    "no usable model at this backend — every configured provider lacks a key. \
-                     Add one with the `login` command (it writes ~/.tabit/auth.toml and \
-                     refreshes the world — no restart), set the provider's `api_key_env`, or \
-                     declare local servers `keyless = true`; the session runs selection-less \
-                     until then, and a `model` command can name any configured ref at any time"
-                        .to_string()
-                });
+                    "no models available — /login connects a provider".to_string()
+                };
+                notes.push(tabit_protocol::StartupNotice::model_unusable(text));
                 Ok((None, notes))
             }
         }

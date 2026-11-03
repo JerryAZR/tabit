@@ -1193,7 +1193,7 @@ fn the_shared_grammar_crosses_the_json_edge_end_to_end() {
         &mut backend,
         "the mirrored session_opened echoed back",
         |frame| {
-            matches!(&frame.event, SessionEvent::Error { message, .. } if message
+            matches!(&frame.event, SessionEvent::Notice { text, .. } if text
                 .contains("session_opened"))
                 && frame.origin.as_deref() == Some("grammar-ext")
         },
@@ -1217,9 +1217,9 @@ fn the_shared_grammar_crosses_the_json_edge_end_to_end() {
         &mut backend,
         "the routed answer echoed back from the extension",
         |frame| {
-            matches!(&frame.event, SessionEvent::Error { message, .. } if message
+            matches!(&frame.event, SessionEvent::Notice { text, .. } if text
                 .contains("interaction_response")
-                && message.contains("go ahead from the frontend"))
+                && text.contains("go ahead from the frontend"))
                 && frame.origin.as_deref() == Some("grammar-ext")
         },
     );

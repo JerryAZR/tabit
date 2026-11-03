@@ -20,7 +20,11 @@ fn main() {
         stream: Some(StreamId::new("stub-sess")),
         origin: None,
         ttl: None,
-        event: SessionEvent::error_session("the burst event".to_string()),
+        event: SessionEvent::notice_transient(
+            "session.command",
+            tabit_protocol::NoticeLevel::Warn,
+            "the burst event".to_string(),
+        ),
     }));
     // ONE write: the parent's reader gets both lines in one buffer.
     let stdout = std::io::stdout();

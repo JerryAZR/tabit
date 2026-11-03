@@ -20,7 +20,7 @@ use tabit_app::{
 };
 use tabit_config::{AuthConfig, TabitConfig};
 use tabit_protocol::SessionCommand;
-use tabit_session::{Session, SessionEvent, SessionHost, SessionHostWiring, SessionStore};
+use tabit_session::{SessionEvent, SessionHost, SessionHostWiring, SessionStore};
 
 const PROVIDERS: &str = r#"
 default_model = "p/m"
@@ -57,7 +57,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mounted = mount_world(boot.take_launchable(), &runtime);
     let registry = build_registry(boot, &runtime);
     let store = SessionStore::project_default();
-    let (session, notes): (Session, Vec<String>) = assemble(
+    let (session, notes) = assemble(
         &options,
         &registry,
         &store,

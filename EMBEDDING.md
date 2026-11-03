@@ -55,7 +55,7 @@ runnable.
   thread blocks for the write's duration — deliberate, invisible at
   this scale). A failed flush is not fatal: the entries stay pending
   in memory, every later commit retries them, and
-  `persist_degraded`/`persist_recovered` notices report the state —
+  `persist.degraded` notices and their clears report the state —
   only a force-stop while degraded loses the pending entries.
 
 ## Tier 2 — the session host, streaming

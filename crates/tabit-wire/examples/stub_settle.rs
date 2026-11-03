@@ -36,7 +36,11 @@ fn stamped(event: SessionEvent) -> String {
 }
 
 fn step(text: &str, index: u8) -> SessionEvent {
-    SessionEvent::error_session(format!("step {index} of {text}"))
+    SessionEvent::notice_transient(
+        "session.command",
+        tabit_protocol::NoticeLevel::Warn,
+        format!("step {index} of {text}"),
+    )
 }
 
 fn terminal(task: &str) -> SessionEvent {
@@ -61,7 +65,11 @@ fn main() {
     let report = wire(&ServerFrame::Control(ServerControlFrame::Report {
         protocol_version: PROTOCOL_VERSION,
     }));
-    let announce = stamped(SessionEvent::error_session("the announce".to_string()));
+    let announce = stamped(SessionEvent::notice_transient(
+        "session.command",
+        tabit_protocol::NoticeLevel::Warn,
+        "the announce".to_string(),
+    ));
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
     let _ = writeln!(out, "{report}");
@@ -104,7 +112,11 @@ fn main() {
                 stream: Some(StreamId::new("stub-grand-sess")),
                 origin: None,
                 ttl: None,
-                event: SessionEvent::error_session("grandchild speech"),
+                event: SessionEvent::notice_transient(
+                    "session.command",
+                    tabit_protocol::NoticeLevel::Warn,
+                    "grandchild speech",
+                ),
             }));
             let _ = writeln!(out, "{relayed}");
         }

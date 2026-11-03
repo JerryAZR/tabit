@@ -38,8 +38,8 @@ Everything in TUI-RESEARCH §9 transfers except the presentation root:
   deltas coalesce (~33 ms); unknown frames are logged, never swallowed.
 - **What replaces the Composer**: `root.ts` builds `TuiAltScreen` with a
   layout root — transcript `ScrollView` (follow-end, chained overscroll,
-  scrollbar) over a dock `VStack` (card slot, pending queue, status, editor,
-  footer). No `TerminalFrameProvider`, no `HistoryBatch`, no block-retirement
+  scrollbar) over a dock `VStack` (card slot, pending queue, status,
+  notice line, editor, subagent list, footer). No `TerminalFrameProvider`, no `HistoryBatch`, no block-retirement
   machine: the ScrollView document holds blocks for the whole session, and
   native scrollback is untouched while the TUI lives. On exit the session
   lives in the tabit log; a respawn replays it.

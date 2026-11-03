@@ -157,6 +157,12 @@ class RecordingView implements ModeView {
 	setStatus(text: string): void {
 		this.status = text;
 	}
+	/** The dock's live notices — every push in order (undefined = the
+	 *  row cleared). An array, like every recorder here. */
+	notices: Array<{ notice: { level: string; text: string } | undefined; overflow: number }> = [];
+	setNotice(notice: { level: "info" | "warn" | "error"; text: string } | undefined, overflow: number): void {
+		this.notices.push({ notice, overflow });
+	}
 	setFooter(facts: FooterFacts): void {
 		this.footer = facts;
 	}
@@ -918,7 +924,7 @@ describe("InteractiveMode", () => {
 		// carrying the reason, then a nonzero exit — display the reason.
 		// (feed's default stamp would make it session traffic; handleFrame
 		// directly to keep it backend-level.)
-		mode.handleFrame({ kind: "event", stream: undefined, event: { type: "error", kind: "session", message: "no config — see the setup guide" } });
+		mode.handleFrame({ kind: "event", stream: undefined, event: { type: "notice", id: "startup", level: "error", text: "no config — see the setup guide" } });
 		assert.strictEqual(reason, "no config — see the setup guide");
 
 		// Once the boot session is open, the same kind is an ordinary
@@ -926,9 +932,12 @@ describe("InteractiveMode", () => {
 		// note, never a death.
 		boot(control, feed);
 		reason = "";
-		mode.handleFrame({ kind: "event", stream: undefined, event: { type: "error", kind: "session", message: "no such session" } });
+		mode.handleFrame({ kind: "event", stream: undefined, event: { type: "notice", id: "session.command", level: "warn", text: "no such session" } });
 		assert.strictEqual(reason, "");
-		assert.strictEqual(view.notes.some(n => n.kind === "error" && n.text.includes("no such session")), true);
+		// A backend-level notice post-boot docks (a transient warn), never
+		// a transcript print, never a death.
+		assert.strictEqual(view.notices.at(-1)?.notice?.text, "no such session");
+		assert.ok(view.notes.every(n => !n.text.includes("no such session")));
 	});
 
 	test("a report naming any other protocol version is fatal, never limped on", () => {
@@ -979,9 +988,10 @@ describe("InteractiveMode", () => {
 		assert.strictEqual(view.footer?.inputTokens, 0);
 	});
 
-	test("the model/provider catalogs (v21+v22): last-wins folds, the setup predicate warns with the branched fix", () => {
+	test("the model/provider catalogs (v21+v22): last-wins folds, no transcript noise", () => {
 		const { view, mode, feed, control } = harness();
 		boot(control, feed);
+		const quiet = view.notes.length;
 		feed({
 			type: "models_available",
 			providers: [
@@ -1001,58 +1011,77 @@ describe("InteractiveMode", () => {
 		assert.strictEqual(mode.modelsCatalog.length, 2);
 		assert.strictEqual(mode.modelsCatalog[0]!.id, "anthropic");
 		assert.deepStrictEqual(mode.providerStatuses.map(p => `${p.id}:${p.auth}`), ["anthropic:stored", "local:keyless", "openai:none"]);
-		assert.ok(view.notes.some(n => n.text.includes("no key for: openai")));
+		// A partially-keyed world prints nothing: auth: "none" is the
+		// DEFAULT state of a catalog provider — the /login card shows it
+		// on demand, the transcript stays quiet.
+		assert.strictEqual(view.notes.length, quiet);
 
 		// Re-announcement replaces wholesale (login landed elsewhere).
 		feed({ type: "models_available", providers: [{ id: "openai", models: [{ id: "gpt", reasoning: false, input: ["text"], thinking_levels: [] }] }] });
 		feed({ type: "providers_available", providers: [{ id: "openai", auth: "stored" }], catalog: { state: "fresh" } });
 		assert.deepStrictEqual(mode.modelsCatalog.map(p => p.id), ["openai"]);
 		assert.strictEqual(mode.providerStatuses.length, 1);
-
-		// Empty catalog + key-less providers: config exists, nothing
-		// usable — login fixes in-app.
-		feed({ type: "models_available", providers: [] });
-		feed({ type: "providers_available", providers: [{ id: "openai", auth: "none" }], catalog: { state: "offline" } });
-		assert.ok(view.notes.some(n => n.kind === "warn" && n.text.includes("catalog check failed")));
-		assert.strictEqual(view.notes.at(-1)?.kind, "warn");
-		assert.ok((view.notes.at(-1)?.text ?? "").includes("missing keys for: openai"));
-
-		// No providers at all: no config — the restart path.
-		feed({ type: "models_available", providers: [] });
-		feed({ type: "providers_available", providers: [], catalog: { state: "disabled" } });
-		assert.ok((view.notes.at(-1)?.text ?? "").includes("providers.toml"));
+		assert.strictEqual(view.notes.length, quiet);
 	});
 
-	test("the catalog channel (v26): the checking frame notes; notable states speak, quiet ones don't", () => {
+	test("the notice model (v27): errors pin until cleared, transients age on the turn clock, the transcript never carries them", () => {
 		const { view, feed, control } = harness();
 		boot(control, feed);
-
-		// The transient control frame exists to be shown.
-		control({ type: "catalog_status", state: "checking" });
-		assert.ok(view.notes.some(n => n.text.includes("checking the model catalog")));
-
 		const quiet = view.notes.length;
-		feed({ type: "providers_available", providers: [], catalog: { state: "disabled" } });
-		feed({ type: "providers_available", providers: [], catalog: { state: "cached" } });
-		feed({ type: "providers_available", providers: [], catalog: { state: "fresh" } });
-		assert.strictEqual(view.notes.length, quiet + 3); // only the empty-world warnings
 
-		feed({ type: "providers_available", providers: [], catalog: { state: "updated", version: "2026.10" } });
-		assert.ok(view.notes.some(n => n.text === "model catalog updated (v2026.10)"));
-		feed({ type: "providers_available", providers: [], catalog: { state: "pending" } });
-		assert.ok(view.notes.some(n => n.text.includes("continues in background")));
+		// The zero-config condition: an error-level notice pins — no
+		// transcript print, no derivation, the backend's id is the signal.
+		feed({ type: "notice", id: "model.unusable", level: "error", text: "no usable model — run `login`" });
+		assert.strictEqual(view.notices.at(-1)?.notice?.text, "no usable model — run `login`");
+		assert.strictEqual(view.notes.length, quiet);
+
+		// Turns pass: a pinned condition does not age.
+		feed({ type: "turn_committed", id: "t1", completed_at_ms: 1 });
+		feed({ type: "turn_committed", id: "t2", completed_at_ms: 2 });
+		feed({ type: "turn_committed", id: "t3", completed_at_ms: 3 });
+		assert.strictEqual(view.notices.at(-1)?.notice?.text, "no usable model — run `login`", "pinned through turns");
+
+		// A transient rides alongside and ages out after TRANSIENT_TURNS
+		// completed turns; the pinned condition stays.
+		feed({ type: "notice", id: "model.preference", level: "warn", text: "default_model fell through" });
+		assert.strictEqual(view.notices.at(-1)?.notice?.level, "error", "the error outranks the warn");
+		assert.strictEqual(view.notices.at(-1)?.overflow, 1, "the transient counts as overflow");
+		feed({ type: "turn_committed", id: "t4", completed_at_ms: 4 });
+		assert.strictEqual(view.notices.at(-1)?.overflow, 1, "one turn is not enough");
+		feed({ type: "turn_committed", id: "t5", completed_at_ms: 5 });
+		assert.strictEqual(view.notices.at(-1)?.overflow, 0, "the transient aged out");
+		assert.strictEqual(view.notices.at(-1)?.notice?.text, "no usable model — run `login`");
+
+		// The clear arrives (the login's world refresh): the row empties.
+		feed({ type: "notice_cleared", id: "model.unusable" });
+		assert.strictEqual(view.notices.at(-1)?.notice, undefined);
+		assert.strictEqual(view.notes.length, quiet, "the whole lifecycle printed nothing");
 	});
 
-	test("the zero-config boot (v21/v24): no model_selected at creation, the teaching note warns", () => {
+	test("a backend-level condition clears by bare id, regardless of the focused root", () => {
+		const { view, mode, feed, control } = harness();
+		boot(control, feed);
+		// A failed login pins a backend-level condition (unstamped).
+		mode.handleFrame({ kind: "event", stream: undefined, event: { type: "notice", id: "auth.failed", level: "error", text: "unknown provider" } });
+		assert.strictEqual(view.notices.at(-1)?.notice?.text, "unknown provider");
+		// A second root session opens and takes the focus — the pinned
+		// condition must not re-key onto it.
+		feed({ type: "session_opened", id: CHILD, path: "", cwd: "", resumed: false }, CHILD);
+		// The successful login's clear is unstamped, like the pin: it
+		// reaches the condition even though the root moved.
+		mode.handleFrame({ kind: "event", stream: undefined, event: { type: "notice_cleared", id: "auth.failed" } });
+		assert.strictEqual(view.notices.at(-1)?.notice, undefined, "the clear met the pin");
+	});
+
+	test("the zero-config boot (v21/v24): no model_selected at creation; the teaching note is a pinned dock notice", () => {
 		const { view, feed, control } = harness();
 		control({ type: "report", protocol_version: PROTOCOL_VERSION });
 		feed({ type: "session_opened", id: SESSION, path: "", cwd: "", resumed: false });
 		assert.strictEqual(view.footer?.model, undefined);
-		assert.strictEqual(view.footer?.modelName, undefined);
-		// The boot's teaching note rides error { kind: model } — a warning,
-		// not an error (§6: the session runs selection-less).
-		feed({ type: "error", kind: "model", message: "no usable model — log in or configure one" });
-		assert.strictEqual(view.notes.at(-1)?.kind, "warn");
+		// The teaching note rides the announce act as a pinned notice.
+		feed({ type: "notice", id: "model.unusable", level: "error", text: "no usable model — log in or configure one" });
+		assert.ok(view.notices.at(-1)?.notice?.text.includes("no usable model"));
+		assert.ok(view.notes.every(n => !n.text.includes("no usable model")), "never a transcript print");
 		// A selection-less run fails at open as run_failed, still an error.
 		feed({ type: "user_message", entry_id: "e1", text: "hi" });
 		feed({ type: "run_failed", kind: "model", message: "no model selected", started_at_ms: 1, completed_at_ms: 2 });
@@ -1061,6 +1090,34 @@ describe("InteractiveMode", () => {
 		feed({ type: "model_selected", provider: "p", model: "m1", thinking_level: null, context_window: 1000 });
 		assert.strictEqual(view.footer?.model, "m1");
 		assert.strictEqual(view.footer?.contextWindow, 1000);
+	});
+
+	test("the catalog channel (v26): checking rides the strip, offline rides the footer facts, the rest is quiet", () => {
+		const { view, feed, control } = harness();
+		boot(control, feed);
+
+		// The transient control frame is the strip's, never a print's.
+		const quiet = view.notes.length;
+		control({ type: "catalog_status", state: "checking" });
+		assert.strictEqual(view.status, "checking the model catalog…");
+		assert.strictEqual(view.notes.length, quiet);
+
+		// The resolved state lands with providers_available: the strip
+		// releases (idle — the check is over), quiet states stay quiet.
+		feed({ type: "models_available", providers: [] });
+		feed({ type: "providers_available", providers: [], catalog: { state: "disabled" } });
+		assert.strictEqual(view.status, "idle");
+		feed({ type: "providers_available", providers: [], catalog: { state: "cached" } });
+		feed({ type: "providers_available", providers: [], catalog: { state: "fresh" } });
+		feed({ type: "providers_available", providers: [], catalog: { state: "updated", version: "2026.10" } });
+		assert.strictEqual(view.notes.length, quiet);
+		assert.strictEqual(view.footer?.catalog?.state, "updated");
+
+		// Offline: the footer facts carry it (the badge's input) — no
+		// print.
+		feed({ type: "providers_available", providers: [], catalog: { state: "offline" } });
+		assert.strictEqual(view.footer?.catalog?.state, "offline");
+		assert.strictEqual(view.notes.length, quiet);
 	});
 
 	test("the session tree: chain events feed it, checkout moves the head and rides the wire, /tree dispatches", () => {

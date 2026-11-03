@@ -708,7 +708,9 @@ id = "m"
         let session = test_session("degraded-startup", vec![script("hello")]);
         let handle = SessionHost::spawn(
             session,
-            vec!["the resumed session's model `gone/m` is not usable".to_string()],
+            vec![tabit_protocol::StartupNotice::preference(
+                "the resumed session's model `gone/m` is not usable",
+            )],
             test_wiring(&test_dir("degraded-startup")),
             test_data(unusable_create()),
         );
@@ -755,9 +757,9 @@ id = "m"
                     frame,
                     ServerFrame::Event(EventFrame {
                         origin: None,
-                        event: crate::SessionEvent::Error { kind, .. },
+                        event: crate::SessionEvent::Notice { id, .. },
                         ..
-                    }) if kind == "model"
+                    }) if id == tabit_protocol::NoticeId::MODEL_PREFERENCE
                 )
             })
             .expect("the degradation frame");
@@ -1645,14 +1647,16 @@ id = "m"
             vec![script("fine")],
             |lines| {
                 lines.iter().any(|l| l.contains("run_finished"))
-                    && lines.iter().any(|l| l.contains("\"kind\":\"session\""))
+                    && lines
+                        .iter()
+                        .any(|l| l.contains("\"id\":\"session.command\""))
             },
         )
         .await;
         assert_eq!(code, 0);
         let error_line = lines
             .iter()
-            .find(|l| l.contains("\"kind\":\"session\""))
+            .find(|l| l.contains("\"id\":\"session.command\""))
             .expect("the session error");
         // Routing errors are backend-level (the optional-stream
         // ruling): no faked stamp; the message names the id.

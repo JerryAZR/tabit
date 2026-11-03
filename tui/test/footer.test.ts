@@ -30,6 +30,7 @@ const facts = (over: Partial<FooterFacts> = {}): FooterFacts => ({
 	rates: undefined,
 	running: false,
 	closed: false,
+	catalog: undefined,
 	...over,
 });
 
@@ -118,13 +119,27 @@ describe("footer badges", () => {
 		assert.strictEqual(renderOne(state, { running: false }), "idle");
 		assert.strictEqual(renderOne(state, { closed: true, running: false }), "closed");
 	});
+
+	test("catalog: silent while the channel is healthy or self-resolving, speaks for offline", () => {
+		const catalog = badge("catalog");
+		for (const state of ["disabled", "cached", "fresh", "updated", "pending"] as const) {
+			assert.strictEqual(renderOne(catalog, { catalog: { state } }), undefined, state);
+		}
+		assert.strictEqual(renderOne(catalog, { catalog: undefined }), undefined);
+		const offline = renderOne(catalog, { catalog: { state: "offline", version: "2026.10" } });
+		assert.ok(offline?.includes("using cache"), offline);
+		// Offline on a bare machine names the missing cache, never
+		// claims one (the fresh-install case).
+		const bare = renderOne(catalog, { catalog: { state: "offline" } });
+		assert.ok(bare?.includes("no cache"), bare);
+	});
 });
 
 describe("footer registry and container", () => {
 	test("the registry is the display order; ids are unique", () => {
 		assert.deepStrictEqual(
 			FOOTER_BADGES.map(f => f({ requestRender: () => {} }).id),
-			["stream", "model", "context", "cost", "usage", "state"],
+			["stream", "model", "catalog", "context", "cost", "usage", "state"],
 		);
 	});
 

@@ -93,9 +93,9 @@ fn default_selection_stale_resumed_degrades_with_a_note() {
     assert_eq!(selection.model, "m", "the first configured model");
     assert_eq!(notes.len(), 1, "the degradation is reported");
     assert!(
-        notes[0].contains("resumed session's model `gone/m`"),
+        notes[0].text.contains("resumed session's model `gone/m`"),
         "the note names the unusable selection: {}",
-        notes[0]
+        notes[0].text
     );
 }
 
@@ -112,8 +112,8 @@ fn a_resumed_selection_whose_provider_has_no_key_degrades_with_a_note() {
     assert_eq!(selection, None, "nothing usable at this registry");
     assert!(
         notes.iter().any(|note| {
-            note.contains("resumed session's model `local/m`")
-                && note.contains("has no key and is not declared keyless")
+            note.text.contains("resumed session's model `local/m`")
+                && note.text.contains("has no key and is not declared keyless")
         }),
         "the note names the selection and the reason: {notes:?}"
     );
@@ -163,7 +163,11 @@ fn a_keyless_declaration_is_the_usability_flag() {
         // a startup error.
         Ok((None, notes)) => {
             assert_eq!(notes.len(), 1, "the teaching note rides: {notes:?}");
-            assert!(notes[0].contains("no usable model"), "{}", notes[0]);
+            assert!(
+                notes[0].text.contains("no models available"),
+                "{}",
+                notes[0].text
+            );
         }
         other => panic!("expected the selection-less degradation, got {other:?}"),
     }
@@ -217,7 +221,7 @@ api_key = "k"
         .expect("usable exists");
     assert_eq!(selection, Some(ModelSelection::new("remote", "remote-m")));
     assert_eq!(notes.len(), 1, "the degradation is noted: {notes:?}");
-    assert!(notes[0].contains("not usable"), "{notes:?}");
+    assert!(notes[0].text.contains("not usable"), "{notes:?}");
 }
 
 #[test]
@@ -236,8 +240,71 @@ fn default_selection_falls_back_to_first_model_then_degrades() {
         .expect("nothing usable degrades, never errors");
     assert_eq!(selection, None, "the selection-less boot");
     assert_eq!(notes.len(), 1, "the teaching note rides");
-    assert!(notes[0].contains("no usable model"), "{}", notes[0]);
-    assert!(notes[0].contains("providers.toml"), "{}", notes[0]);
+    assert!(
+        notes[0].text.contains("no models available"),
+        "{}",
+        notes[0].text
+    );
+    assert!(
+        notes[0].text.contains("providers.toml"),
+        "{}",
+        notes[0].text
+    );
+}
+
+#[test]
+fn the_teaching_note_names_what_the_catalog_channel_did() {
+    // The empty-providers teaching note branches on the boot's
+    // CatalogStatus: a bare machine WITH the channel downloads
+    // providers at boot, so "nothing configured" must name why the
+    // channel contributed nothing — never the stale "no
+    // providers.toml is the normal fresh-install state".
+    let with_status = |status: CatalogStatus| {
+        ModelRegistry::new_with_catalog_status(
+            Arc::new(TabitConfig::from_toml_str("", Path::new("providers.toml")).expect("config")),
+            Arc::new(AuthConfig::default()),
+            status,
+        )
+    };
+    let note = |registry: &ModelRegistry| {
+        let (selection, notes) = registry.default_selection(None, None).expect("degrades");
+        assert_eq!(selection, None);
+        assert_eq!(notes.len(), 1, "one teaching note: {notes:?}");
+        notes.into_iter().next().expect("the note").text
+    };
+
+    // The default (channel off): named, so the user can re-enable it.
+    let disabled = note(&with_status(CatalogStatus::Disabled));
+    assert!(disabled.contains("catalog channel is off"), "{disabled}");
+    // The first boot's download outlived the boot budget: the fix
+    // arrives next boot — say so instead of demanding providers.toml.
+    let pending = note(&with_status(CatalogStatus::Pending));
+    assert!(pending.contains("still in flight"), "{pending}");
+    // The channel ran and contributed nothing (failed check, no
+    // cache): the cache's absence is the named fact. Both reachable
+    // members of the catch-all arm say it the same way.
+    let offline = note(&with_status(CatalogStatus::Offline { version: None }));
+    assert!(offline.contains("no usable catalog cache"), "{offline}");
+    let child = note(&with_status(CatalogStatus::Cached { version: None }));
+    assert!(child.contains("no usable catalog cache"), "{child}");
+
+    // Providers exist but none usable: THAT is the catalog era's
+    // fresh-install norm — one line, the one action, no mechanics.
+    let (selection, notes) = registry_with(TWO_MODELS, "")
+        .default_selection(None, None)
+        .expect("degrades");
+    assert_eq!(selection, None);
+    assert!(
+        notes[0].text.contains("no models available"),
+        "{}",
+        notes[0].text
+    );
+    assert!(notes[0].text.contains("/login"), "{}", notes[0].text);
+    assert!(
+        !notes[0].text.contains("selection-less"),
+        "{}",
+        notes[0].text
+    );
 }
 
 #[test]

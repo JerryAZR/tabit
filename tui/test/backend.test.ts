@@ -118,12 +118,14 @@ describe("backend: the child seam over the mock", () => {
 			["locked:stored", "mock:keyless"],
 		);
 
-		// An empty key is rejected in-band: error { kind: auth }, no re-fold.
+		// An empty key is rejected in-band: notice { id: auth.failed,
+		// level: error }, no re-fold.
 		backend.login("locked", "  ");
-		await until(() => frames.some(f => f.kind === "event" && f.event.type === "error"), 8000, "auth error");
-		const err = frames.find(f => f.kind === "event" && f.event.type === "error");
-		if (err?.kind !== "event" || err.event.type !== "error") throw new Error("error frame");
-		assert.strictEqual(err.event.kind, "auth");
+		await until(() => frames.some(f => f.kind === "event" && f.event.type === "notice"), 8000, "auth error");
+		const err = frames.find(f => f.kind === "event" && f.event.type === "notice");
+		if (err?.kind !== "event" || err.event.type !== "notice") throw new Error("notice frame");
+		assert.strictEqual(err.event.id, "auth.failed");
+		assert.strictEqual(err.event.level, "error");
 		assert.strictEqual(err.stream, undefined); // backend-level
 
 		// logout is total: unknown provider is a no-op, still acked.

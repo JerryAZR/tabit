@@ -80,7 +80,10 @@ fn json_reject(reason: String) -> ! {
         stream: None,
         origin: None,
         ttl: None,
-        event: tabit_session::SessionEvent::error_session(reason.clone()),
+        event: tabit_session::SessionEvent::notice_condition(
+            tabit_protocol::NoticeId::STARTUP,
+            reason.clone(),
+        ),
     };
     println!("{}", tabit_protocol::to_wire_line(&event));
     eprintln!("{reason}");

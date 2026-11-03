@@ -49,8 +49,8 @@ fn stub_layer(node: &Node, name: &str) -> (Channel, Saw) {
                 SessionEvent::InteractionRequest { id, .. } => {
                     format!("interaction_request:{id}@{}", stamp(&frame.stream))
                 }
-                SessionEvent::Error { kind, .. } => {
-                    format!("error:{kind}@{}", stamp(&frame.stream))
+                SessionEvent::Notice { id, .. } => {
+                    format!("notice:{id}@{}", stamp(&frame.stream))
                 }
                 event => format!("{}@{}", event.tag(), stamp(&frame.stream)),
             };
@@ -123,7 +123,11 @@ fn stamped(session: &str) -> EventFrame {
         stream: Some(StreamId::new(session)),
         origin: None,
         ttl: None,
-        event: SessionEvent::error_session(format!("the {session} stream's first emission")),
+        event: SessionEvent::notice_transient(
+            "test",
+            tabit_protocol::NoticeLevel::Warn,
+            format!("the {session} stream's first emission"),
+        ),
     }
 }
 
@@ -136,7 +140,7 @@ fn events_fan_by_type_and_compose() {
 
     let seen: Arc<Mutex<Vec<&'static str>>> = Arc::new(Mutex::new(Vec::new()));
     let kind_sink = seen.clone();
-    node.subscribe(tags::ERROR, Locality::Both, move |_| {
+    node.subscribe(tags::NOTICE, Locality::Both, move |_| {
         kind_sink.lock().expect("test lock").push("kind")
     });
     let relay_sink = seen.clone();
@@ -378,7 +382,7 @@ fn a_death_sweeps_routes_subscriptions_and_asks() {
         }),
     );
     assert!(
-        saw.has("error:session@-"),
+        saw.has("notice:session.command@-"),
         "the swept route misses uniformly, unstamped and session-kind (no session owns it): {:?}",
         saw.events()
     );
@@ -471,7 +475,11 @@ fn unstamped_arrivals_are_attributed_and_stamped_cross_verbatim() {
             stream: None,
             origin: None,
             ttl: None,
-            event: SessionEvent::error_session("an emission".to_string()),
+            event: SessionEvent::notice_transient(
+                "test",
+                tabit_protocol::NoticeLevel::Warn,
+                "an emission".to_string(),
+            ),
         },
     );
     // Stamped traffic: someone else's — verbatim, no attribution.
@@ -480,7 +488,7 @@ fn unstamped_arrivals_are_attributed_and_stamped_cross_verbatim() {
     let seen = seen.lock().expect("test lock").clone();
     assert_eq!(
         seen,
-        vec!["error:child".to_string(), "error:-".to_string()],
+        vec!["notice:child".to_string(), "notice:-".to_string()],
         "the emission names its speaker; the relay stays verbatim"
     );
 }
@@ -517,7 +525,7 @@ fn a_wrong_kind_answer_breaks_loudly_not_fatal() {
         "the wrong-kind answer was never delivered"
     );
     assert!(
-        saw.has("error:session@-"),
+        saw.has("notice:session.command@-"),
         "the break is loud, session-kind, unstamped: {:?}",
         saw.events()
     );
@@ -742,7 +750,11 @@ fn the_ttl_tripwire_kills_cross_node_loops() {
             stream: None,
             origin: None,
             ttl: None,
-            event: SessionEvent::error_session("into the loop".to_string()),
+            event: SessionEvent::notice_transient(
+                "test",
+                tabit_protocol::NoticeLevel::Warn,
+                "into the loop".to_string(),
+            ),
         },
     );
 
@@ -771,7 +783,7 @@ fn a_subscriber_may_emit_from_inside_dispatch() {
     let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
 
     let sink = seen.clone();
-    node.subscribe(tags::ERROR, Locality::Both, move |frame| {
+    node.subscribe(tags::NOTICE, Locality::Both, move |frame| {
         sink.lock()
             .expect("test lock")
             .push(frame.event.tag().to_string());
@@ -784,7 +796,7 @@ fn a_subscriber_may_emit_from_inside_dispatch() {
         node.subscribe_all(Locality::Both, move |frame| {
             // Hear an error, derive a run_finished — an emit while
             // dispatch holds the wildcard iteration.
-            if matches!(frame.event, SessionEvent::Error { .. }) {
+            if matches!(frame.event, SessionEvent::Notice { .. }) {
                 let layer = layer.clone();
                 emitter.emit(
                     &layer,
@@ -810,14 +822,18 @@ fn a_subscriber_may_emit_from_inside_dispatch() {
             stream: None,
             origin: None,
             ttl: None,
-            event: SessionEvent::error_session("the trigger".to_string()),
+            event: SessionEvent::notice_transient(
+                "test",
+                tabit_protocol::NoticeLevel::Warn,
+                "the trigger".to_string(),
+            ),
         },
     );
 
     let seen = seen.lock().expect("test lock").clone();
     assert_eq!(
         seen,
-        vec!["error".to_string()],
+        vec!["notice".to_string()],
         "the derived frame fanned without deadlocking"
     );
     let _ = &layer;
@@ -903,7 +919,11 @@ fn a_lanes_retraction_closes_every_stream_it_taught_exactly_once() {
                 stream: Some(StreamId::new(stream)),
                 origin: None,
                 ttl: None,
-                event: SessionEvent::error_session("speech"),
+                event: SessionEvent::notice_transient(
+                    "test",
+                    tabit_protocol::NoticeLevel::Warn,
+                    "speech",
+                ),
             }),
         );
     }
@@ -927,7 +947,11 @@ fn a_lanes_retraction_closes_every_stream_it_taught_exactly_once() {
             stream: Some(StreamId::new("local-sess")),
             origin: None,
             ttl: None,
-            event: SessionEvent::error_session("local speech"),
+            event: SessionEvent::notice_transient(
+                "test",
+                tabit_protocol::NoticeLevel::Warn,
+                "local speech",
+            ),
         },
     );
 
@@ -977,7 +1001,7 @@ fn a_lanes_retraction_closes_every_stream_it_taught_exactly_once() {
         }),
     );
     assert!(
-        saw.has("error:session"),
+        saw.has("notice:session.command"),
         "the closed session's route is gone: {:?}",
         saw.events()
     );
@@ -1176,7 +1200,11 @@ fn parse_shared_discriminates_lines() {
         stream: None,
         origin: None,
         ttl: None,
-        event: SessionEvent::error_session("an emission".to_string()),
+        event: SessionEvent::notice_transient(
+            "test",
+            tabit_protocol::NoticeLevel::Warn,
+            "an emission".to_string(),
+        ),
     });
     assert!(matches!(parse_shared(&event_line), Some(Inbound::Event(_))));
 
@@ -1252,7 +1280,11 @@ fn a_local_emission_crosses_a_local_subscribed_pipe() {
             stream: None,
             origin: None,
             ttl: None,
-            event: SessionEvent::error_session("the ext speaks".to_string()),
+            event: SessionEvent::notice_transient(
+                "test",
+                tabit_protocol::NoticeLevel::Warn,
+                "the ext speaks".to_string(),
+            ),
         },
     );
 
@@ -1260,7 +1292,7 @@ fn a_local_emission_crosses_a_local_subscribed_pipe() {
     // once each, no dedup machinery anywhere.
     assert_eq!(up_the_pipe.lock().expect("test lock").len(), 1);
     assert!(
-        saw.has("error:session@-"),
+        saw.has("notice:test@-"),
         "the fan is untouched by the crossing: {:?}",
         saw.events()
     );
@@ -1298,13 +1330,17 @@ fn a_local_subscribed_pipe_hears_local_speech_only() {
         stream: None,
         origin: None,
         ttl: None,
-        event: SessionEvent::error_session("once".to_string()),
+        event: SessionEvent::notice_transient(
+            "test",
+            tabit_protocol::NoticeLevel::Warn,
+            "once".to_string(),
+        ),
     };
     // Local speech: the pipe hears it.
     node.emit(&layer, frame.clone());
     assert_eq!(
         local_heard.lock().expect("test lock").as_slice(),
-        ["channel:error".to_string()].as_slice(),
+        ["channel:notice".to_string()].as_slice(),
         "own speech crossed the local-subscribed pipe"
     );
     // An arrival: the pipe does not carry it up (the old override
@@ -1466,7 +1502,11 @@ fn manual_forwards_are_verbatim_from_the_lane_or_re_stamped_from_the_layer() {
         stream: Some(StreamId::new("child-sess")),
         origin: None,
         ttl: None,
-        event: SessionEvent::error_session("the child speaks".to_string()),
+        event: SessionEvent::notice_transient(
+            "test",
+            tabit_protocol::NoticeLevel::Warn,
+            "the child speaks".to_string(),
+        ),
     };
     // The child's frame arrives (teaching the lane; nothing crosses —
     // the stdio subscribes to nothing), and the ext forwards it
@@ -1509,7 +1549,11 @@ fn manual_forwards_are_verbatim_from_the_lane_or_re_stamped_from_the_layer() {
             stream: Some(StreamId::new("ext")),
             origin: None,
             ttl: None,
-            event: SessionEvent::error_session("the child speaks".to_string()),
+            event: SessionEvent::notice_transient(
+                "test",
+                tabit_protocol::NoticeLevel::Warn,
+                "the child speaks".to_string(),
+            ),
         },
     );
     node.intake(

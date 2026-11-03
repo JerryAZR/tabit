@@ -25,7 +25,7 @@ fn main() {
             .watch(watch(
                 tabit_protocol::tags::SESSION_OPENED,
                 |ctx, _frame| async move {
-                    ctx.emit(SessionEvent::error_session(
+                    ctx.emit(SessionEvent::notice_transient("extension.report", tabit_protocol::NoticeLevel::Info, 
                         "child-ext saw the child open its session",
                     ));
                 },

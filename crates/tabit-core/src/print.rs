@@ -131,12 +131,14 @@ fn print_event(event: &SessionEvent) {
         SessionEvent::SessionsAvailable { .. }
         | SessionEvent::SessionOpened { .. }
         | SessionEvent::SessionClosed { .. } => {}
-        // Non-terminal error conditions (startup degradations,
-        // persistence): stderr is the human surface in print mode —
-        // stdout stays the answer channel.
-        SessionEvent::Error { message, .. } => {
-            let _ = writeln!(std::io::stderr(), "warning: {message}");
+        // Notices (startup degradations, persistence, the zero-config
+        // condition): stderr is the human surface in print mode —
+        // stdout stays the answer channel. Clears need no print (the
+        // pinned condition's text already went out).
+        SessionEvent::Notice { text, .. } => {
+            let _ = writeln!(std::io::stderr(), "warning: {text}");
         }
+        SessionEvent::NoticeCleared { .. } => {}
         SessionEvent::NativeItem { .. } => {}
     }
 }

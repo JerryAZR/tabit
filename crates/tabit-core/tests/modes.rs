@@ -415,9 +415,9 @@ fn a_broken_config_is_a_json_setup_failure_with_the_guide() {
     let failure: serde_json::Value =
         serde_json::from_str(lines.next().expect("the failure event line"))
             .expect("failure parses");
-    assert_eq!(failure["type"], "error", "{failure}");
+    assert_eq!(failure["type"], "notice", "{failure}");
     assert!(
-        failure["message"]
+        failure["text"]
             .as_str()
             .is_some_and(|message| message.contains("first-run setup needed")),
         "a config problem carries the teaching guide: {failure}"
@@ -588,12 +588,12 @@ fn zero_config_boots_selection_less_and_the_run_open_failure_teaches() {
     let session = opened["id"].as_str().expect("the session id").to_string();
     let note = frames
         .iter()
-        .find(|frame| frame["type"] == "error" && frame["kind"] == "model")
+        .find(|frame| frame["type"] == "notice" && frame["id"] == "model.unusable")
         .expect("the teaching note rides the startup notes");
     assert!(
-        note["message"]
+        note["text"]
             .as_str()
-            .is_some_and(|m| m.contains("no usable model") && m.contains("providers.toml")),
+            .is_some_and(|m| m.contains("no models available") && m.contains("providers.toml")),
         "the note teaches: {note}"
     );
     let catalog = frames
@@ -780,7 +780,7 @@ fn print_mode_without_a_selection_fails_the_run_and_teaches() {
         "the run-open failure is print mode's carrier: {stderr}"
     );
     assert!(
-        stderr.contains("no usable model"),
+        stderr.contains("no models available"),
         "the boot's teaching note warned on stderr too: {stderr}"
     );
     assert!(stdout.is_empty(), "no answer exists to print: {stdout}");

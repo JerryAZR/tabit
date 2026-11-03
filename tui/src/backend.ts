@@ -142,7 +142,7 @@ export class Backend {
 	}
 
 	/** Switch a session's model: a state write at receive — `model_selected`
-	 *  answers at once (or `error { kind: "model" }` when the ref is
+	 *  answers at once (or a `notice { id: "model.command" }` when the ref is
 	 *  unknown). No thinking_level: null is always legal (the default). */
 	setModel(session: string, provider: string, model: string): void {
 		this.send({ type: "model", session, provider, model });
@@ -154,7 +154,7 @@ export class Backend {
 
 	/** Store a provider key (v21). Backend-level, session-less; the
 	 *  re-announced `models_available` is the ack, an unstamped
-	 *  `error { kind: "auth" }` the failure. */
+	 *  `notice { id: "auth.failed" }` the failure. */
 	login(provider: string, apiKey: string): void {
 		this.send({ type: "login", provider, api_key: apiKey });
 	}

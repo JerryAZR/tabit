@@ -90,14 +90,16 @@ pub struct SessionInfo {
 /// How the host builds sessions for `new_session`: the binary's
 /// assembly (config resolution, tools, preamble) behind a closure, so
 /// this crate stays free of front-facing wiring. Returns the session
-/// plus its selection notes (surfaced as `error { kind: model }`
+/// plus its selection notices (surfaced as `notice` events, v27
 /// frames stamped with the new session).
-pub type SessionSource = Arc<dyn Fn() -> Result<(Session, Vec<String>), String> + Send + Sync>;
+pub type SessionSource =
+    Arc<dyn Fn() -> Result<(Session, Vec<tabit_protocol::StartupNotice>), String> + Send + Sync>;
 
 /// [`SessionSource`]'s sibling for `open_session { id }`: load a
 /// stored session by id (the resume path — full parse and repair).
-pub type OpenSessionSource =
-    Arc<dyn Fn(&str) -> Result<(Session, Vec<String>), String> + Send + Sync>;
+pub type OpenSessionSource = Arc<
+    dyn Fn(&str) -> Result<(Session, Vec<tabit_protocol::StartupNotice>), String> + Send + Sync,
+>;
 
 /// The host's STRUCTURE — everything mountable before any data
 /// exists (owner ruling 2026-09, the prepared-supervisor model): the
@@ -150,7 +152,7 @@ pub struct SessionHostData {
     /// The auth file `login`/`logout` write surgically
     /// (`tabit_config::auth_default_path` — `$TABIT_AUTH`, else
     /// `~/.tabit/auth.toml`). `None` when neither resolves: a login
-    /// then fails gracefully with `error { kind: "auth" }`.
+    /// then fails gracefully with `notice { id: "auth.failed" }`.
     pub auth_path: Option<std::path::PathBuf>,
 }
 
@@ -194,7 +196,7 @@ struct Worker {
     model_register: crate::session::ModelRegister,
     /// Receive-time validation against the session's config (the
     /// checkout probe's sibling): an unusable ref is an
-    /// `error { kind: model }` at the command, even mid-run.
+    /// `notice { id: "model.command" }` at the command, even mid-run.
     model_probe: crate::session::ModelProbe,
     /// The session's world cell — the login/logout refresh's entry
     /// point: a state write at receive (the model register's
@@ -263,9 +265,11 @@ impl Worker {
                 // receive: a bad target errors immediately — even
                 // mid-run — and nothing else happens.
                 if !self.entry_probe.contains(&entry_id) {
-                    self.notice(SessionEvent::error_checkout(format!(
-                        "no entry `{entry_id}` in this session"
-                    )));
+                    self.notice(SessionEvent::notice_transient(
+                        tabit_protocol::NoticeId::CHECKOUT,
+                        tabit_protocol::NoticeLevel::Warn,
+                        format!("no entry `{entry_id}` in this session"),
+                    ));
                     return;
                 }
                 // Checkout aborts first (ruled 2026-08: the user
@@ -298,7 +302,11 @@ impl Worker {
                     thinking_level,
                 };
                 if let Err(message) = (self.model_probe)(&selection) {
-                    self.notice(SessionEvent::error_model(message));
+                    self.notice(SessionEvent::notice_transient(
+                        tabit_protocol::NoticeId::MODEL_COMMAND,
+                        tabit_protocol::NoticeLevel::Warn,
+                        message,
+                    ));
                     return;
                 }
                 // A state write, not pending intent: one register write
@@ -655,7 +663,7 @@ impl SessionHost {
     /// mode, tests): mount the structure, attach the boot at once.
     pub fn spawn(
         boot: Session,
-        startup_notes: Vec<String>,
+        startup_notes: Vec<tabit_protocol::StartupNotice>,
         wiring: SessionHostWiring,
         data: SessionHostData,
     ) -> Self {
@@ -666,7 +674,7 @@ impl SessionHost {
     /// [`SessionHost::spawn`] over a pre-mounted frontend stream.
     pub fn spawn_with_frontend(
         boot: Session,
-        startup_notes: Vec<String>,
+        startup_notes: Vec<tabit_protocol::StartupNotice>,
         wiring: SessionHostWiring,
         data: SessionHostData,
         frontend: FrontendStream,
@@ -684,7 +692,7 @@ impl SessionHostMount {
     pub fn attach(
         self,
         boot: Session,
-        startup_notes: Vec<String>,
+        startup_notes: Vec<tabit_protocol::StartupNotice>,
         data: SessionHostData,
     ) -> SessionHost {
         let SessionHostMount {
@@ -738,6 +746,7 @@ impl SessionHostMount {
         // FRONTEND.md §6).
         announce_session(
             &boot_sink,
+            &sink,
             SessionEvent::SessionOpened {
                 id: info.session_id.clone(),
                 path: info.session_path.clone(),
@@ -782,7 +791,11 @@ impl SessionHostMount {
             Err(error) => {
                 sink.emit(
                     None,
-                    SessionEvent::error_session(format!("could not list sessions: {error}")),
+                    SessionEvent::notice_transient(
+                        tabit_protocol::NoticeId::SESSION_COMMAND,
+                        tabit_protocol::NoticeLevel::Warn,
+                        format!("could not list sessions: {error}"),
+                    ),
                 );
             }
         }
@@ -881,7 +894,7 @@ impl SessionHost {
     /// at the session's pause point: immediately when idle, after the
     /// in-flight run's terminal otherwise (never an implicit abort).
     /// Outcomes arrive as events (`checked_out` + a replay pass, or
-    /// `error { kind: checkout }`).
+    /// `notice { id: "checkout" }`).
     pub fn checkout(&self, session: &str, entry_id: impl Into<String>) {
         self.command_link().send(SessionCommand::Checkout {
             session: session.to_string(),
@@ -892,7 +905,7 @@ impl SessionHost {
     /// Switch a session's model — the register write, immediate: the
     /// entry and the live selection land at receive (one shared-write
     /// operation, any thread), and `model_selected` follows at once. A
-    /// ref config cannot resolve is an `error { kind: model }`,
+    /// ref config cannot resolve is a `notice { id: "model.command" }`,
     /// nothing moves. A run in flight is untouched (passes bind the
     /// agent at run open); the next run derives the new agent. Abort
     /// is irrelevant — a state write is not conversation intent.
@@ -1135,9 +1148,10 @@ impl Lifecycle {
         if api_key.as_str().trim().is_empty() {
             self.sink.emit(
                 None,
-                SessionEvent::error_auth(format!(
-                    "empty api_key for `{provider}` — paste the provider's key"
-                )),
+                SessionEvent::notice_condition(
+                    tabit_protocol::NoticeId::AUTH_FAILED,
+                    format!("empty api_key for `{provider}` — paste the provider's key"),
+                ),
             );
             return;
         }
@@ -1149,16 +1163,18 @@ impl Lifecycle {
         {
             self.sink.emit(
                 None,
-                SessionEvent::error_auth(format!(
-                    "unknown provider `{provider}` — not in providers.toml"
-                )),
+                SessionEvent::notice_condition(
+                    tabit_protocol::NoticeId::AUTH_FAILED,
+                    format!("unknown provider `{provider}` — not in providers.toml"),
+                ),
             );
             return;
         }
         let Some(path) = &core.auth_path else {
             self.sink.emit(
                 None,
-                SessionEvent::error_auth(
+                SessionEvent::notice_condition(
+                    tabit_protocol::NoticeId::AUTH_FAILED,
                     "cannot resolve the auth file path ($TABIT_AUTH or ~/.tabit/auth.toml)"
                         .to_string(),
                 ),
@@ -1170,10 +1186,10 @@ impl Lifecycle {
             Err(error) => {
                 self.sink.emit(
                     None,
-                    SessionEvent::error_auth(format!(
-                        "could not write `{}`: {error}",
-                        path.display()
-                    )),
+                    SessionEvent::notice_condition(
+                        tabit_protocol::NoticeId::AUTH_FAILED,
+                        format!("could not write `{}`: {error}", path.display()),
+                    ),
                 );
             }
         }
@@ -1188,7 +1204,8 @@ impl Lifecycle {
         let Some(path) = &core.auth_path else {
             self.sink.emit(
                 None,
-                SessionEvent::error_auth(
+                SessionEvent::notice_condition(
+                    tabit_protocol::NoticeId::AUTH_FAILED,
                     "cannot resolve the auth file path ($TABIT_AUTH or ~/.tabit/auth.toml)"
                         .to_string(),
                 ),
@@ -1200,10 +1217,10 @@ impl Lifecycle {
             Err(error) => {
                 self.sink.emit(
                     None,
-                    SessionEvent::error_auth(format!(
-                        "could not write `{}`: {error}",
-                        path.display()
-                    )),
+                    SessionEvent::notice_condition(
+                        tabit_protocol::NoticeId::AUTH_FAILED,
+                        format!("could not write `{}`: {error}", path.display()),
+                    ),
                 );
             }
         }
@@ -1236,6 +1253,20 @@ impl Lifecycle {
             worker.refresh_world(registry.config().clone(), registry.factory());
         }
         announce_catalog(&self.sink, &registry);
+        // The world-refresh act is the clearing act for backend-level
+        // conditions: a successful login/logout resolves a prior
+        // auth failure; a world with a usable model resolves the
+        // zero-config condition.
+        self.sink.emit(
+            None,
+            SessionEvent::notice_cleared(tabit_protocol::NoticeId::AUTH_FAILED),
+        );
+        if !registry.available_catalog().is_empty() {
+            self.sink.emit(
+                None,
+                SessionEvent::notice_cleared(tabit_protocol::NoticeId::MODEL_UNUSABLE),
+            );
+        }
     }
 
     fn new_session(&self) {
@@ -1276,8 +1307,8 @@ impl Lifecycle {
     /// write of a world the build may already have read.
     fn build_on_current_world(
         core: &LifecycleCore,
-        build: impl FnOnce() -> Result<(Session, Vec<String>), String>,
-    ) -> Result<(Session, Vec<String>), String> {
+        build: impl FnOnce() -> Result<(Session, Vec<tabit_protocol::StartupNotice>), String>,
+    ) -> Result<(Session, Vec<tabit_protocol::StartupNotice>), String> {
         let before = lock(&core.world).generation();
         let (session, notes) = build()?;
         let world = lock(&core.world);
@@ -1297,9 +1328,11 @@ impl Lifecycle {
             Err(message) => {
                 self.sink.emit(
                     None,
-                    SessionEvent::error_session(format!(
-                        "could not build a new session: {message}"
-                    )),
+                    SessionEvent::notice_transient(
+                        tabit_protocol::NoticeId::SESSION_COMMAND,
+                        tabit_protocol::NoticeLevel::Warn,
+                        format!("could not build a new session: {message}"),
+                    ),
                 );
                 return;
             }
@@ -1330,6 +1363,7 @@ impl Lifecycle {
         let opened = NoticeSink::new(&self.node, &channel, stream.clone());
         announce_session(
             &opened,
+            &self.sink,
             SessionEvent::SessionOpened {
                 id: id.clone(),
                 path,
@@ -1361,9 +1395,11 @@ impl Lifecycle {
             Err(message) => {
                 self.sink.emit(
                     None,
-                    SessionEvent::error_session(format!(
-                        "could not open session `{id}`: {message}"
-                    )),
+                    SessionEvent::notice_transient(
+                        tabit_protocol::NoticeId::SESSION_COMMAND,
+                        tabit_protocol::NoticeLevel::Warn,
+                        format!("could not open session `{id}`: {message}"),
+                    ),
                 );
                 return;
             }
@@ -1384,6 +1420,7 @@ impl Lifecycle {
         let opened = NoticeSink::new(&self.node, &channel, stream);
         announce_session(
             &opened,
+            &self.sink,
             SessionEvent::SessionOpened {
                 id: id.to_string(),
                 path,
@@ -1412,13 +1449,22 @@ impl Lifecycle {
 /// so a fourth path cannot drift.
 fn announce_session(
     sink: &NoticeSink,
+    backend: &HostSink,
     opened: SessionEvent,
-    notes: impl IntoIterator<Item = String>,
+    notes: impl IntoIterator<Item = tabit_protocol::StartupNotice>,
     skills: Vec<AvailableSkill>,
 ) {
     sink.emit(opened);
+    // The zero-config condition is BACKEND-level (the registry is the
+    // process's): its notice is unstamped, so the world-refresh act's
+    // unstamped clear addresses exactly it. Per-session preference
+    // degradations stay stamped — they name one session's preference.
     for note in notes {
-        sink.emit(SessionEvent::error_model(note));
+        if note.id == tabit_protocol::NoticeId::MODEL_UNUSABLE {
+            backend.emit(None, note.into_event());
+        } else {
+            sink.emit(note.into_event());
+        }
     }
     if !skills.is_empty() {
         sink.emit(SessionEvent::SkillsAvailable { skills });
@@ -1661,7 +1707,11 @@ fn execute_checkout(session: &mut Session, sink: &NoticeSink, entry_id: String) 
     let summary = match session.rewind_to_entry(&entry_id) {
         Ok(summary) => summary,
         Err(error) => {
-            sink.emit(SessionEvent::error_checkout(error.to_string()));
+            sink.emit(SessionEvent::notice_transient(
+                tabit_protocol::NoticeId::CHECKOUT,
+                tabit_protocol::NoticeLevel::Warn,
+                error.to_string(),
+            ));
             return;
         }
     };

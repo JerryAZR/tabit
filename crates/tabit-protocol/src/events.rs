@@ -191,7 +191,7 @@ pub enum SessionEvent {
     },
     /// The outer loop finished successfully. `durable` is flag 8's
     /// verdict: false means the write-behind log still holds this
-    /// session's entries (a `persist_degraded` error explains; they
+    /// session's entries (a `persist.degraded` notice explains; they
     /// flush and recover on later commits) — the run's output exists
     /// in memory and the log's clean prefix, not yet fully on disk.
     RunFinished {
@@ -207,13 +207,13 @@ pub enum SessionEvent {
     /// An outer loop failed: a provider stream error, or an open/persist
     /// failure (see `kind`). Not a command outcome (commands cannot
     /// fail); the mailbox keeps draining, so later messages still run.
-    /// (Persist degrade is not this: it rides `persist_degraded`/
-    /// `persist_recovered` errors and `run_finished.durable` — flag 8.)
+    /// (Persist degrade is not this: it rides the `persist.degraded`
+    /// notice/clear pair and `run_finished.durable` — flag 8.)
     RunFailed {
         /// The failure, in display form.
         message: String,
-        /// The failure's class (an open string, the [`ErrorKind`] law:
-        /// unknown kinds display generically). See [`RunFailedKind`]'s
+        /// The failure's class (an open string: unknown kinds display
+        /// generically). See [`RunFailedKind`]'s
         /// well-known values.
         kind: String,
         /// The run's start, milliseconds since the Unix epoch.
@@ -221,24 +221,34 @@ pub enum SessionEvent {
         /// The failure's time, milliseconds since the Unix epoch.
         completed_at_ms: u64,
     },
-    /// An error condition that is not a run terminal — config trouble,
-    /// persistence degrade, a failed `model`/`checkout` command. One
-    /// carrier for all of them so a minimal frontend implements a single
-    /// handler (show the message) while a rich one switches on `kind`.
-    /// `run_failed` stays its own event (a run terminal, not an error
-    /// condition). Unknown kinds fall back to generic display — the same
-    /// forward-compat rule as unknown event types, which is why `kind`
-    /// is an open string, not a closed enum.
-    Error {
-        /// The error kind (an open string; see the well-known values on
-        /// [`ErrorKind`]).
-        kind: String,
-        /// The error, in display form.
-        message: String,
-        /// Kind-specific structure: `persist_degraded`'s count of
-        /// records pending on disk.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        pending: Option<u64>,
+    /// A notice: the backend's one channel for everything a user
+    /// should see that is not conversation — operational reports,
+    /// recovered degradations, and blocking conditions. Severity
+    /// (`level`) and lifetime are the producer's ruling; placement
+    /// and transient aging are the frontend's. A blocking condition
+    /// (`Error`) pins until its [`SessionEvent::NoticeCleared`];
+    /// operational reports and recovered degradations (`Info`/`Warn`)
+    /// are transient — the frontend ages them on its own clock.
+    /// `id` names the condition at its emitter (stream-stamped =
+    /// per-session, unstamped = per-process): a repeat replaces,
+    /// a clear targets it. `run_failed` stays its own event (a run
+    /// terminal, not a notice).
+    Notice {
+        /// The condition's id at its emitter (see the well-known
+        /// values on [`NoticeId`]).
+        id: String,
+        /// The producer-assigned severity.
+        level: NoticeLevel,
+        /// The display text.
+        text: String,
+    },
+    /// A pinned condition ended — emitted by the same producer, at
+    /// the moment the condition stops being true (a world refresh
+    /// made models usable, the log flush recovered). Only `Error`
+    /// notices ever clear; transients simply age out.
+    NoticeCleared {
+        /// The cleared condition's id.
+        id: String,
     },
     /// Replay began: the backend is re-emitting the session's active
     /// chain as finalized live events — the same shapes a live run
@@ -672,70 +682,6 @@ pub enum ToolResultStatus {
 }
 
 impl SessionEvent {
-    /// A `model`-kind error: a model preference degraded (a stale
-    /// `default_model`, a resumed session's model gone) or a `model`
-    /// command failed config validation.
-    pub fn error_model(message: impl Into<String>) -> Self {
-        Self::Error {
-            kind: ErrorKind::MODEL.to_string(),
-            message: message.into(),
-            pending: None,
-        }
-    }
-
-    /// A `session`-kind error: a session command failed (an unknown
-    /// target id, an unreadable file, a session that could not be
-    /// built, a failed catalog listing).
-    pub fn error_session(message: impl Into<String>) -> Self {
-        Self::Error {
-            kind: ErrorKind::SESSION.to_string(),
-            message: message.into(),
-            pending: None,
-        }
-    }
-
-    /// A `persist_degraded`-kind error: records are pending on disk.
-    pub fn error_persist_degraded(pending: u64, message: impl Into<String>) -> Self {
-        Self::Error {
-            kind: ErrorKind::PERSIST_DEGRADED.to_string(),
-            message: message.into(),
-            pending: Some(pending),
-        }
-    }
-
-    /// A `persist_recovered`-kind error: the pending records reached
-    /// the disk (the ride on the generic error carrier is historical —
-    /// the kind is the signal, not the word "error").
-    pub fn error_persist_recovered() -> Self {
-        Self::Error {
-            kind: ErrorKind::PERSIST_RECOVERED.to_string(),
-            message: "pending records reached the disk".to_string(),
-            pending: None,
-        }
-    }
-
-    /// A `checkout`-kind error: a checkout command failed (an unknown
-    /// entry, or the rewind could not apply — its message carries the
-    /// detail). Nothing was discarded or moved.
-    pub fn error_checkout(message: impl Into<String>) -> Self {
-        Self::Error {
-            kind: ErrorKind::CHECKOUT.to_string(),
-            message: message.into(),
-            pending: None,
-        }
-    }
-
-    /// An `auth`-kind error: a `login`/`logout` failed — the provider
-    /// is unknown to config, or the auth file could not be written.
-    /// Unstamped, backend-level (the failure belongs to no session).
-    pub fn error_auth(message: impl Into<String>) -> Self {
-        Self::Error {
-            kind: ErrorKind::AUTH.to_string(),
-            message: message.into(),
-            pending: None,
-        }
-    }
-
     /// The register announcement: a `model_selected` carrying a
     /// selection and its resolved facts — at session creation, at
     /// every receive-time write (the `model` command's own outcome),
@@ -752,40 +698,145 @@ impl SessionEvent {
             cost: facts.cost,
         }
     }
+
+    /// A transient notice: an operational report (`Info`) or a
+    /// recovered degradation (`Warn`). The frontend ages these out
+    /// on its own clock — nothing ever clears them.
+    pub fn notice_transient(id: &str, level: NoticeLevel, text: impl Into<String>) -> Self {
+        debug_assert!(
+            level != NoticeLevel::Error,
+            "blocking conditions pin — they take notice_condition"
+        );
+        Self::Notice {
+            id: id.to_string(),
+            level,
+            text: text.into(),
+        }
+    }
+
+    /// A pinned blocking condition (`Error`): emitted when the
+    /// condition becomes true, cleared by [`SessionEvent::notice_cleared`]
+    /// from the same emitter when it stops being true.
+    pub fn notice_condition(id: &str, text: impl Into<String>) -> Self {
+        Self::Notice {
+            id: id.to_string(),
+            level: NoticeLevel::Error,
+            text: text.into(),
+        }
+    }
+
+    /// The clear for a pinned condition.
+    pub fn notice_cleared(id: &str) -> Self {
+        Self::NoticeCleared { id: id.to_string() }
+    }
 }
 
-/// The well-known `error` event kinds. Open on purpose: an unknown kind
-/// from a newer backend displays generically instead of failing the
-/// frontend.
-pub struct ErrorKind;
+/// A notice's producer-assigned severity (FRONTEND.md's notice
+/// model): `Info` reports standard operations; `Warn` says the
+/// program probably did not behave as expected but recovered and
+/// continues; `Error` says the program cannot continue until the
+/// condition resolves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NoticeLevel {
+    Info,
+    Warn,
+    Error,
+}
 
-impl ErrorKind {
-    /// A model preference degraded or a `model` command failed
-    /// validation.
-    pub const MODEL: &'static str = "model";
-    /// A session command failed: an unknown target id, an unreadable
-    /// session file, a session that could not be built, a failed
-    /// catalog listing.
-    pub const SESSION: &'static str = "session";
-    /// A `checkout` command targeted a missing entry or not a cut point.
+/// A startup notice, pre-wire: what the session-assembly act derived
+/// (a preference degradation, the zero-config state), typed so the
+/// host's announce act can emit it as the right `Notice` — a pinned
+/// condition for the zero-config state, a transient `Warn` for a
+/// preference degradation. Carried out of the registry by value
+/// rather than as a `SessionEvent` so the assembly layer (which owns
+/// no sink) stays wire-free.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StartupNotice {
+    /// The condition's id (a [`NoticeId`] value).
+    pub id: &'static str,
+    /// The severity the producer ruled.
+    pub level: NoticeLevel,
+    /// The display text.
+    pub text: String,
+}
+
+impl StartupNotice {
+    /// A transient preference-degradation notice (`Warn`).
+    pub fn preference(text: impl Into<String>) -> Self {
+        Self {
+            id: NoticeId::MODEL_PREFERENCE,
+            level: NoticeLevel::Warn,
+            text: text.into(),
+        }
+    }
+
+    /// The zero-config condition (`Error`, pinned until the world
+    /// becomes usable).
+    pub fn model_unusable(text: impl Into<String>) -> Self {
+        Self {
+            id: NoticeId::MODEL_UNUSABLE,
+            level: NoticeLevel::Error,
+            text: text.into(),
+        }
+    }
+
+    /// The announce-act projection into the wire event.
+    pub fn into_event(self) -> SessionEvent {
+        SessionEvent::Notice {
+            id: self.id.to_string(),
+            level: self.level,
+            text: self.text,
+        }
+    }
+}
+
+/// The well-known notice ids (FRONTEND.md). Open on purpose: an
+/// unknown id from a newer backend still folds generically (a notice
+/// with an id nobody clears pins forever only if it is an `Error` —
+/// the producer's ruling, honored verbatim).
+pub struct NoticeId;
+
+impl NoticeId {
+    /// No usable model at this backend (the zero-config state).
+    /// Stream-stamped; cleared by the world-refresh act when usable.
+    pub const MODEL_UNUSABLE: &'static str = "model.unusable";
+    /// A model preference degraded (`default_model`, a resumed
+    /// session's model) — a transient `Warn`.
+    pub const MODEL_PREFERENCE: &'static str = "model.preference";
+    /// A `model` command failed validation — a transient `Warn`.
+    pub const MODEL_COMMAND: &'static str = "model.command";
+    /// A `login`/`logout` failed. Unstamped, backend-level; cleared
+    /// by the next successful login/logout.
+    pub const AUTH_FAILED: &'static str = "auth.failed";
+    /// A session command failed (an unknown target, an unreadable
+    /// session file, a failed listing) — a transient `Warn`.
+    pub const SESSION_COMMAND: &'static str = "session.command";
+    /// A startup failure the process exits on. Unstamped; pinned —
+    /// the transcript is the right home too (the dock dies with the
+    /// process), so frontends print it as well as pin it.
+    pub const STARTUP: &'static str = "startup";
+    /// A `checkout` command failed — a transient `Warn`.
     pub const CHECKOUT: &'static str = "checkout";
-    /// A `login`/`logout` command failed (an unknown provider, an
-    /// unwritable auth file).
-    pub const AUTH: &'static str = "auth";
-    /// Persistence degraded: this many records are pending on disk.
-    pub const PERSIST_DEGRADED: &'static str = "persist_degraded";
-    /// Persistence recovered: pending records reached the disk.
-    pub const PERSIST_RECOVERED: &'static str = "persist_recovered";
+    /// The session log refuses to flush; records stay queued.
+    /// Stream-stamped; cleared when the flush recovers.
+    pub const PERSIST_DEGRADED: &'static str = "persist.degraded";
+    /// A `compact` command failed — a transient `Warn`.
+    pub const COMPACTION_FAILED: &'static str = "compaction.failed";
+    /// An extension is dead at boot — a transient `Warn`.
+    pub const EXTENSION_DEAD: &'static str = "extension.dead";
+    /// A turn hit the provider output limit — a transient `Warn`.
+    pub const TURN_TRUNCATED: &'static str = "turn.truncated";
 }
 
-/// The well-known `run_failed { kind }` values (an open string by the
-/// same law as [`ErrorKind`]: a backend may grow a kind, and a
-/// frontend that does not know it displays the message generically
-/// instead of failing). The taxonomy is what the failure paths
-/// actually produce — not the provider/budget/stopped sketch the v8
-/// contract once promised (that deferral's named dependency, the
-/// write-behind producer, shipped without the field; v10 lands the
-/// real one, the codex-review ruling 2026-09).
+/// The well-known `run_failed { kind }` values (an open string: a
+/// backend may grow a kind, and a frontend that does not know it
+/// displays the message generically instead of failing). The taxonomy
+/// is what the failure paths actually produce — not the
+/// provider/budget/stopped sketch the v8 contract once promised (the
+/// deferral's named dependency, the write-behind producer, shipped
+/// without the field; v10 lands the real one, the codex-review ruling
+/// 2026-09).
 pub struct RunFailedKind;
 
 impl RunFailedKind {
@@ -832,7 +883,8 @@ impl SessionEvent {
             SessionEvent::TurnTruncated { .. } => tags::TURN_TRUNCATED,
             SessionEvent::RunFinished { .. } => tags::RUN_FINISHED,
             SessionEvent::RunFailed { .. } => tags::RUN_FAILED,
-            SessionEvent::Error { .. } => tags::ERROR,
+            SessionEvent::Notice { .. } => tags::NOTICE,
+            SessionEvent::NoticeCleared { .. } => tags::NOTICE_CLEARED,
             SessionEvent::ReplayBegin { .. } => tags::REPLAY_BEGIN,
             SessionEvent::ReplayEnd => tags::REPLAY_END,
             SessionEvent::CheckedOut { .. } => tags::CHECKED_OUT,
@@ -881,7 +933,8 @@ pub mod tags {
     pub const TURN_TRUNCATED: &str = "turn_truncated";
     pub const RUN_FINISHED: &str = "run_finished";
     pub const RUN_FAILED: &str = "run_failed";
-    pub const ERROR: &str = "error";
+    pub const NOTICE: &str = "notice";
+    pub const NOTICE_CLEARED: &str = "notice_cleared";
     pub const REPLAY_BEGIN: &str = "replay_begin";
     pub const REPLAY_END: &str = "replay_end";
     pub const CHECKED_OUT: &str = "checked_out";
@@ -920,7 +973,8 @@ pub mod tags {
         TURN_TRUNCATED,
         RUN_FINISHED,
         RUN_FAILED,
-        ERROR,
+        NOTICE,
+        NOTICE_CLEARED,
         REPLAY_BEGIN,
         REPLAY_END,
         CHECKED_OUT,

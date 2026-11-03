@@ -65,7 +65,7 @@ use serde::{Deserialize, Serialize};
 /// compaction — the `compact` command and its event family (reshaped
 /// in v15 into the
 /// `compaction_begin`/`compaction_step`/`compaction_end` envelope).
-pub const PROTOCOL_VERSION: u32 = 26;
+pub const PROTOCOL_VERSION: u32 = 27;
 
 /// Which session produced an event. The stamp is the session id
 /// itself (v3: the `"main"` alias is retired — one name per session);
@@ -165,7 +165,7 @@ impl std::fmt::Debug for ApiKey {
 ///
 /// Outcomes are events (`user_message` for acceptance, the run
 /// terminals for results); a command naming an unknown session yields
-/// an unstamped `error { kind: session }` (backend-level — the
+/// an unstamped `notice { id: "session.command" }` (backend-level — the
 /// optional-stream ruling: the routing failure belongs to no session
 /// open in this backend).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -218,7 +218,7 @@ pub enum SessionCommand {
     /// stamped `session_opened { resumed: false }` for the new
     /// session (one announcement shape for every path — v10; the
     /// `session_created` interim died with its one-version window) —
-    /// or an unstamped `error { kind: session }` if the session
+    /// or an unstamped `notice { id: "session.command" }` if the session
     /// cannot be built. Nothing replays; the session is empty.
     NewSession,
     /// Load a stored session (if needed) and replay it onto the event
@@ -237,7 +237,7 @@ pub enum SessionCommand {
     /// `messages_discarded` (only what was submitted before this
     /// command), `run_aborted` (only if a run was in flight), then
     /// `checked_out` and a full replay pass; an unknown entry emits
-    /// `error { kind: checkout }` immediately and changes nothing
+    /// `notice { id: "checkout" }` immediately and changes nothing
     /// (FRONTEND.md §5).
     Checkout {
         /// The target session id.
@@ -248,7 +248,7 @@ pub enum SessionCommand {
     /// Switch a session's model: exactly a [`ModelSelection`] — a
     /// state write that happens entirely at receive. Validated against
     /// config (an unusable ref is an immediate
-    /// `error { kind: model }` — even mid-run, where a picker wants
+    /// `notice { id: "model.command" }` — even mid-run, where a picker wants
     /// the feedback), then the register write lands at once (the
     /// `model_change` entry and the live selection, one shared-write
     /// operation) and `model_selected` follows immediately. A run in
@@ -293,7 +293,7 @@ pub enum SessionCommand {
     /// `new_session`). The ack is the re-announced
     /// `models_available`/`providers_available` pair (one act,
     /// last-wins fold); an unknown provider or an unwritable auth
-    /// file is an unstamped `error { kind: "auth" }`. The key is NOT
+    /// file is an unstamped `notice { id: "auth.failed", level: "error" }`. The key is NOT
     /// verified at login — the next run open validates. Redaction:
     /// `api_key` never enters the session log, the model context, or
     /// frame traces.

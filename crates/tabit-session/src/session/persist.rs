@@ -29,12 +29,14 @@ impl Session {
             return;
         };
         let event = if degraded {
-            tabit_protocol::SessionEvent::error_persist_degraded(
-                pending,
-                "the session log refuses to flush; records stay queued and retry",
+            tabit_protocol::SessionEvent::notice_condition(
+                tabit_protocol::NoticeId::PERSIST_DEGRADED,
+                format!(
+                    "the session log refuses to flush; {pending} record(s) stay queued and retry"
+                ),
             )
         } else {
-            tabit_protocol::SessionEvent::error_persist_recovered()
+            tabit_protocol::SessionEvent::notice_cleared(tabit_protocol::NoticeId::PERSIST_DEGRADED)
         };
         sink.emit(event);
     }

@@ -12,7 +12,7 @@
  * own `Input`, not the history-keeping editor. Sending is
  * fire-and-forget like every command — the re-announced
  * `models_available` + `providers_available` pair is the ack, an
- * `error { kind: "auth" }` the failure note.
+ * `notice { id: "auth.failed" }` the failure notice.
  *
  * Keys: ↑/↓ move (wrapping), enter advances/confirms, escape closes.
  * The key phase's enter on an empty key stays put — the backend would

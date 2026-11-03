@@ -60,9 +60,11 @@ fn main() {
                 let SessionEvent::InteractionSettled { id } = frame.event else {
                     return;
                 };
-                ctx.emit(SessionEvent::error_session(format!(
-                    "echo-ext saw card `{id}` settle"
-                )));
+                ctx.emit(SessionEvent::notice_transient(
+                    "extension.report",
+                    tabit_protocol::NoticeLevel::Info,
+                    format!("echo-ext saw card `{id}` settle"),
+                ));
             })),
     );
 }

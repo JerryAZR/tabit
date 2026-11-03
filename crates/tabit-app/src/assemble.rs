@@ -831,7 +831,7 @@ pub fn assemble(
     store: &SessionStore,
     miss: ContinueMiss,
     extensions: Option<std::sync::Arc<extensions::Mounted>>,
-) -> Result<(Session, Vec<String>), String> {
+) -> Result<(Session, Vec<tabit_protocol::StartupNotice>), String> {
     // Default-model resolution (registry): an explicit --model wins,
     // then the resumed session's last model, then default_model in
     // providers.toml, then the first configured model. Nothing usable
@@ -866,7 +866,7 @@ pub fn assemble(
         .default_selection(explicit, resumed)
         .map_err(|e| e.to_string())?;
     // Startup degradations are data (ruled: external errors ride the
-    // channel): the host emits them as `error { kind: model }` frames —
+    // channel): the host emits them as `notice` frames (v27) —
     // after the report and the session's own `session_opened`. `selection` may be
     // `None` (nothing usable at this backend): the session opens
     // selection-less and the note above teaches the fix.

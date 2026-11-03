@@ -44,8 +44,8 @@ message-to-event invariant hold across both without special cases.
 **The degraded-buffer guard (the weak barrier; ruled 2026-08).** At
 run entry the buffer gets one drain attempt — `enqueue(&[])`, an empty
 batch, which is by construction a pure retry of any stuck lines. Ok
-proceeds (clean, or just recovered: `persist_recovered`); Err blocks
-the start gracefully (`persist_degraded` — an external condition, not
+proceeds (clean, or just recovered: the `persist.degraded` clear); Err blocks
+the start gracefully (the `persist.degraded` notice — an external condition, not
 a crash). Semantics: **the first failed drain runs in memory** — the
 prompt fold's enqueue fails, the conversation proceeds anyway, the
 lines stay queued and retry on every later enqueue — **but the next

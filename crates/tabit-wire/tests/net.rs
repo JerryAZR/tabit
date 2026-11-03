@@ -91,7 +91,11 @@ fn stub_node_role() {
                         stream: Some(StreamId::new(session.clone())),
                         origin: None,
                         ttl: None,
-                        event: SessionEvent::error_session(format!("stub got: {text}")),
+                        event: SessionEvent::notice_transient(
+                            "session.command",
+                            tabit_protocol::NoticeLevel::Warn,
+                            format!("stub got: {text}"),
+                        ),
                     },
                 );
             }
@@ -127,7 +131,11 @@ fn stub_node_role() {
             stream: Some(StreamId::new("stub-sess")),
             origin: None,
             ttl: None,
-            event: SessionEvent::error_session("stub session opened".to_string()),
+            event: SessionEvent::notice_transient(
+                "session.command",
+                tabit_protocol::NoticeLevel::Warn,
+                "stub session opened".to_string(),
+            ),
         },
     );
 
@@ -384,7 +392,7 @@ fn the_childs_burst_frame_reaches_the_mounted_lane() {
                 .lock()
                 .expect("test lock")
                 .iter()
-                .any(|seen| seen.contains("error") && seen.ends_with("stub-sess"))
+                .any(|seen| seen.contains("notice") && seen.ends_with("stub-sess"))
             {
                 break true;
             }
@@ -826,7 +834,7 @@ fn a_lanes_death_cascades_to_every_stream_it_carried() {
     assert!(
         rig.stream_frames("stub-grand-sess")
             .iter()
-            .any(|seen| seen.starts_with("error")),
+            .any(|seen| seen.starts_with("notice")),
         "the relayed grandchild frame taught the lane's route: {:?}",
         rig.stream_frames("stub-grand-sess")
     );

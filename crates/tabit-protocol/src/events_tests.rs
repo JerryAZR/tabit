@@ -128,14 +128,23 @@ fn all_events() -> Vec<SessionEvent> {
         SessionEvent::InteractionSettled {
             id: "0199".to_string(),
         },
-        SessionEvent::error_model("default_model `gone` is not usable"),
+        SessionEvent::notice_transient(
+            NoticeId::MODEL_PREFERENCE,
+            NoticeLevel::Warn,
+            "default_model `gone` is not usable",
+        ),
+        SessionEvent::notice_cleared(NoticeId::MODEL_UNUSABLE),
         SessionEvent::ReplayBegin { total: 7 },
         SessionEvent::ReplayEnd,
         SessionEvent::CheckedOut {
             entry_id: "0197".to_string(),
             base_id: None,
         },
-        SessionEvent::error_checkout("no entry `0199` in this session"),
+        SessionEvent::notice_transient(
+            NoticeId::CHECKOUT,
+            NoticeLevel::Warn,
+            "no entry `0199` in this session",
+        ),
         SessionEvent::SessionsAvailable {
             sessions: vec![
                 AvailableSession {
@@ -154,7 +163,7 @@ fn all_events() -> Vec<SessionEvent> {
                 },
             ],
         },
-        SessionEvent::error_session("no session with id `0195`"),
+        SessionEvent::notice_condition(NoticeId::MODEL_UNUSABLE, "no usable model"),
         SessionEvent::ModelSelected {
             provider: "p".to_string(),
             model: "m".to_string(),
@@ -168,7 +177,7 @@ fn all_events() -> Vec<SessionEvent> {
                 cache_write: 0.4,
             }),
         },
-        SessionEvent::error_persist_degraded(3, "records are pending on disk"),
+        SessionEvent::notice_condition(NoticeId::PERSIST_DEGRADED, "records are pending on disk"),
         SessionEvent::SkillsAvailable {
             skills: vec![AvailableSkill {
                 name: "lint".to_string(),
@@ -304,17 +313,21 @@ fn every_tag_agrees_with_the_wire_the_enum_and_the_list() {
     listed.sort_unstable();
     assert_eq!(seen, listed, "the list is exactly one entry per kind");
 
-    // The error carrier: kind is an open string; kind-specific structure
-    // (the pending count) rides only when present.
+    // The notice carrier (v27): id + level + text; the clear carries
+    // the id alone.
     assert_eq!(
-        serde_json::to_string(&SessionEvent::error_model("stale default_model"))
-            .expect("serialize"),
-        r#"{"type":"error","kind":"model","message":"stale default_model"}"#
+        serde_json::to_string(&SessionEvent::notice_transient(
+            NoticeId::MODEL_PREFERENCE,
+            NoticeLevel::Warn,
+            "stale default_model"
+        ))
+        .expect("serialize"),
+        r#"{"type":"notice","id":"model.preference","level":"warn","text":"stale default_model"}"#
     );
     assert_eq!(
-        serde_json::to_string(&SessionEvent::error_persist_degraded(3, "pending"))
+        serde_json::to_string(&SessionEvent::notice_cleared(NoticeId::MODEL_UNUSABLE))
             .expect("serialize"),
-        r#"{"type":"error","kind":"persist_degraded","message":"pending","pending":3}"#
+        r#"{"type":"notice_cleared","id":"model.unusable"}"#
     );
     assert_eq!(
         serde_json::to_string(&SessionEvent::InteractionSettled {

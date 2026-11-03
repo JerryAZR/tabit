@@ -568,7 +568,7 @@ async fn abort_with_a_card_open_closes_the_question_totally() {
     assert!(
         !frames
             .iter()
-            .any(|f| matches!(f.event, SessionEvent::Error { .. })),
+            .any(|f| matches!(f.event, SessionEvent::Notice { .. })),
         "the racing answer is a total no-op — no error frame for it"
     );
     std::fs::remove_dir_all(store.dir()).ok();

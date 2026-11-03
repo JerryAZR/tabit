@@ -45,6 +45,7 @@
 import { log } from "./log.ts";
 import { SessionTree } from "./session-tree.ts";
 import { PROTOCOL_VERSION } from "./protocol.ts";
+import type { DockedNotice } from "./components/notice-bar.ts";
 import type { AvailableExtension, AvailableProvider, CatalogChannelStatus, ModelCost, ParsedServerFrame, ProviderStatus, ServerControlFrame, SessionEvent, Usage } from "./protocol.ts";
 
 export interface PendingMessage {
@@ -109,6 +110,10 @@ export interface FooterFacts {
 	/** The FOCUSED stream's run state (a child's run does not light the
 	 *  status line while the root is focused — the list carries it). */
 	running: boolean;
+	/** The catalog channel's resolved boot state (v26) — backend-level,
+	 *  folded last-wins into every push; the badge speaks for `offline`
+	 *  only (a quiet channel says nothing). */
+	catalog: CatalogChannelStatus | undefined;
 	/** The focused stream is closed (v23) — viewing only; sends are
 	 *  intercepted with a synthesized error note. */
 	closed: boolean;
@@ -176,6 +181,9 @@ export interface ModeView {
 	/** The FOCUSED stream's pending queue. */
 	setPending(pending: PendingMessage[]): void;
 	setStatus(text: string): void;
+	/** The dock's live notice (v27): the highest-severity one, with the
+	 *  overflow count; undefined when nothing is live. */
+	setNotice(notice: DockedNotice | undefined, overflow: number): void;
 	setFooter(facts: FooterFacts): void;
 	/** A card from any stream surfaces immediately (view-independent,
 	 *  owner ruling); `streamLabel` names a non-root card's stream. */
@@ -332,6 +340,16 @@ class StreamState {
 	}
 }
 
+/** The strip's text while a catalog check is in flight (v26) — one
+ *  home for `#statusText` (a focused stream exists) and `#emitStrip`
+ *  (the pre-focus boot). */
+const CATALOG_CHECKING = "checking the model catalog…";
+
+/** Transient notices age out after this many completed turns (turn
+ *  count, never wall time — the user's hours away cost a notice
+ *  nothing). Errors are exempt: they pin until `notice_cleared`. */
+const TRANSIENT_TURNS = 2;
+
 export class InteractiveMode {
 	readonly #backend: BackendLink;
 	readonly #view: ModeView;
@@ -349,9 +367,21 @@ export class InteractiveMode {
 	 *  unconditional, folded last-wins with each world refresh. Login
 	 *  targets re-derive from it (`auth: "none"`); `env` is display-only. */
 	#providerStatuses: ProviderStatus[] = [];
-	/** The catalog channel's resolved state (v26) — folded, notable
-	 *  states noted; nothing else reads it yet. */
+	/** The catalog channel's resolved state (v26) — folded last-wins; the
+	 *  footer badge speaks for `offline`, the notice derivation for
+	 *  `pending`. */
 	#catalogStatus: CatalogChannelStatus | undefined;
+	/** A catalog network check is in flight (the v26 control frame) —
+	 *  backend-level, cleared when `providers_available` lands the
+	 *  resolved state. The strip's one boot-phase producer. */
+	#catalogChecking = false;
+	/** The live notices (v27), keyed by condition id at their emitter
+	 *  (stream-stamped = per-session, unstamped = backend-level). An
+	 *  error pins until `notice_cleared`; info/warn age out after
+	 *  `TRANSIENT_TURNS` completed turns (turn count, never wall time —
+	 *  a notice survives the user being away). */
+	readonly #notices = new Map<string, { level: "info" | "warn" | "error"; text: string; pinned: boolean; bornTurn: number }>();
+	#turnCount = 0;
 	#keybindings: KeybindingFact[] = [];
 	/** Open cards by id, each carrying the stream its answer routes to —
 	 *  cards are view-independent (owner ruling), never per-transcript. */
@@ -695,12 +725,13 @@ export class InteractiveMode {
 			this.#view.addNote(undefined, `unknown frame${parsed.type ? ` (${parsed.type})` : ""} — logged, connection kept`, "warn");
 			return;
 		}
-		// A backend-level error before the boot session opened is the
-		// startup-failure shape (v19): the report, this one unstamped error
-		// carrying the reason (config problems carry the setup guide), then
-		// a nonzero exit. Display the reason and die — respawn is the fix.
-		if (parsed.stream === undefined && parsed.event.type === "error" && this.#root === undefined) {
-			this.onFatal?.(parsed.event.message);
+		// The startup-failure shape (v19, v27's carrier): the report, one
+		// unstamped STARTUP notice at error level carrying the reason
+		// (config problems carry the setup guide), then a nonzero exit.
+		// Only that shape is fatal — an early backend-level info/warn
+		// notice (a routing miss, an extension's report) is ordinary.
+		if (parsed.stream === undefined && parsed.event.type === "notice" && parsed.event.id === "startup" && parsed.event.level === "error" && this.#root === undefined) {
+			this.onFatal?.(parsed.event.text);
 			return;
 		}
 		const event = parsed.event;
@@ -731,6 +762,14 @@ export class InteractiveMode {
 				}
 				this.#handlers.session_closed(target, event);
 				this.#emitSubagents();
+				return;
+			}
+			// A backend-level notice is a PER-PROCESS condition — its id
+			// keys bare, never under the root (a clear for it arrives
+			// unstamped too; folding it into the root would strand the
+			// pinned notice the moment the root changes).
+			if (event.type === "notice" || event.type === "notice_cleared") {
+				this.#foldBackendNotice(event);
 				return;
 			}
 			const root = this.#root === undefined ? undefined : this.#streams.get(this.#root);
@@ -836,8 +875,10 @@ export class InteractiveMode {
 		}
 		if (frame.type === "catalog_status") {
 			// v26: a network check is genuinely in flight and the boot is
-			// bounded-waiting on it — the frame's whole purpose is being shown.
-			this.#view.addNote(undefined, "checking the model catalog…", "info");
+			// bounded-waiting on it. The strip owns it (transient — it
+			// resolves inside the boot act), never a transcript print.
+			this.#catalogChecking = true;
+			this.#emitStrip();
 			return;
 		}
 		this.#view.addNote(undefined, `protocol error: ${frame.message}`, "error");
@@ -888,6 +929,7 @@ export class InteractiveMode {
 			rates: s.rates,
 			running: s.running,
 			closed: s.closed,
+			catalog: this.#catalogStatus,
 		});
 		this.#view.setStatus(this.#statusText(s));
 		this.#view.setPending(s.pending);
@@ -897,6 +939,10 @@ export class InteractiveMode {
 	#statusText(s: StreamState): string {
 		if (s.compacting) return "compacting context…";
 		if (s.running) return "working — esc interrupts";
+		// The catalog check (v26) — a busy state below the run's, above
+		// the blank: it resolves inside the boot act, before any run can
+		// start, so the arbitration never actually contends.
+		if (this.#catalogChecking) return CATALOG_CHECKING;
 		// A closed stream is not busy — the blank row, and the footer's
 		// state badge carries the "closed" word (the one-indicator ruling:
 		// the status strip spins for busy states only).
@@ -908,6 +954,68 @@ export class InteractiveMode {
 	 *  list carries it). */
 	#emitStatus(s: StreamState): void {
 		if (s.id === this.#focused) this.#view.setStatus(this.#statusText(s));
+	}
+
+	/** The strip's backend-level emission (the catalog check): a focused
+	 *  stream's own state outranks it; pre-focus the strip already reads
+	 *  "connecting…", which only the check replaces. */
+	#emitStrip(): void {
+		const s = this.#focusedState();
+		if (s !== undefined) {
+			this.#view.setStatus(this.#statusText(s));
+		} else if (this.#catalogChecking) {
+			this.#view.setStatus(CATALOG_CHECKING);
+		}
+	}
+
+	/** A backend-level notice/clear: the bare id, never a stream's. */
+	#foldBackendNotice(event: Extract<SessionEvent, { type: "notice" | "notice_cleared" }>): void {
+		if (event.type === "notice") {
+			this.#foldNotice(event.id, event);
+		} else {
+			this.#notices.delete(event.id);
+			this.#emitNotice();
+		}
+	}
+
+	/** The one notice fold. `key` scopes the condition: a bare id for a
+	 *  backend-level (per-process) condition, `stream/id` for a
+	 *  per-session one — the clear's key is derived the same way at the
+	 *  same stamp, so a pinned notice and its clear always meet. */
+	#foldNotice(key: string, event: { id: string; level: "info" | "warn" | "error"; text: string }): void {
+		this.#notices.set(key, {
+			level: event.level,
+			text: event.text,
+			pinned: event.level === "error",
+			bornTurn: this.#turnCount,
+		});
+		this.#emitNotice();
+	}
+
+	/** The dock's live notice: highest severity first (error > warn >
+	 *  info), insertion order within a level; the rest is the overflow
+	 *  count. */
+	#emitNotice(): void {
+		const live = [...this.#notices.values()];
+		const rank = (level: string) => (level === "error" ? 0 : level === "warn" ? 1 : 2);
+		live.sort((a, b) => rank(a.level) - rank(b.level));
+		const top = live[0];
+		this.#view.setNotice(top === undefined ? undefined : { level: top.level, text: top.text }, Math.max(0, live.length - 1));
+	}
+
+	/** The turn clock (a committed turn ages every transient by one):
+	 *  a notice posted before the user's coffee break is still there
+	 *  when they return — only completed turns age it out. */
+	#tickTurns(): void {
+		this.#turnCount++;
+		let changed = false;
+		for (const [id, notice] of this.#notices) {
+			if (!notice.pinned && this.#turnCount - notice.bornTurn >= TRANSIENT_TURNS) {
+				this.#notices.delete(id);
+				changed = true;
+			}
+		}
+		if (changed) this.#emitNotice();
 	}
 
 	/** Emit the footer when the FOCUSED stream's facts changed. */
@@ -997,53 +1105,23 @@ export class InteractiveMode {
 			case "models_available":
 				// v21: the usable-model picker catalog — backend-level, always
 				// emitted (even empty), re-announced on world change, last-wins.
-				// The setup-state warning rides providers_available (v22), which
-				// follows in the same act with the full key-source picture.
+				// The inventory rides the hero on a fresh boot; elsewhere the
+				// fold is silent (the picker shows the same on demand).
 				this.#catalog = event.providers;
-				if (event.providers.length === 0) return;
-				if (this.#heroActive) {
-					this.#emitHero();
-					return;
-				}
-				{
-					const models = event.providers.reduce((n, p) => n + p.models.length, 0);
-					this.#view.addNote(undefined, `${models} model(s) across ${event.providers.length} provider(s)`, "info");
-				}
+				if (this.#heroActive) this.#emitHero();
 				return;
 			case "providers_available":
-				// v22: unconditional, one act with models_available. The setup
-				// predicate (§3.2) branches the first-run teaching here.
+				// v22: unconditional, one act with models_available. v26: the
+				// channel's resolved state folds — `offline` speaks through
+				// the footer badge, the checking phase through the strip;
+				// every other state is quiet. Notices ride their own event
+				// (v27) — this fold carries no presentation duty.
 				this.#providerStatuses = event.providers;
-				// v26: the catalog channel's resolved state — announce-if-cheap;
-				// only the notable states speak (a quiet channel says nothing).
+				this.#catalogChecking = false;
 				this.#catalogStatus = event.catalog;
-				switch (event.catalog.state) {
-					case "updated":
-						this.#view.addNote(undefined, `model catalog updated${event.catalog.version !== undefined ? ` (v${event.catalog.version})` : ""}`, "info");
-						break;
-					case "offline":
-						this.#view.addNote(undefined, "model catalog check failed — using the cache", "warn");
-						break;
-					case "pending":
-						this.#view.addNote(undefined, "model catalog refresh continues in background — applies next boot", "info");
-						break;
-					default:
-						break; // disabled / cached / fresh: nothing to say
-				}
-				if (event.providers.length === 0) {
-					this.#view.addNote(undefined, "no providers configured at this backend — write ~/.tabit/providers.toml and restart", "warn");
-					return;
-				}
-				{
-					const missing = event.providers.filter(p => p.auth === "none");
-					if (this.#catalog.length === 0) {
-						this.#view.addNote(undefined, `no usable models — missing keys for: ${missing.map(p => p.id).join(", ")}`, "warn");
-						return;
-					}
-					if (missing.length > 0) {
-						this.#view.addNote(undefined, `no key for: ${missing.map(p => p.id).join(", ")} — login fixes in-app`, "info");
-					}
-				}
+				// The badge and the strip ride the focused-state emission
+				// (self-guards until a stream has the focus).
+				this.#emitFocusedState();
 				return;
 			default:
 				// An unstamped arrival of a stamped-vocabulary event: the wire
@@ -1076,9 +1154,9 @@ export class InteractiveMode {
 			this.#restingStatus = { state: "done" };
 			this.#emitStatus(s);
 			this.#emitFooter(s);
-			if (!event.durable) {
-				this.#view.addNote(s.id, "log writes are degraded — this run may not survive a crash", "warn");
-			}
+			// A non-durable run is the persist.degraded condition's fact
+			// (v27): it docks via the notice, clears on recovery — never a
+			// transcript print.
 			this.#closeStreamCards(s, "run finished");
 		},
 		run_aborted: (s, event) => {
@@ -1138,7 +1216,12 @@ export class InteractiveMode {
 			s.lastDelta = "reasoning";
 			this.#view.appendReasoning(s.id, event.turn_id, event.id, event.reasoning);
 		},
-		turn_committed: () => {},
+		turn_committed: (s) => {
+			// The turn clock counts LIVE turns only: a replay pass commits
+			// history, and aging a fresh notice on it would erase the
+			// boot's own warnings before the pass finishes.
+			if (!s.replaying) this.#tickTurns();
+		},
 		turn_retried: (s, event) => {
 			s.tree.retryTurn(event.turn_id);
 			this.#view.removeTurn(s.id, event.turn_id);
@@ -1168,20 +1251,22 @@ export class InteractiveMode {
 			// Provider-native, live-only, never replayed — nothing to render yet.
 			log("native_item received");
 		},
-		// --- errors / durability ---------------------------------------------------
-		error: (s, event) => {
-			if (event.kind === "persist_degraded") {
-				this.#view.addNote(s.id, `log writes degraded — ${event.pending ?? "?"} record(s) pending flush`, "warn");
-				return;
-			}
-			if (event.kind === "persist_recovered") {
-				this.#view.addNote(s.id, "log writes recovered", "info");
-				return;
-			}
-			// kind "model" is a degradation, not a death (§6): a fallback
-			// named, or the zero-config teaching note — the session runs on.
-			// kind "auth" (v21) is a failed login/logout — an error note.
-			this.#view.addNote(s.id, `error (${event.kind}): ${event.message}`, event.kind === "model" ? "warn" : "error");
+		// --- notices (v27) ---------------------------------------------------------
+		notice: (s, event) => {
+			// (The fatal startup notice never reaches this handler —
+			// handleFrame's pre-boot branch routes it to onFatal, whose
+			// report prints at exit. The dock dies with the process.)
+			this.#notices.set(s.id === undefined ? event.id : `${s.id}/${event.id}`, {
+				level: event.level,
+				text: event.text,
+				pinned: event.level === "error",
+				bornTurn: this.#turnCount,
+			});
+			this.#emitNotice();
+		},
+		notice_cleared: (s, event) => {
+			this.#notices.delete(s.id === undefined ? event.id : `${s.id}/${event.id}`);
+			this.#emitNotice();
 		},
 		// --- replay ------------------------------------------------------------------
 		replay_begin: (s) => {
