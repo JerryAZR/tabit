@@ -32,7 +32,12 @@
  * `--publish` uploads the tarballs just packed — platform packages first,
  * the meta last (a fresh install's optional deps must resolve from the
  * registry the moment the meta is visible) — and is the ONE publish path
- * for both flows:
+ * for both flows. A package@version already on the registry is SKIPPED
+ * with a log line: a re-run after a partial publish (expired OIDC, a
+ * mid-matrix failure) resumes where it stopped instead of dying on the
+ * first duplicate. The first publish of a package still happens manually
+ * (a skipped package already exists, so its trusted-publishing link
+ * already exists too).
  *
  *   manual   `node scripts/pack.ts --matrix linux-x64 --publish` — rides
  *            the logged-in account's 2FA prompt (stdio is inherited).
@@ -233,11 +238,30 @@ if (publish) {
 	// Upload exactly the tarballs packed above (never re-tar a staging
 	// dir): platform packages first, the meta last — a fresh install's
 	// optional deps must resolve from the registry the moment the meta
-	// becomes visible.
-	for (const tgz of [...[...toPack].map(p => join(dist, `${platformPackageName(p)}-${version}.tgz`)), join(dist, `tabit-agent-${version}.tgz`)]) {
+	// becomes visible. Idempotent: a version already on the registry is
+	// skipped (a partial publish's re-run resumes, never bumps to escape
+	// a duplicate).
+	const isPublished = (name: string): boolean => {
+		// A 200 means this exact version exists; 404 means it does not.
+		// Any other failure (offline, a registry error) is NOT a skip:
+		// publish and let npm's own duplicate check be the loud answer.
+		const result = spawnSync("npm", ["view", `${name}@${version}`, "version", "--registry", "https://registry.npmjs.org"], {
+			encoding: "utf8",
+			shell: process.platform === "win32",
+		});
+		return result.status === 0;
+	};
+	for (const [name, tgz] of [
+		...[...toPack].map(p => [platformPackageName(p), join(dist, `${platformPackageName(p)}-${version}.tgz`)] as const),
+		["tabit-agent", join(dist, `tabit-agent-${version}.tgz`)] as const,
+	]) {
+		if (isPublished(name)) {
+			console.log(`skip ${name}@${version} — already on the registry`);
+			continue;
+		}
 		run(["npm", "publish", tgz, ...(provenance ? ["--provenance"] : [])]);
 	}
-	console.log(`published tabit-agent@${version} + [${[...toPack].join(", ")}]`);
+	console.log(`published tabit-agent@${version} + [${[...toPack].join(", ")}] (already-published versions skipped)`);
 } else {
 	// The local install IS the published install — npm publish only uploads
 	// these same tarballs. Listing the platform tarballs explicitly lets npm
