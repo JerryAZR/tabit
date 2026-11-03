@@ -83,6 +83,44 @@ fn auto_path_sits_next_to_the_config_or_falls_back_to_the_home_dir() {
 }
 
 #[tokio::test]
+async fn a_bare_machine_gets_the_config_dir_created() {
+    // The fresh-install path: ~/.tabit does not exist when the
+    // refresh spawns (the session store creates it later). The lock,
+    // the artifact, and the state sidecar must not ENOENT — the
+    // refresh creates the dir itself.
+    let dir = temp_dir("bare-machine")
+        .join("not-yet-there")
+        .join(".tabit");
+    let auto = dir.join("providers.auto.toml");
+    let server = httpmock::MockServer::start_async().await;
+    let latest = format!(
+        "version = \"v1\"\nsha256 = \"{}\"\nmin_schema = 1\n",
+        sha256_hex(CATALOG_V1)
+    );
+    server.mock(|when, then| {
+        when.path("/latest.toml");
+        then.status(200).body(&latest);
+    });
+    server.mock(|when, then| {
+        when.path("/catalog-v1.toml");
+        then.status(200).body(CATALOG_V1);
+    });
+
+    let outcome = refresh(&settings(vec![server.url("")]), &auto).await;
+
+    assert!(
+        matches!(outcome, RefreshOutcome::Updated { .. }),
+        "a bare machine updates, not {outcome:?}"
+    );
+    assert!(auto.is_file(), "the artifact landed in the created dir");
+    let _ = std::fs::remove_dir_all(
+        dir.parent()
+            .and_then(Path::parent)
+            .expect("the staging root"),
+    );
+}
+
+#[tokio::test]
 async fn a_held_refresher_lock_skips_the_refresh_before_the_network() {
     let dir = temp_dir("lock-held");
     let auto = dir.join("providers.auto.toml");

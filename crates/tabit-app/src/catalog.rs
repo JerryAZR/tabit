@@ -252,6 +252,20 @@ pub(crate) async fn refresh(settings: &CatalogSettings, auto_path: &Path) -> Ref
         return RefreshOutcome::Fresh { version };
     }
 
+    // A bare machine: the config dir may not exist yet — the refresh
+    // spawns before the session store creates it. The lock, the
+    // artifact, and the state sidecar all land in it; create it first.
+    if let Some(parent) = auto_path.parent()
+        && let Err(err) = std::fs::create_dir_all(parent)
+    {
+        return RefreshOutcome::Offline {
+            reason: format!(
+                "the catalog directory {} is unusable: {err}",
+                parent.display()
+            ),
+        };
+    }
+
     // Serialize concurrent refreshers. The OS releases the claim on
     // any exit kind; a held lock means another process is refreshing
     // right now — skip.
