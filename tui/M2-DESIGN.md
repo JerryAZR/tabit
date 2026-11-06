@@ -63,11 +63,9 @@ the end and nowhere else. When a rule changes, change it here first.
 
 - **Editor submit routes to the focused stream** — `message { session,
   text }` carries it; steering a focused child costs nothing. **Switching
-  stream focus discards the editor draft** (owner ruling: travel only if
-  the editor had a clear-all shortcut; pi-tui 1.0.2's editor actions top
-  out at delete-to-line-start/end, so there is none — a stranded draft
-  could only be sent to the wrong stream). Region-focus moves (editor ↔
-  list ↔ transcript) never touch the draft.
+  stream focus discards the editor draft** (owner ruling: drafts do not
+  travel — text authored for one stream must not be sent to another).
+  Region-focus moves (editor ↔ list ↔ transcript) never touch the draft.
 - **Esc**: focused stream not root → return to its **parent** (generic
   walk-up, never hardcoded to root), running or idle alike — navigation
   is never destructive (2026-10 ruling reversal: the old law aborted a
@@ -75,8 +73,8 @@ the end and nowhere else. When a rule changes, change it here first.
   state the user wasn't tracking). Abort is the root's: focused root
   running → `abort` (killing the parent's run takes the subagent calls
   with it — the bridge tree-kills the children); root idle → nothing.
-  Quit stays ctrl+d/ctrl+c on an empty editor; Ctrl+C keeps its global
-  interrupt shape.
+  Quit stays ctrl+d/ctrl+c on an idle empty editor; Ctrl+C interrupts a
+  run, clears an idle non-empty draft, and quits once idle and empty.
 - **Slash commands**: session-scoped ones (`/model`, `/compact`,
   `/rewind`, `/tree`) route to the focused stream; backend-level ones
   (`/new`, `/login`, `/logout`, `/sessions`) stay global. Uniform rule.
@@ -164,6 +162,6 @@ subagent list** (the list exists only when it has entries).
 ## Open questions
 
 (none — the three from the design discussion were ruled: drafts are
-discarded on stream switch (no editor clear-all exists), a vanished
-focused region yields the editor generically, the first widget is a
-vertical list.)
+discarded on stream switch (drafts do not travel), a vanished focused
+region yields the editor generically, the first widget is a vertical
+list.)

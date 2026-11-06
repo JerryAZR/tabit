@@ -10,8 +10,8 @@
  * block registry + scroll view), folded continuously regardless of focus.
  * The transcript slot mounts the focused stream's pane (`showStream` —
  * panes stay alive, so scroll position and collapse state survive a
- * switch); the editor draft is discarded on the switch (pi-tui's editor
- * has no clear-all action to save a stranded one — M2-DESIGN.md).
+ * switch); the editor draft is discarded on the switch so text authored
+ * for one stream cannot be sent to another (M2-DESIGN.md).
  *
  * Region focus (the controller's laws, the root's state): the stack is
  * transcript — editor — subagent list. The list region exists only when
@@ -287,8 +287,8 @@ export class AltRoot implements ModeView {
 	// --- ModeView -----------------------------------------------------------
 
 	/** Focus changed (or the root announced): mount the stream's pane and
-	 *  discard the editor draft (M2-DESIGN.md's ruling — no clear-all
-	 *  exists to save a stranded draft). Region focus yields the editor. */
+	 *  discard the editor draft (M2-DESIGN.md's wrong-stream safety ruling).
+	 *  Region focus yields the editor. */
 	showStream(stream: string): void {
 		// The first showStream is the root's announce: adopt the scratch
 		// pane so pre-boot notes stay where they landed.

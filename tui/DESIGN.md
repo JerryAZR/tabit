@@ -250,8 +250,9 @@ the artifact passes the human pass.
   explicit, never the silent default.
 - Esc aborts a running root stream; on a child stream it always returns
   focus to the parent, running or idle. An idle root's Esc falls through
-  to the editor. Ctrl+C aborts the focused stream's active run, otherwise
-  defers to the editor (copy), and can quit when the editor is empty.
+  to the editor. Ctrl+C aborts the focused stream's active run, clears
+  an idle non-empty draft, and quits when idle and empty. Ctrl+D also
+  quits when idle and empty; with a draft it remains delete-char-forward.
   Exact bindings and `~/.tabit/tui.toml` overrides live in
   `src/keybindings.ts`.
 - Interaction cards replace-focus in the dock (pi's editor-replacement

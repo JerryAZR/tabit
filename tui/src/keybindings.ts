@@ -26,6 +26,7 @@ import {
 declare module "@earendil-works/pi-tui" {
 	interface Keybindings {
 		"tui.app.interrupt": true;
+		"tui.app.clear": true;
 		"tui.app.escape": true;
 		"tui.app.toggleCollapsibles": true;
 		"tui.app.quit": true;
@@ -42,6 +43,10 @@ export const APP_KEYBINDINGS: KeybindingDefinitions = {
 	"tui.app.interrupt": {
 		defaultKeys: ["ctrl+c"],
 		description: "Interrupt the focused stream's run",
+	},
+	"tui.app.clear": {
+		defaultKeys: ["ctrl+c"],
+		description: "Clear the editor draft (when idle)",
 	},
 	"tui.app.escape": {
 		defaultKeys: ["escape"],
@@ -61,7 +66,7 @@ export const APP_KEYBINDINGS: KeybindingDefinitions = {
 	},
 	"tui.app.quit": {
 		defaultKeys: ["ctrl+d", "ctrl+c"],
-		description: "Quit (only when the editor is empty)",
+		description: "Quit (only when idle and the editor is empty)",
 	},
 	"tui.app.clearNote": {
 		defaultKeys: ["ctrl+u"],
@@ -93,6 +98,7 @@ function allDefinitions(): KeybindingDefinitions {
 
 type AppKeybindingId =
 	| "tui.app.interrupt"
+	| "tui.app.clear"
 	| "tui.app.escape"
 	| "tui.app.toggleCollapsibles"
 	| "tui.app.quit"
@@ -104,6 +110,7 @@ type AppKeybindingId =
 
 export const APP_KEYBINDING_IDS: AppKeybindingId[] = [
 	"tui.app.interrupt",
+	"tui.app.clear",
 	"tui.app.escape",
 	"tui.app.toggleCollapsibles",
 	"tui.app.quit",

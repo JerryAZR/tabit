@@ -17,13 +17,12 @@
  * Priorities, top to bottom:
  *
  *   1. a card owns the keyboard            (bar Ctrl+C, the global abort)
- *   2. region-local laws                   (list/transcript Esc, scroll)
- *   3. Esc: root abort / child parent walk (tui.app.escape — mode's law)
- *   4. interrupt a running turn            (tui.app.interrupt, ctrl+c)
+ *   2. global lifecycle: interrupt / clear an idle draft / idle-empty quit
+ *   3. region-local laws                   (list/transcript Esc, scroll)
+ *   4. Esc: root abort / child parent walk (tui.app.escape — mode's law)
  *   5. region navigation                   (alt+↑/↓; ↓ in an empty editor)
  *   6. toggle collapsibles / tree / paste image
- *   7. quit, only on an empty editor       (tui.app.quit — pi's rule)
- *   8. everything else falls through to the focused component
+ *   7. everything else falls through to the focused component
  */
 
 import { getKeybindings, matchesKey, type Editor, type TuiAltScreen, type TuiInputListenerResult } from "@earendil-works/pi-tui";
@@ -94,6 +93,21 @@ export class InputController {
 		const kb = getKeybindings();
 		const region = deps.getRegion();
 
+		// --- global lifecycle --------------------------------------------------
+		if (kb.matches(data, "tui.app.interrupt") && isRunning()) {
+			deps.interrupt();
+			return { consume: true };
+		}
+		if (kb.matches(data, "tui.app.clear") && !isRunning() && editor.getText() !== "") {
+			editor.setText("");
+			deps.tui.requestRender();
+			return { consume: true };
+		}
+		if (kb.matches(data, "tui.app.quit") && !isRunning() && editor.getText() === "") {
+			deps.onQuit();
+			return { consume: true };
+		}
+
 		// --- region-local laws -------------------------------------------------
 		if (region === "list") {
 			// Esc / alt+↑ return to the editor without switching; everything
@@ -136,10 +150,6 @@ export class InputController {
 			// root's Esc falls through so the editor's autocomplete dismiss works.
 			return deps.escape() ? { consume: true } : undefined;
 		}
-		if (kb.matches(data, "tui.app.interrupt") && isRunning()) {
-			deps.interrupt();
-			return { consume: true };
-		}
 		if (kb.matches(data, "tui.app.regionUp")) {
 			deps.setRegion("transcript");
 			return { consume: true };
@@ -167,11 +177,6 @@ export class InputController {
 		}
 		if (kb.matches(data, "tui.app.pasteImage")) {
 			deps.onPasteImage();
-			return { consume: true };
-		}
-		const idleQuit = kb.matches(data, "tui.app.quit") && !isRunning() && editor.getText() === "";
-		if (idleQuit) {
-			deps.onQuit();
 			return { consume: true };
 		}
 		return undefined;

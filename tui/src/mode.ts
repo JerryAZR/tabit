@@ -158,8 +158,7 @@ export interface SubagentEntry {
  */
 export interface ModeView {
 	/** Focus changed: render this stream's transcript (the view discards
-	 *  the editor draft — there is no clear-all shortcut to save a
-	 *  stranded one, M2-DESIGN.md). */
+	 *  the editor draft so text cannot cross streams, M2-DESIGN.md). */
 	showStream(stream: string): void;
 	beginReplay(stream: string): void;
 	endReplay(stream: string): void;
