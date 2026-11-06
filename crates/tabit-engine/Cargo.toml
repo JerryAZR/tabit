@@ -26,9 +26,9 @@ fastrand = { workspace = true }
 futures = { workspace = true }
 http = { workspace = true }
 indexmap = { workspace = true }
-tabit-providers = { path = "../tabit-providers", version = "0.3.1", default-features = false }
-tabit-log = { path = "../tabit-log", version = "0.3.1" }
-tabit-derive = { path = "../tabit-derive", version = "0.3.1", optional = true }
+tabit-providers = { path = "../tabit-providers", version = "0.3.2", default-features = false }
+tabit-log = { path = "../tabit-log", version = "0.3.2" }
+tabit-derive = { path = "../tabit-derive", version = "0.3.2", optional = true }
 schemars = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
