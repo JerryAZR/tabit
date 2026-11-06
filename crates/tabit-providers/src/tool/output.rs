@@ -15,6 +15,12 @@ use crate::{OneOrMany, message::ToolResultContent, tool::ToolExecutionError};
 /// consume (edit's diff, bash's exit status, a delegation's child id);
 /// it rides the conversation and the durable log inside the result,
 /// but providers never serialize it.
+/// What the model reads when a tool produced no output at all (an
+/// empty `grep`, a command with silent success, an empty MCP result).
+/// The single substitute for an empty text block — see
+/// [`ToolOutput::content`].
+pub const EMPTY_TOOL_OUTPUT: &str = "(no output)";
+
 #[derive(Clone, PartialEq)]
 pub struct ToolOutput {
     content: OneOrMany<ToolResultContent>,
@@ -56,7 +62,21 @@ impl ToolOutput {
     }
 
     /// Construct explicit model content with no details.
+    ///
+    /// The one gate every tool output passes through: empty text blocks
+    /// are dropped, and an output with nothing left becomes
+    /// [`EMPTY_TOOL_OUTPUT`]. A tool that produced nothing must still
+    /// SAY something — an empty text block is meaningless to the model,
+    /// and providers reject it on the wire (Anthropic: 400 "text
+    /// content is empty"), which poisons the durable log: every resume
+    /// re-sends the empty block and fails again. Normalizing here, at
+    /// construction, keeps the degenerate block out of the session tree
+    /// and every provider request by construction.
     pub fn content(content: OneOrMany<ToolResultContent>) -> Self {
+        let content = OneOrMany::from_iter_optional(content.into_iter().filter(
+            |block| !matches!(block, ToolResultContent::Text(text) if text.text.trim().is_empty()),
+        ))
+        .unwrap_or_else(|| OneOrMany::one(ToolResultContent::text(EMPTY_TOOL_OUTPUT)));
         Self {
             content,
             details: None,
@@ -240,15 +260,16 @@ impl IntoToolOutput for ToolOutput {
 /// plus the details bookkeeping cargo (`result.details` on the wire;
 /// frontend and hooks consume it, the model never sees it). Every
 /// multi-part tool result is built here — one shape, one invariant
-/// (the report is always present).
+/// (the report is always present). An empty report becomes
+/// [`EMPTY_TOOL_OUTPUT`] through the same gate as every other output
+/// ([`ToolOutput::content`]).
 pub fn content_parts(
     report: String,
     details: Option<serde_json::Value>,
 ) -> Result<ToolOutput, ToolExecutionError> {
-    Ok(ToolOutput {
-        content: OneOrMany::one(ToolResultContent::text(report)),
-        details,
-    })
+    let mut output = ToolOutput::text(report);
+    output.details = details;
+    Ok(output)
 }
 
 #[cfg(test)]
@@ -275,6 +296,48 @@ mod tests {
         let bare = super::content_parts("just text".to_string(), None).expect("content parts");
         assert_eq!(bare.details(), None);
         assert_eq!(bare.as_text(), Some("just text"));
+    }
+
+    /// The empty-output gate: no empty text block ever survives
+    /// construction, and an output with nothing else becomes
+    /// `(no output)` — the session log and every provider request see
+    /// only the normalized form.
+    #[test]
+    fn empty_text_becomes_no_output() {
+        let empty = ToolOutput::text("");
+        assert_eq!(empty.as_text(), Some(EMPTY_TOOL_OUTPUT));
+
+        let whitespace = ToolOutput::text(" \n");
+        assert_eq!(whitespace.as_text(), Some(EMPTY_TOOL_OUTPUT));
+
+        // The multi-part door is the same gate, details preserved.
+        let parts = super::content_parts(String::new(), Some(serde_json::json!({"exit_code": 0})))
+            .expect("content parts");
+        assert_eq!(parts.as_text(), Some(EMPTY_TOOL_OUTPUT));
+        assert_eq!(parts.details(), Some(&serde_json::json!({"exit_code": 0})));
+
+        // An empty text block among real content is dropped, not
+        // substituted: the remaining blocks already say something.
+        let mixed = ToolOutput::content(
+            OneOrMany::many(vec![
+                ToolResultContent::text(""),
+                ToolResultContent::image_base64(
+                    "aGk=",
+                    Some(crate::message::ImageMediaType::PNG),
+                    None,
+                ),
+            ])
+            .expect("non-empty"),
+        );
+        assert_eq!(mixed.as_content().len(), 1);
+        assert!(matches!(
+            mixed.as_content().first_ref(),
+            ToolResultContent::Image(_)
+        ));
+
+        // Non-empty text passes through verbatim.
+        let real = ToolOutput::text("real output");
+        assert_eq!(real.as_text(), Some("real output"));
     }
 
     use crate::message::{DocumentSourceKind, ImageMediaType};
