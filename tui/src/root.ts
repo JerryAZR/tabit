@@ -42,6 +42,7 @@ import {
 import { AssistantBlock } from "./components/assistant-block.ts";
 import { FooterBar } from "./footer/footer-bar.ts";
 import { NoteBlock } from "./components/note-block.ts";
+import { CompactionBlock } from "./components/compaction-block.ts";
 import { PendingQueue } from "./components/pending-queue.ts";
 import { ReasoningBlock } from "./components/reasoning-block.ts";
 import { StatusBar } from "./components/status-bar.ts";
@@ -58,6 +59,7 @@ import { AuthCardView } from "./auth-card.ts";
 import { cardViewFor } from "./card-view.ts";
 import { InputController, type Region } from "./input-controller.ts";
 import { log } from "./log.ts";
+import { windowTitle } from "./window-title.ts";
 import { AtPathCompletionProvider } from "./path-completion.ts";
 import { pasteClipboardIntoEditor, platformClipboardReader } from "./paste-image.ts";
 import { APP_KEYBINDING_IDS, applyKeybindings, loadTuiToml } from "./keybindings.ts";
@@ -140,6 +142,10 @@ export class AltRoot implements ModeView {
 			scrollToEndIndicator: () => " ↓  jump to latest ",
 		});
 		this.editor = new Editor(this.tui, editorTheme);
+		// The window title's pre-boot value: the frontend's own cwd, upgraded
+		// to the focused session's wire cwd at each setFooter (a child's spawn
+		// cwd differs from the frontend's — the same rule as #completionBase).
+		this.tui.terminal.setTitle(windowTitle(process.cwd()));
 		// File completion roots at the TUI's own cwd until the wire's cwd
 		// lands (setFooter's upgrade) — the directory tools run in.
 		this.#attachProvider(); // empty until bind — no mode, no command table
@@ -240,6 +246,9 @@ export class AltRoot implements ModeView {
 		// The program status dies with the app — a dashboard must not keep
 		// showing a dead process's last state (OSC 7501's `clear`).
 		this.tui.terminal.setProgramStatus({ app: "tabit", state: "clear" });
+		// The title likewise: an empty OSC 0 hands the window back to the
+		// foreground process's name instead of lingering past exit.
+		this.tui.terminal.setTitle("");
 		this.tui.stop();
 	}
 
@@ -374,6 +383,11 @@ export class AltRoot implements ModeView {
 		this.#touch();
 	}
 
+	addCompaction(stream: string, before: number | undefined, after: number): void {
+		this.#paneFor(stream).chat.addChild(new CompactionBlock(before, after));
+		this.#touch();
+	}
+
 	appendAssistantText(stream: string, turnId: string, text: string): void {
 		const pane = this.#paneFor(stream);
 		let block = pane.blocks.assistant(turnId);
@@ -452,10 +466,12 @@ export class AltRoot implements ModeView {
 
 	setFooter(facts: FooterFacts): void {
 		this.#footer.set(facts);
-		// The focused session's own cwd: the completion root follows it.
+		// The focused session's own cwd: the completion root and the window
+		// title follow it (focus switches included).
 		if (facts.cwd !== undefined && facts.cwd !== this.#completionBase) {
 			this.#completionBase = facts.cwd;
 			this.#attachProvider();
+			this.tui.terminal.setTitle(windowTitle(facts.cwd));
 		}
 	}
 

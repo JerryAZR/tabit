@@ -169,6 +169,10 @@ export interface ModeView {
 	/** `stream` undefined = a backend-level note with no home stream —
 	 *  lands in the root transcript. */
 	addNote(stream: string | undefined, text: string, kind: "info" | "warn" | "error"): void;
+	/** The compaction row: `before` is the context length captured at
+	 *  `compaction_begin` (undefined when nothing has metered yet),
+	 *  `after` the end event's authoritative `tokens_after`. */
+	addCompaction(stream: string, before: number | undefined, after: number): void;
 	/** Lazy: creates the turn's assistant block on the first increment. */
 	appendAssistantText(stream: string, turnId: string, text: string): void;
 	/** Lazy: creates the thinking block on the first increment; the view
@@ -297,6 +301,10 @@ class StreamState {
 	contextUsed: number | undefined;
 	running = false;
 	compacting = false;
+	/** The context length at `compaction_begin` — the compaction row's
+	 *  "before". Captured at begin, not end: the summarizer's own steps
+	 *  meter usage too, so an end-time sample reports the wrong baseline. */
+	compactionFrom: number | undefined;
 	/** v23: the spawner vouched for this stream's death — the last frame
 	 *  arrived. Advisory: viewing stays, sends are intercepted. */
 	closed = false;
@@ -1404,10 +1412,11 @@ export class InteractiveMode {
 		// v15 envelope: begin → delta × N → (step × N → retried?)* → end/failed.
 		compaction_begin: (s) => {
 			s.compacting = true;
+			s.compactionFrom = s.contextUsed;
 			this.#emitStatus(s);
 		},
 		compaction_delta: () => {
-			// The live summary block lands in M3; the end note carries the fact.
+			// The live summary block lands in M3; the end row carries the fact.
 			log("compaction_delta received");
 		},
 		compaction_step: (s, event) => {
@@ -1423,12 +1432,14 @@ export class InteractiveMode {
 			this.#restingStatus = { state: "done" };
 			// tokens_after is the authoritative post-compaction context length.
 			s.contextUsed = event.tokens_after;
-			this.#view.addNote(s.id, "context compacted — history is now summary + retained tail", "info");
+			this.#view.addCompaction(s.id, s.compactionFrom, event.tokens_after);
+			s.compactionFrom = undefined;
 			this.#emitStatus(s);
 			this.#emitFooter(s);
 		},
 		compaction_failed: (s, event) => {
 			s.compacting = false;
+			s.compactionFrom = undefined;
 			this.#restingStatus = { state: "error", message: event.message.split("\n", 1)[0] };
 			this.#view.addNote(s.id, `compaction failed: ${event.message}`, "error");
 			this.#emitStatus(s);

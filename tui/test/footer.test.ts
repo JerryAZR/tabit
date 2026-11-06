@@ -81,8 +81,8 @@ describe("footer badges", () => {
 		assert.match(full, /^ctx: /);
 		assert.ok(full.includes("█".repeat(3) + "░".repeat(7)));
 		assert.ok(full.includes("29.1% (291k/1.0M)"));
-		assert.match(renderOne(context, { contextWindow: 200_000, contextUsed: 150_000 })!, /\x1b\[33m/);
-		assert.match(renderOne(context, { contextWindow: 200_000, contextUsed: 190_000 })!, /\x1b\[31m/);
+		assert.match(renderOne(context, { contextWindow: 200_000, contextUsed: 150_000 })!, /\x1b\[38;2;227;179;65m/);
+		assert.match(renderOne(context, { contextWindow: 200_000, contextUsed: 190_000 })!, /\x1b\[38;2;244;112;103m/);
 	});
 
 	test("cost: recorded dollars as recorded; silent until the first costed turn", () => {

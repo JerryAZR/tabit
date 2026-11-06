@@ -156,3 +156,45 @@ describe("backend: the child seam over the mock", () => {
 		assert.ok((exit.stderrTail.join("\n")).includes("spawn failed"));
 	});
 });
+
+describe("backend: the gallery scenario's boot act", () => {
+	test("paints every common block once; the notices close the act, unstamped, pinned error last", { timeout: 15000 }, async () => {
+		const { frames, backend, exitPromise } = rigUp("gallery");
+		await until(
+			() => frames.some(f => f.kind === "event" && f.event.type === "notice" && f.event.id === "auth.failed"),
+			8000,
+			"the gallery's pinned notice",
+		);
+		const types = frames.map(typeOf);
+		for (const expected of [
+			"user_message", "turn_started", "reasoning_delta", "text_delta",
+			"tool_call", "tool_result", "completion_call", "turn_committed",
+			"run_finished", "compaction_begin", "compaction_step", "compaction_end",
+			"turn_truncated", "run_failed", "message_queued", "messages_discarded",
+			"run_aborted", "compaction_failed", "notice",
+		]) {
+			assert.ok(types.includes(expected), `the gallery emits ${expected}`);
+		}
+		// One tool result is the failed shape (the red tool slab's exhibit).
+		assert.ok(
+			frames.some(f => f.kind === "event" && f.event.type === "tool_result" && f.event.status.status === "failed"),
+			"a failed tool result is part of the exhibit",
+		);
+		// The three notices close the act — emitted after every turn so the
+		// transients never age — all backend-level (unstamped), warn, info,
+		// then the pinned error the dock shows with the +2 overflow.
+		const tail = frames.slice(-3);
+		assert.deepStrictEqual(
+			tail.map(f => f.kind === "event" && f.event.type === "notice" ? `${f.event.id}:${f.event.level}` : "not a notice"),
+			["persist.degraded:warn", "startup:info", "auth.failed:error"],
+		);
+		for (const frame of tail) {
+			if (frame.kind !== "event") throw new Error("the notice tail must be event frames");
+			assert.strictEqual(frame.stream, undefined);
+		}
+		backend.shutdown();
+		const exit = await exitPromise;
+		assert.strictEqual(exit.code, 0);
+		assert.strictEqual(exit.graceful, true);
+	});
+});

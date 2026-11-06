@@ -68,6 +68,7 @@ class RecordingView implements ModeView {
 	 *  is the stream users[i] folded into. */
 	userStreams: Array<string | undefined> = [];
 	notes: Array<{ text: string; kind: string }> = [];
+	compactions: Array<{ before: number | undefined; after: number }> = [];
 	noteStreams: Array<string | undefined> = [];
 	assistantText = new Map<string, string>();
 	assistantStreams = new Map<string, string>();
@@ -111,6 +112,9 @@ class RecordingView implements ModeView {
 	addNote(stream: string | undefined, text: string, kind: "info" | "warn" | "error"): void {
 		this.notes.push({ text, kind });
 		this.noteStreams.push(stream);
+	}
+	addCompaction(_stream: string, before: number | undefined, after: number): void {
+		this.compactions.push({ before, after });
 	}
 	appendAssistantText(stream: string, turnId: string, text: string): void {
 		this.assistantText.set(turnId, (this.assistantText.get(turnId) ?? "") + text);
@@ -969,7 +973,11 @@ describe("InteractiveMode", () => {
 		feed({ type: "compaction_end", tokens_after: 4200 });
 		assert.strictEqual(view.footer?.contextUsed, 4200); // authoritative post-compaction length
 		assert.strictEqual(view.status, "idle");
-		assert.strictEqual(view.notes.some(n => n.text.startsWith("context compacted")), true);
+		// The dedicated row: the baseline captured at BEGIN (1000 — the
+		// summarizer's own step metering must not pollute it), the
+		// authoritative tokens_after at end; no generic info note.
+		assert.deepStrictEqual(view.compactions, [{ before: 1000, after: 4200 }]);
+		assert.strictEqual(view.notes.some(n => n.text.startsWith("context compacted")), false);
 
 		// The next request's fresh total wins again from then on.
 		feed({ type: "completion_call", turn_id: "t2", usage: { input_tokens: 10, output_tokens: 5, total_tokens: 4300, cached_input_tokens: 0, cache_creation_input_tokens: 0 } });

@@ -7,18 +7,22 @@
  * --scenario X`) so the TUI-side tests exercise the real spawn/pipe/Ctrl+C
  * shape, not an in-process shortcut.
  *
- * Scenarios: basic | tools | subagent | steer | ask | replay | crash.
- * Every scenario also honors abort, interaction_response, and stdin-close.
+ * Scenarios: basic | tools | subagent | steer | ask | replay | crash |
+ * gallery. Every scenario also honors abort, interaction_response, and
+ * stdin-close.
  * The subagent scenario ends with the child's v23 `session_closed` (the
  * pool kill, delayed). `continue` answers with a bare turn — no
  * `user_message` (the wire's "nothing new" shape), a no-op when the
  * conversation is empty (contract) or a run is live (the real backend
  * parks the intent; the mock keeps it simple).
- * Scope: the seven scenarios above are the contract — other commands
+ * Scope: the eight scenarios above are the contract — other commands
  * (`new_session`, `open_session`, `checkout`, `model`, `compact`,
  * `continue`) are total-semantics no-ops here, and the mock does not
  * model error kinds (unknown session, empty message) the real backend
- * produces; grow it per-scenario when a test needs them.
+ * produces; grow it per-scenario when a test needs them. The gallery
+ * scenario is the visual-review exception: its boot act paints every
+ * common block once (including the failure/abort outcomes no other
+ * scenario emits), then messages fall through to the basic run.
  */
 
 import * as readline from "node:readline";
@@ -598,6 +602,88 @@ if (scenario === "replay") {
 		status: { status: "success" },
 	});
 	emitEvent(BOOT, { type: "replay_end" });
+}
+
+if (scenario === "gallery") {
+	// The gallery: a scripted LIVE act, not a replay pass — replay carries
+	// no run terminals, and the terminal outcomes are half the exhibit.
+	// Every common block painted once, for visual review without a live
+	// provider or real errors. Notices come LAST: transients age on
+	// committed turns, so emitting them after the act's turns keeps all
+	// three live (the dock shows the pinned error with a +2 overflow).
+	hasHistory = true;
+
+	// 1. A healthy run: thinking, markdown, a successful and a failed tool.
+	emitEvent(BOOT, { type: "user_message", text: "gallery: a healthy run — thinking, markdown, two tool outcomes", entry_id: nextId("entry-") });
+	const healthy = nextId("turn-");
+	emitEvent(BOOT, { type: "turn_started", id: healthy, started_at_ms: ts() });
+	emitEvent(BOOT, { type: "reasoning_delta", turn_id: healthy, id: "r1", reasoning: "The gallery paints every common block once so the look can be reviewed without real errors. " });
+	emitEvent(BOOT, { type: "text_delta", turn_id: healthy, text: "# Gallery\n\nA **committed** turn with two tool outcomes:\n\n" });
+	emitEvent(BOOT, { type: "tool_call", turn_id: healthy, name: "read", call_id: "call-read-g", internal_call_id: "int-read-g", arguments: JSON.stringify({ path: "AGENTS.md" }) });
+	emitEvent(BOOT, {
+		type: "tool_result",
+		turn_id: healthy,
+		entry_id: nextId("entry-"),
+		name: "read",
+		internal_call_id: "int-read-g",
+		content: "the file's contents",
+		status: { status: "success" },
+	});
+	emitEvent(BOOT, { type: "text_delta", turn_id: healthy, text: "- `read` succeeded\n- `bash` failed (exit 1)\n" });
+	emitEvent(BOOT, { type: "tool_call", turn_id: healthy, name: "bash", call_id: "call-bash-g", internal_call_id: "int-bash-g", arguments: JSON.stringify({ command: "cargo test --workspace" }) });
+	emitEvent(BOOT, {
+		type: "tool_result",
+		turn_id: healthy,
+		entry_id: nextId("entry-"),
+		name: "bash",
+		internal_call_id: "int-bash-g",
+		content: "test result: FAILED. 41 passed; 1 failed\n\n---- gallery stdout ----\nassertion failed: expected a red slab",
+		status: { status: "failed", exit_code: 1 },
+	});
+	emitEvent(BOOT, { type: "completion_call", turn_id: healthy, usage: usage(45000, 800), cost: cost(45000, 800) });
+	emitEvent(BOOT, { type: "turn_committed", id: healthy, completed_at_ms: ts() });
+	emitEvent(BOOT, { type: "run_finished", output: "done", durable: true, started_at_ms: ts(), completed_at_ms: ts() });
+
+	// 2. A successful compaction.
+	emitEvent(BOOT, { type: "compaction_begin" });
+	emitEvent(BOOT, { type: "compaction_step", id: nextId("step-"), usage: usage(1800, 240), cost: cost(1800, 240) });
+	emitEvent(BOOT, { type: "compaction_end", tokens_after: 12000 });
+
+	// 3. A turn that hits the provider output limit (the run continues).
+	emitEvent(BOOT, { type: "user_message", text: "gallery: a truncated turn", entry_id: nextId("entry-") });
+	const truncated = nextId("turn-");
+	emitEvent(BOOT, { type: "turn_started", id: truncated, started_at_ms: ts() });
+	emitEvent(BOOT, { type: "text_delta", turn_id: truncated, text: "This answer ran into the provider's output limit. " });
+	emitEvent(BOOT, { type: "turn_truncated", turn_id: truncated });
+	emitEvent(BOOT, { type: "completion_call", turn_id: truncated, usage: usage(500, 4096), cost: cost(500, 4096) });
+	emitEvent(BOOT, { type: "turn_committed", id: truncated, completed_at_ms: ts() });
+	emitEvent(BOOT, { type: "run_finished", output: "truncated", durable: true, started_at_ms: ts(), completed_at_ms: ts() });
+
+	// 4. A run that fails mid-turn (the turn never commits).
+	emitEvent(BOOT, { type: "user_message", text: "gallery: a failing run", entry_id: nextId("entry-") });
+	const failing = nextId("turn-");
+	emitEvent(BOOT, { type: "turn_started", id: failing, started_at_ms: ts() });
+	emitEvent(BOOT, { type: "text_delta", turn_id: failing, text: "A partial answer before the failure. " });
+	emitEvent(BOOT, { type: "run_failed", kind: "model", message: "provider returned 401: invalid api key", started_at_ms: ts(), completed_at_ms: ts() });
+
+	// 5. An abort with a queued steering message discarded ahead of it.
+	emitEvent(BOOT, { type: "user_message", text: "gallery: an aborted run with a discarded steering message", entry_id: nextId("entry-") });
+	const aborted = nextId("turn-");
+	emitEvent(BOOT, { type: "turn_started", id: aborted, started_at_ms: ts() });
+	emitEvent(BOOT, { type: "text_delta", turn_id: aborted, text: "Working on it… " });
+	const discarded = nextId("entry-");
+	emitEvent(BOOT, { type: "message_queued", id: discarded, text: "also update the docs" });
+	emitEvent(BOOT, { type: "messages_discarded", messages: [{ id: discarded, text: "also update the docs" }] });
+	emitEvent(BOOT, { type: "run_aborted", output: "Working on it… ", started_at_ms: ts(), completed_at_ms: ts() });
+
+	// 6. A failed compaction.
+	emitEvent(BOOT, { type: "compaction_begin" });
+	emitEvent(BOOT, { type: "compaction_failed", message: "summarizer returned an empty summary" });
+
+	// 7. The dock: one transient warn, one transient info, one pinned error.
+	emitNow({ type: "notice", id: "persist.degraded", level: "warn", text: "log writes degraded — 2 record(s) pending flush" });
+	emitNow({ type: "notice", id: "startup", level: "info", text: "extension notes loaded from ~/.tabit/extensions/notes" });
+	emitNow({ type: "notice", id: "auth.failed", level: "error", text: "login failed: auth.toml is not writable" });
 }
 
 // ---------------------------------------------------------------------------
