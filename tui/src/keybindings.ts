@@ -1,5 +1,5 @@
 /**
- * The keybinding registry (M1): named app actions over the engine's
+ * The keybinding registry: named app actions over the engine's
  * `KeybindingsManager` — the global registry the editor and select lists
  * already consult — plus user overrides from `~/.tabit/tui.toml`
  * (`[keys]`), the TUI-owned TOML file (owner ruling 2026-09).
@@ -45,7 +45,7 @@ export const APP_KEYBINDINGS: KeybindingDefinitions = {
 	},
 	"tui.app.escape": {
 		defaultKeys: ["escape"],
-		description: "Interrupt the focused run; when idle, return to the parent stream",
+		description: "Abort a running root stream; return a child stream to its parent",
 	},
 	"tui.app.regionUp": {
 		defaultKeys: ["alt+up"],

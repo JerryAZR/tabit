@@ -18,37 +18,42 @@ session layer over the durable tree log (skills, compaction, the
 world refresh); the coding tools and the built-in permission gate;
 subprocess subagents and the pool; the extension host, SDK, and
 install; the frozen wire and the node runtime; prompt caching; the
-headless `tabit-core` binary. The `tabit` name is reserved for the
-frontend that ships primary.
+headless `tabit-core` binary. The primary `tabit` app is the shipped
+Node TUI in `tui/`; `tabit-core` remains the headless and embedding
+surface.
 
 ## What's next
 
-### The frontend (the active item)
+### Frontend follow-ups
 
-**TUI: the Node route (ruled 2026-09; the pivot landed 2026-10,
-merged as `tui/`).** The claurst ratatui harvest stays dead (GPL)
-and a Rust-native TUI stays deferred. The terminal frontend rides the
-JS ecosystem: **stock pi-tui (`@earendil-works/pi-tui`) on plain
-Node ≥ 24.2** — type-stripped TypeScript in dev, no build step (the
-omp fork and the Bun runtime were the surveyed first plan; the fork
-deleted the alt-screen machinery this frontend IS, so stock-on-Node
-became the route) — spawning `tabit-core --json` as a child (zero
-backend changes — the stdio edge the json mode already rides).
-Distribution: **`tabit-agent` on npm** — the app as a single-file
-esbuild bundle (bin `tabit`; Node refuses type-stripping under
-node_modules, so sources can't ship), the cargo release core riding in
-per-platform optional packages (`tabit-agent-<platform>`, esbuild
-pattern; no postinstall; matrix win-x64 + linux-x64 first,
-darwin-arm64 after a mac test).
-One version line for the bundle — TUI and core changes bump it alike:
-the lockstepped pair is the strict protocol handshake made atomic.
-crates.io stays the backend-only channel (`cargo install tabit-core`).
+The shipped frontend and its npm distribution are documented in
+`tui/README.md` and `tui/DESIGN.md`; the ordered remainder lives in
+`tui/ROADMAP.md`. The cross-cutting items are:
 
-The GUI is **not planned** — the egui tree was deleted 2026-09 (the
-paused frontend's sync twin kept surfacing as the exception on every
-review; AGENTS.md carries the ruling). A future frontend that runs no
-tokio extracts a sync core into `tabit-wire`'s client rather than
-growing a twin.
+- **macOS arm64 packaging** joins the Windows x64 + Linux x64 matrix
+  after a human test on a Mac. Other platforms and standalone executables
+  stay deferred.
+- **Skill and attachment chips** wait on pi-tui exposing the editor's
+  marker machinery. The shipped interim is the literal skill/attachment
+  tag in the editor, expanded by the backend at the message door.
+- **Non-critical QoL** (expanded user-message views, per-child abort,
+  additional shortcut keys, and small rendering/navigation improvements)
+  is parked in `tui/ROADMAP.md`, not silently scheduled here.
+
+The GUI is **not planned** — the egui tree was deleted 2026-09;
+AGENTS.md carries the ruling. A future frontend that runs no tokio
+extracts a sync core into `tabit-wire`'s client rather than growing a
+twin.
+
+### Tooling follow-ups
+
+- **Hashline-based editing** — an additive edit schema alongside the
+  existing exact-text replacement tool, giving callers a second,
+  hash-anchored way to address edits.
+- **A dedicated Python tool** — complement `bash` for structured
+  text/data processing and cross-platform one-off analysis without
+  nested shell quoting. It is not a scripted mass-source-edit backdoor;
+  AGENTS.md's mass-edit rule still applies.
 
 ### The extension-skills catalog as a value (structural fix — review round 2026-10; DEFERRED 2026-10)
 
@@ -149,12 +154,11 @@ log decision, parked here.
 ### Config / registry follow-ups
 
 - **Dynamic model listing — dropped** (2026-09 ruling, confirmed
-  2026-10): `/v1/models` returns ids only. The recorded direction
-  landed differently (PROVIDERS.md): the model catalog is a
-  DOWNLOADED artifact (generated externally, refreshed by the
-  catalog manager) — the remaining piece is the generator itself
-  (its own project thread), plus the built-in mirror list's real
-  coordinates when it ships.
+  2026-10): `/v1/models` returns ids only. The downloaded catalog
+  channel shipped instead (PROVIDERS.md): the externally generated
+  artifact, real built-in mirrors, the bounded boot refresh, and the
+  separate generator project's CI publication. Generator feature work
+  belongs to that project, not this repository's roadmap.
 - **Config reload — SUPERSEDED by respawn-reload (2026-10 ruling):**
   reload is the frontend's kill-and-respawn (FRONTEND.md's Reload
   section); an in-process `reload` command is deferred until a
@@ -175,13 +179,13 @@ log decision, parked here.
   bare install → boot downloads the catalog → `login` lists its
   providers → paste a key.
 - Per-model `headers` stay unwired (needs a client-caching decision);
-  `context_window` is wired (compaction); display names /
-  `reasoning` wait on a model-picker UI (with the frontend).
-- Frontend-dependent model deferrals: the catalog half landed
-  (v21's `models_available` boot announcement); still parked: the
-  real picker, the global implicit preference (a `~/.tabit/`
-  last-selected file — a registry rung below `default_model`), and
-  the "selection didn't land" picker signal.
+  `context_window` is wired (compaction). The TUI's `/model` picker has
+  landed with display name, context window, and provider columns;
+  showing cost/reasoning/modality facts was deliberately left out of
+  its v1 row shape.
+- Still parked: the global implicit preference (a `~/.tabit/`
+  last-selected file — a registry rung below `default_model`) and the
+  "selection didn't land" picker signal.
 
 ### Session-store exclusion
 
@@ -194,13 +198,6 @@ log decision, parked here.
   changes — the one new behavior decision: a spectator racing a live
   writer can see a torn final line, which the owning parser treats
   as fatal; a read-only mode would tolerate a partial tail instead.
-
-### Docs and comments sweep
-
-Scheduled, unscheduled date: one pass over stale comments and docs —
-they accrete (e.g. `assemble.rs`'s "handshake ack" phrasing surviving
-the v19 report model, caught in review 2026-10). Sweep when the next
-cross-cutting change touches many files anyway, not as its own event.
 
 ### ACP
 

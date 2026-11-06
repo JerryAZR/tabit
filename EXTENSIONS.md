@@ -461,8 +461,7 @@ attribute by their original package paths in `skills_available`).
 **The catalog is a boot-time snapshot** (ruled 2026-09): a mid-run
 death does not re-announce — deaths are rare, stderr carries the
 report, and a death event is not trivial wire vocabulary; a
-re-announcement joins when a consumer exists (the GUI redesign is
-the natural trigger).
+re-announcement joins when a frontend consumer exists.
 
 **One name, one tool, resolved at host assembly.** The host builds
 the model-facing toolset as a name→tool map after all reports and
@@ -951,10 +950,10 @@ is planned.
 
 Changing the prompt is a deliberate user action with a known cost:
 install/configure the extension, let the current task finish
-(compact if wanted), then reload — the GUI respawns the backend,
-which re-reads config, auth, and sessions (FRONTEND.md §3's startup
-& recovery contract), and replay restores the transcript with the same
-ids. The cache miss lands where the user chose it.
+(compact if wanted), then reload — the frontend kills and respawns the
+backend, which re-reads config, auth, and sessions (FRONTEND.md §3's
+startup & recovery contract), and replay restores the transcript with
+the same ids. The cache miss lands where the user chose it.
 
 Implications:
 

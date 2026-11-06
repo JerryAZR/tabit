@@ -5,12 +5,14 @@ Process: merged back to main as `tui/` (2026-10); work continues on
 `master`. Follow pi's proven patterns (`reports/pi.md`,
 the pi repo); **deviations need justification stated in advance**.
 
-Protocol state: **v26** (synced; see FRONTEND.md's changelog).
+Protocol state: **v27** (synced; see FRONTEND.md's changelog).
 
 ## 1. `/model` picker — landed (f3d4699, v22 sync a7d2283)
 
 The catalog crossed the wire in v21 (`models_available`, folded last-wins
-in the mode). What remains is the UI.
+in the mode); the picker UI landed in f3d4699, with v22 auth/catalog
+sync in a7d2283. This section is the shipped row, filter, and selection
+contract.
 
 **Pattern (pi)**: a selector that takes over the input area — pi swaps
 its editor container; our dock already has the equivalent seam (the card
@@ -36,9 +38,8 @@ id+badge rows)**: three aligned columns —
 behavior, per owner ruling — no synthetic row; the `✓` simply doesn't
 appear. The session's register stays visible in the footer and a
 selection-less run fails loudly at open (`run_failed { kind: "model" }`),
-so the UI never implies a usable current model that isn't. (FRONTEND.md
-§6 suggests a synthetic picker entry; ruled unnecessary — the footer is
-the current-state surface.)
+so the UI never implies a usable current model that isn't. The footer
+is the current-state surface; no synthetic catalog row is needed.
 
 **Ordering**: current first, then wire order (providers alphabetical,
 models in config-file order — "display sorting is yours"; keep it
@@ -49,7 +50,7 @@ provider name (pi's `model-search.ts` ranking: bare id not first, so
 exact `provider/id` queries rank above proxy ids).
 
 **Behavior**: `Enter` sends `model { session, provider, model }` with no
-`thinking_level` (null = provider/model default); `model_changed` lands
+`thinking_level` (null = provider/model default); `model_selected` lands
 the footer facts. Safe any time — a state write at receive; a run in
 flight keeps its bound model. A pick from catalog rows cannot fail
 validation (existence-only rule, §5).
@@ -69,7 +70,7 @@ The v21/v22 in-app auth path. Reuses #1's selector seam: `/login` lists
 targets; `env` rows are display-only — the app cannot unset a persistent
 variable), a key prompt collects the secret, `login { provider, api_key }`
 rides the wire, the re-announced `models_available` +
-`providers_available` pair is the ack, `error { kind: "auth" }` the
+`providers_available` pair is the ack, `notice { id: "auth.failed", level: "error" }` the
 failure. `/logout <provider>` is offered on `auth: "stored"` rows — one
 command, idempotent.
 
@@ -173,7 +174,7 @@ badge. The design's stated leftovers live in **Parked** below.
 - **No-effect-↓ in the editor** (item 5's leftover): needs a pi-tui
   public accessor for the editor's emptiness/cursor state.
 
-## 6. Merge-back hygiene (at the end)
+## 6. Merge-back and release hygiene — landed
 
 - ~~`scripts/build-release.ts` is bun-shaped~~ — **resolved 2026-10**:
   the Node-era release shape is `scripts/pack.ts`. The app ships as a

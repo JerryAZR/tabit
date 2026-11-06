@@ -1,7 +1,7 @@
 /**
- * M0 theme: minimal ANSI-based style functions — the engine requires theme
- * objects at construction, and the semantic-slot system lands in M1. No
- * chalk: raw SGR codes keep the dependency list at the engine alone.
+ * The semantic ANSI palette shared by transcript blocks, tool cards,
+ * badges, and selectors. No chalk: raw SGR codes keep styling beside the
+ * engine without another runtime dependency.
  */
 
 import type { EditorTheme, MarkdownTheme, SelectListTheme } from "@earendil-works/pi-tui";

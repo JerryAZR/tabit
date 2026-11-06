@@ -1,12 +1,11 @@
 # tabit-tui — the alt-screen frontend
 
-The sibling build (`../tabit-tui-work/tui`, branch `tui/research`) is the
-**native-scrollback** frontend: the omp Composer retires finalized transcript
-rows into terminal scrollback via the `TerminalFrameProvider`/`HistoryBatch`
-contract. This package is the **other presentation**: a full-screen
-alt-screen TUI — a bounded, application-owned viewport with a pinned dock —
-over the same `tabit-core --json` edge. Same protocol (v20), same crash doctrine,
-different surface.
+This package is tabit's primary terminal frontend: a full-screen,
+application-owned viewport with a pinned dock over the
+`tabit-core --json` stdio edge. It speaks protocol **v27** (the mirrored
+types live in `src/protocol.ts`; FRONTEND.md owns the contract) and keeps
+the backend's crash doctrine: restore the terminal, report the failure,
+and let durable session replay drive recovery.
 
 ## Engine: stock pi-tui, not the fork
 
@@ -14,7 +13,7 @@ different surface.
 moved to the scrollback construction: no `setLayoutRoot`, no `VStack`/
 `HStack`, no layout module — its `TUI`'s `altScreen` flag is a remnant. The
 alt-screen implementation lives upstream in **`@earendil-works/pi-tui`**
-(0.85.x, MIT, pinned exact): `TuiAltScreen` + `setLayoutRoot` +
+(MIT, pinned exactly in `package.json`): `TuiAltScreen` + `setLayoutRoot` +
 `VStack`/`HStack`/`ScrollView`, follow-end streaming, scrollbars, in-viewport
 search, mouse selection, Kitty input, IME. It is pi's own daily-driver
 fullscreen mode, so it is production-proven at exactly this job; it ships
@@ -25,14 +24,14 @@ Node"); this is that rung promoted by the presentation pivot, not a new
 lineage. The fork remains the scrollback build's engine; the two frontends
 share no engine, only the wire seam.
 
-## Architecture (mirrors the §9 guide, one seam swapped)
+## Architecture
 
-Everything in TUI-RESEARCH §9 transfers except the presentation root:
+The presentation-independent transport and the alt-screen view meet at the
+mode/view seam:
 
-- **Verbatim from the sibling build**: `backend.ts` (spawn/stderr
-  ring, the Node port of `backend.rs`), `protocol.ts` (v20 types + lenient
-  parse), `mock-backend.ts` (protocol-faithful child-process mock), and their
-  tests. These are presentation-agnostic.
+- **Transport and protocol**: `backend.ts` (spawn/stderr ring),
+  `protocol.ts` (v27 types + lenient parse), `mock-backend.ts`
+  (protocol-faithful child-process mock), and their offline tests.
 - **The handler-table doctrine carries**: one typed handler per wire event;
   the replay pass flows the same table (one rebuild path, FRONTEND.md §7);
   deltas coalesce (~33 ms); unknown frames are logged, never swallowed.
@@ -42,11 +41,11 @@ Everything in TUI-RESEARCH §9 transfers except the presentation root:
   notice line, editor, subagent list, footer). No `TerminalFrameProvider`, no `HistoryBatch`, no block-retirement
   machine: the ScrollView document holds blocks for the whole session, and
   native scrollback is untouched while the TUI lives. On exit the session
-  lives in the tabit log; a respawn replays it.
-- **Components-as-state** (no reducer): the mode keeps only cross-cutting
-  session state (active session, running, pending queue, open cards, usage
-  totals, identity maps); per-block content lives in the view — the root's
-  engine components, or the test recorder. The seam is `ModeView`.
+  lives in the tabit log; relaunching with `-c`/`--continue` replays it.
+- **Components-as-state** (no reducer): the mode keeps per-stream session
+  state plus cross-stream catalogs and focus; per-block content lives in
+  the view — the root's engine components, or the test recorder. The seam
+  is `ModeView`.
 
 ## Footer: a registry of badges (owner ruling 2026-09)
 
@@ -136,7 +135,7 @@ markdown rendering of user input (our editor sends plain text), and
 pi's streaming-state markdown transforms (our deltas already re-derive
 the whole block).
 
-## Divergence ledger (vs TUI-RESEARCH §9.3)
+## Divergence ledger (historical, vs the native-scrollback research)
 
 1. Engine: stock `@earendil-works/pi-tui` instead of the fork — the fork
    dropped the alt-screen API this product is (reason above).
@@ -167,9 +166,9 @@ touching the view.
   (`turn_started`'s id), tool results, compaction passes. Each add is
   create-or-advance: a known id (a replay re-walking the shared prefix)
   only moves the head, never re-parents. Turn previews grow only while
-  the turn is open (`replay_started` closes the open turn — a
-  re-announce never doubles). `turn_retried` drops the subtree and falls
-  the head back to the surviving parent.
+  the turn is open (`replay_begin` closes the open turn — a re-announce
+  never doubles). `turn_retried` drops the subtree and falls the head
+  back to the surviving parent.
 - **The checkout action is real today**: the card's enter sends the
   `checkout` command (the backend composes abort first — a rewind has
   declared the run's continuation obsolete) and closes; `checked_out` +
@@ -188,42 +187,15 @@ touching the view.
   incoming ask displaces it, and a pending ask keeps the tree from
   opening.
 
-## Milestones
+## Implementation status
 
-- **M0 (this slice)**: seam + mode + root; mock-driven tests green; entry
-  runs `--mock` and a real `tabit --json` against the raw transcript
-  (plain cards: user, streaming markdown, collapsed reasoning, tool lines,
-  select-one cards, steers, abort, crash report). Human pass on Windows
-  Terminal is the M0 exit.
-- **M1 — input first, then cards**: (1) editor autocomplete + input history
-  (the engine ships the whole mechanism — `CombinedAutocompleteProvider`
-  takes a cwd and does file completion with it, `EditorComponent` keeps
-  up/down history; ours is the wiring: construct the provider with the
-  session cwd from the wire, feed history on submit and from replay);
-  (2) keybinding registry + user overrides in `~/.tabit/tui.toml`;
-  (3) interaction-card completion — the select-one flow landed in M0,
-  remaining: multi-select (`select_any`) toggling, free-text notes (the
-  dock swaps in the editor), and a permission-gate pass (gate-ext) —
-  cards land last because the interactive test vehicle ships with them:
-  gate-ext installed in the extensions root produces real permission
-  cards in real sessions (owner point 2026-09: no interactive testing,
-  no landing). (Tool cards, usage row, and notes styling landed early
-  during the pi-look port.)
-
-- **M2 — navigation**: the tree-checkout surface landed (see the section
-  above). Remaining: the **session forest** — per-session state
-  (registries + facts keyed by session id, focus as a view swap), the
-  session switcher over the catalog (`new`/`open` + v16's
-  `available_sessions` with path/cwd, parent/child nesting from
-  `session_opened.parent`/`parent_call`, running/ask indicators), and
-  child-session steering. Awaiting the owner's ruling on the
-  focus-model design (persistent per-session registries over
-  rebuild-on-return — replay parks behind running runs, so
-  rebuild-on-return would show a headless tail until a run ends).
-- **M3 — context surfaces**: skills/extensions pages (currently notes-only),
-  compaction surface (`compact` + live summary block), model picker (blocked
-  upstream: no models-list command), streamed tool args (the one mock-ledger
-  seam, needs `tool_call_delta` on the wire).
+The walking skeleton, input/history/keybindings, interaction cards,
+session-tree checkout, model and thinking pickers, auth cards, attachment
+paste, manual compaction, and per-stream child/focus handling have landed.
+`tui/ROADMAP.md` is the canonical record of those slices and the ordered
+remainder: non-critical QoL, skill/attachment chips waiting on pi-tui's
+public marker API, and platform/distribution follow-ups. This design doc
+owns the architecture, not a second milestone checklist.
 
 ## TUI configuration (owner ruling 2026-09)
 
@@ -255,11 +227,12 @@ installed artifact headless. The dev rungs (repo cargo builds) and the
 mock stay dev-only — the bundle simply doesn't contain the mock, and
 asking for it fails loud.
 
-Publish-time-only (graduation work): the registry itself, the CI
-cross-build matrix, provenance, the `tabit-agent` name claim. crates.io
-stays the backend-only channel (`cargo install tabit-core` — the PATH
-rung marries it to any TUI install; the report's version check fails
-loud on skew).
+Publication is implemented: `scripts/pack.ts` assembles the platform family
+and is the one publish path, and `.github/workflows/release.yml` builds the
+Windows/Linux matrix and publishes with npm trusted publishing and
+provenance. crates.io stays the backend-only channel (`cargo install
+tabit-core` — the PATH rung marries it to any TUI install; the report's
+version check fails loud on skew).
 
 **The local install IS the published install**: `npm publish` only
 uploads the tarballs `npm pack` already produced, so `npm i -g
@@ -275,14 +248,17 @@ the artifact passes the human pass.
 - **Launch semantics (owner rule)**: no args starts a **new** session;
   `-c`/`--continue` resumes the project's newest — continuation is always
   explicit, never the silent default.
-- Esc interrupts (armed double-press semantics arrive with the keybinding
-  registry); Ctrl+C aborts through the engine's input-listener seam when a
-  run is active, otherwise defers to the editor (copy).
+- Esc aborts a running root stream; on a child stream it always returns
+  focus to the parent, running or idle. An idle root's Esc falls through
+  to the editor. Ctrl+C aborts the focused stream's active run, otherwise
+  defers to the editor (copy), and can quit when the editor is empty.
+  Exact bindings and `~/.tabit/tui.toml` overrides live in
+  `src/keybindings.ts`.
 - Interaction cards replace-focus in the dock (pi's editor-replacement
   pattern); unknown `ui_type`s render an explicit cannot-answer notice —
   never a fabricated answer (FRONTEND.md §8).
-- Dark-implicit theme (engine defaults + semantic styling added in M1);
-  all-MIT, no GPL anywhere.
+- Dark-implicit theme (engine defaults plus the semantic styling in
+  `src/theme.ts`); all-MIT, no GPL anywhere.
 - **`@` completion stays pi-faithful** (owner ruling 2026-09): accepting a
   directory consumes the `@` and closes the list — continuing deeper is
   the two-Tab rhythm (the manual path prefix works without `@`). The

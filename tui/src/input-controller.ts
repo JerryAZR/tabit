@@ -18,7 +18,7 @@
  *
  *   1. a card owns the keyboard            (bar Ctrl+C, the global abort)
  *   2. region-local laws                   (list/transcript Esc, scroll)
- *   3. Esc: abort focused run / parent walk (tui.app.escape — mode's law)
+ *   3. Esc: root abort / child parent walk (tui.app.escape — mode's law)
  *   4. interrupt a running turn            (tui.app.interrupt, ctrl+c)
  *   5. region navigation                   (alt+↑/↓; ↓ in an empty editor)
  *   6. toggle collapsibles / tree / paste image
@@ -40,9 +40,9 @@ export interface InputControllerDeps {
 	 *  affordance) so keys reach the focused card. */
 	isCardOpen: () => boolean;
 	interrupt: () => void;
-	/** Esc's law (the mode's): abort the focused run, else walk to the
-	 *  parent stream. Returns whether it acted — a no-op Esc falls
-	 *  through to the editor (its autocomplete dismiss). */
+	/** Esc's law (the mode's): abort a running root stream; always walk a
+	 *  child to its parent. Returns whether it acted — an idle root's Esc
+	 *  falls through to the editor (its autocomplete dismiss). */
 	escape: () => boolean;
 	/** The current focus region + region moves (the vanished-region law
 	 *  is the caller's — the controller only ever sets what exists). */
@@ -132,8 +132,8 @@ export class InputController {
 
 		// --- the editor region's laws ------------------------------------------
 		if (kb.matches(data, "tui.app.escape")) {
-			// Abort the focused run / walk to the parent; a no-op Esc (root,
-			// idle) falls through so the editor's autocomplete dismiss works.
+			// Abort a running root / walk a child to its parent; an idle
+			// root's Esc falls through so the editor's autocomplete dismiss works.
 			return deps.escape() ? { consume: true } : undefined;
 		}
 		if (kb.matches(data, "tui.app.interrupt") && isRunning()) {

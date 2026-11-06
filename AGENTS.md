@@ -50,8 +50,11 @@ docs carry the cross-cutting contracts:
 - `tabit-app` — the composition root as a library (`EMBEDDING.md` is
   the embedder contract)
 - `tabit-core` — the headless backend binary; frontends spawn it,
-  never the reverse. The `tabit` name is reserved for the frontend
-  that ships primary.
+  never the reverse
+- `tui/` — the primary terminal frontend: stock pi-tui on Node, the
+  `tabit-agent` npm app whose bin is `tabit` (`tui/README.md` is the
+  install surface; `tui/DESIGN.md` and `tui/ROADMAP.md` own its design
+  and remaining work)
 
 `ROADMAP.md` carries the planned work.
 

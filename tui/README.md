@@ -18,7 +18,16 @@ tabit -c     # resume the project's newest session
 tabit --help # everything else
 ```
 
-The backend is configured through `~/.tabit/providers.toml` — see the [repository](https://github.com/JerryAZR/tabit) for provider setup, sessions, extensions, and the protocol the frontend rides.
+On a networked first run, the backend downloads the provider/model
+catalog. Run `/login` in the TUI to choose a provider and store an API
+key, then `/model` to choose a model. Keys live in
+`~/.tabit/auth.toml`; custom and uncataloged providers are declared in
+`~/.tabit/providers.toml`.
+
+See the repository's [README](https://github.com/JerryAZR/tabit#readme)
+and [provider/catalog design](https://github.com/JerryAZR/tabit/blob/master/PROVIDERS.md)
+for headless use, custom providers, sessions, extensions, and the
+protocol the frontend rides.
 
 ## License
 

@@ -266,12 +266,11 @@ type StampedEventType = StampedEvent["type"];
 type Handler<K extends StampedEventType> = (stream: StreamState, event: Extract<SessionEvent, { type: K }>) => void;
 
 /**
- * One stream's fold state — everything M1 held once, M2 holds per session
- * host. Created by the stream's `session_opened` (the announce is always
- * the first stamped line); a child lives until its v23 `session_closed`
- * marks it — and past it, while focused or listed (the close is advisory,
- * owner ruling) — with the sweep dropping closed streams nobody can
- * reach.
+ * One stream's fold state, held per session host. Created by the stream's
+ * `session_opened` (the announce is always the first stamped line); a
+ * child lives until its v23 `session_closed` marks it — and past it,
+ * while focused or listed (the close is advisory, owner ruling) — with
+ * the sweep dropping closed streams nobody can reach.
  */
 class StreamState {
 	readonly id: string;

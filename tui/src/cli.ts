@@ -3,8 +3,8 @@
  * The entry: resolve the backend command, build root + mode, run. Crash
  * handling is the report loop — exit 101 (internal error) or any
  * ungraceful death stops the TUI, restores the terminal, prints the
- * stderr tail (sessions are durable; a fresh start replays the newest
- * session, so respawn is a user re-launch in M0, a prompt in M1).
+ * stderr tail (sessions are durable; after a crash the user relaunches
+ * with `-c`/`--continue` to replay the project's newest session).
  */
 
 import { existsSync, mkdirSync } from "node:fs";

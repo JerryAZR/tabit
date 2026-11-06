@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 /**
  * Assemble the publishable family into `dist/` — the Node-era release
- * shape (owner ruling: ship the `.ts` sources, no compile step; the
- * Bun-compiled standalone exe is dead):
+ * shape (a single-file esbuild bundle; the Bun-compiled standalone exe
+ * is dead):
  *
  *   tabit-agent               the app — a single-file esbuild bundle
  *                             (`bin/tabit.js`; plain JS for startup

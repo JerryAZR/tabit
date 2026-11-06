@@ -69,9 +69,9 @@ pi's minimal set. For later review and ruling; nothing here is approved work.
 
 ## Read
 
-The only gap blocking a frontend from feature-completeness is **Tier 1.1
-(images over the wire)** — vocabulary, providers, and the read tool are
-done, so it is a protocol version bump (attachment shapes in `Message` /
-`UserMessage`), the `wire.rs` fold, and FRONTEND.md. **Tier 1.5 (model
-listing)** is the next wire-shaped one. **Tier 1.2 (OAuth)** is the only
-large item.
+Neither former wire blocker remains: images landed through message-text
+attachment tags (Tier 1.1), and model listing was resolved by the
+downloaded catalog plus `models_available` (Tier 1.5). The TUI has
+shipped with both. **OAuth (Tier 1.2)** is the largest remaining gap;
+session fork/branch summaries and export are still survey items. As
+with the rest of this document, that is not approval to build them.
