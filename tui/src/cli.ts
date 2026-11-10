@@ -41,7 +41,7 @@ export interface ResolveDeps {
 	resolvePackage?: (name: string) => string | undefined;
 }
 
-export function resolveBackendCommand(argv: string[], deps: ResolveDeps = {}): { bin: string; args?: string[] } {
+export function resolveBackendCommand(argv: string[], deps: ResolveDeps = {}): { bin: string; args?: string[]; mock?: boolean } {
 	const exists = deps.exists ?? existsSync;
 	const resolvePackage = deps.resolvePackage ?? defaultResolvePackage;
 	const mock = argv.find(a => a === "--mock" || a.startsWith("--mock="));
@@ -51,7 +51,7 @@ export function resolveBackendCommand(argv: string[], deps: ResolveDeps = {}): {
 		if (mockPath === undefined || !existsSync(mockPath)) {
 			throw new Error("--mock is only available in a source checkout (the published package excludes the mock)");
 		}
-		return { bin: process.execPath, args: [mockPath, "--scenario", scenario] };
+		return { bin: process.execPath, args: [mockPath, "--scenario", scenario], mock: true };
 	}
 	const continues = argv.includes("-c") || argv.includes("--continue");
 	const base = continues ? ["--json", "--continue"] : ["--json"];
@@ -149,7 +149,7 @@ async function main(): Promise<void> {
 		return;
 	}
 
-	let resolved: { bin: string; args?: string[] };
+	let resolved: { bin: string; args?: string[]; mock?: boolean };
 	try {
 		resolved = resolveBackendCommand(argv);
 	} catch (error) {
@@ -202,7 +202,7 @@ async function main(): Promise<void> {
 		},
 	);
 
-	mode = new InteractiveMode(backend, root);
+	mode = new InteractiveMode(backend, root, { mock: resolved.mock === true });
 	root.bind(mode, () => backend.shutdown());
 	mode.onFatal = reason => die(`${reason}\n`, 1);
 	mode.onQuit = () => backend.shutdown();

@@ -89,7 +89,10 @@ export type SessionCommand =
 	  }
 	| { type: "interaction_response"; session: string; id: string; payload: unknown }
 	| { type: "login"; provider: string; api_key: string }
-	| { type: "logout"; provider: string };
+	| { type: "logout"; provider: string }
+	/** Dev-only: the `/mock` gallery command — the mock backend re-emits
+	 *  `event` on this session's stream. Never sent to a real backend. */
+	| { type: "mock_emit"; session: string; event: Record<string, unknown> };
 
 /** v19: a client line IS a command — the initialize handshake is deleted
  *  and commands may flow from the frontend's first line. */

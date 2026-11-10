@@ -835,6 +835,17 @@ stdin.on("line", line => {
 			announceWorld();
 			return;
 		}
+		case "mock_emit": {
+			// The /mock gallery command: re-emit a canned event on the named
+			// stream. Light validation only — a paintbrush, not a validator.
+			const event = frame.event;
+			if (typeof event !== "object" || event === null || typeof (event as Record<string, unknown>).type !== "string") {
+				emitNow({ type: "protocol_error", message: "mock_emit needs event.type (string)" });
+				return;
+			}
+			emitEvent(String(frame.session), event as Record<string, unknown>);
+			return;
+		}
 		default:
 			// Unknown commands are ignored by the mock (total semantics).
 			return;

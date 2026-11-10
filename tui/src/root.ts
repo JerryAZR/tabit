@@ -53,9 +53,11 @@ import { SubagentList } from "./components/subagent-list.ts";
 import { TranscriptRegistry } from "./components/transcript-registry.ts";
 import { TreeCardView } from "./components/tree-card.ts";
 import { HeroBlock } from "./components/hero-block.ts";
-import { ModelPickerView } from "./model-picker.ts";
-import { ThinkingPickerView } from "./thinking-picker.ts";
-import { AuthCardView } from "./auth-card.ts";
+import { SelectorView, type SelectorSpec, type SelectorHooks } from "./components/selector.ts";
+import { modelPickerSpec } from "./model-picker.ts";
+import { thinkingPickerSpec } from "./thinking-picker.ts";
+import { AuthKeyCard, authPickSpec } from "./auth-card.ts";
+import { MOCK_EVENTS } from "./mock-events.ts";
 import { cardViewFor } from "./card-view.ts";
 import { InputController, type Region } from "./input-controller.ts";
 import { log } from "./log.ts";
@@ -65,7 +67,7 @@ import { pasteClipboardIntoEditor, platformClipboardReader } from "./paste-image
 import { APP_KEYBINDING_IDS, applyKeybindings, loadTuiToml } from "./keybindings.ts";
 import type { FooterFacts, HeroFacts, InteractionCard, ModeView, PendingMessage, ProgramStatusReport, SkillInfo, SubagentEntry } from "./mode.ts";
 import type { InteractiveMode } from "./mode.ts";
-import { editorTheme } from "./theme.ts";
+import { editorTheme, dim } from "./theme.ts";
 
 /** The type column in the `/` dropdown: fixed-width so descriptions align. */
 const TYPE_COLUMN = { command: "command", skill: "skill  " } as const;
@@ -128,12 +130,14 @@ export class AltRoot implements ModeView {
 	#input: InputController | undefined;
 	/** The open session-tree card, when the tree owns the dock slot. */
 	#treeCard: TreeCardView | undefined;
-	/** The open model picker, when it owns the dock slot. */
-	#modelPicker: ModelPickerView | undefined;
-	/** The open thinking-level picker, when it owns the dock slot. */
-	#thinkingPicker: ThinkingPickerView | undefined;
-	/** The open login/logout card, when it owns the dock slot. */
-	#authCard: AuthCardView | undefined;
+	/** The open selector, when it owns the dock slot — the host erases the
+	 *  spec's generics (they're the consumer's concern). One field for
+	 *  every list picker: model, thinking, auth's provider pick, /mock. */
+	// eslint-disable-next-line @typescript-eslint/no-explicit-any
+	#selector: SelectorView<any, any> | undefined;
+	/** The login key form, when it owns the dock slot (the provider
+	 *  pick's continuation). */
+	#authKey: AuthKeyCard | undefined;
 
 	constructor(version: string, terminal?: Terminal) {
 		this.#version = version;
@@ -204,6 +208,7 @@ export class AltRoot implements ModeView {
 		mode.onThinking = () => this.showThinkingPicker();
 		mode.onLogin = () => this.showAuthCard("login");
 		mode.onLogout = () => this.showAuthCard("logout");
+		mode.onMock = () => this.showMockPicker();
 		// The command table exists now — the dropdown can list it before
 		// skills arrive (a skill-less machine still sees the commands).
 		this.#attachProvider();
@@ -212,7 +217,7 @@ export class AltRoot implements ModeView {
 			tui: this.tui,
 			editor: this.editor,
 			isRunning: () => mode.running,
-			isCardOpen: () => mode.hasOpenCard || this.#treeCard !== undefined || this.#modelPicker !== undefined || this.#authCard !== undefined,
+			isCardOpen: () => mode.hasOpenCard || this.#treeCard !== undefined || this.#selector !== undefined || this.#authKey !== undefined,
 			interrupt: () => mode.interrupt(),
 			escape: () => mode.escape(),
 			getRegion: () => this.#region,
@@ -501,9 +506,8 @@ export class AltRoot implements ModeView {
 		// reopens with ctrl+t). Without this the gate would keep standing
 		// down after the card closes — the tree field outlived its slot.
 		this.#treeCard = undefined;
-		this.#modelPicker = undefined;
-		this.#thinkingPicker = undefined;
-		this.#authCard = undefined;
+		this.#selector = undefined;
+		this.#authKey = undefined;
 		this.#cardSlot.clear();
 		this.#cardSlot.addChild(cardViewFor(card, (selected, text) => this.#mode?.answerCard(card.id, selected, text), streamLabel));
 		this.tui.setFocus(this.#cardSlot.children[0]!);
@@ -532,9 +536,8 @@ export class AltRoot implements ModeView {
 		if (this.#treeCard !== undefined) return;
 		// The tree takes the slot: clear any sibling owner, or its field
 		// outlives the slot it no longer renders in (the showCard lesson).
-		this.#modelPicker = undefined;
-		this.#thinkingPicker = undefined;
-		this.#authCard = undefined;
+		this.#selector = undefined;
+		this.#authKey = undefined;
 		this.#treeCard = new TreeCardView(
 			mode.tree,
 			{
@@ -560,7 +563,28 @@ export class AltRoot implements ModeView {
 		this.#touch();
 	}
 
-	// --- model picker ---------------------------------------------------------
+	// --- selectors --------------------------------------------------------------
+
+	/** The one selector mount: the caller has already applied the
+	 *  card-slot law and its empty-state guards; this owns the slot,
+	 *  focus, and sibling-clearing every picker shares. */
+	#mountSelector<T, M>(spec: SelectorSpec<T, M>, hooks: SelectorHooks<T>): void {
+		this.#treeCard = undefined;
+		this.#authKey = undefined;
+		this.#selector = new SelectorView(spec, hooks, () => this.#touch());
+		this.#cardSlot.clear();
+		this.#cardSlot.addChild(this.#selector);
+		this.tui.setFocus(this.#selector);
+		this.#touch();
+	}
+
+	closeSelector(): void {
+		if (this.#selector === undefined) return;
+		this.#selector = undefined;
+		this.#cardSlot.clear();
+		this.tui.setFocus(this.editor);
+		this.#touch();
+	}
 
 	/** Open the `/model` picker over the announced catalog (v21). A pending
 	 *  interaction card keeps the slot — it owns the run; an empty catalog
@@ -572,41 +596,19 @@ export class AltRoot implements ModeView {
 			this.addNote(undefined, "answer the open question first — the picker can wait", "warn");
 			return;
 		}
-		if (this.#modelPicker !== undefined) return;
+		if (this.#selector !== undefined || this.#authKey !== undefined) return;
 		if (mode.modelsCatalog.length === 0) {
 			this.addNote(undefined, "no usable models at this backend — configure providers or log in first", "warn");
 			return;
 		}
-		this.#treeCard = undefined;
-		this.#authCard = undefined;
-		this.#thinkingPicker = undefined;
-		this.#modelPicker = new ModelPickerView(
-			mode.modelsCatalog,
-			mode.currentSelection,
-			{
-				onSelect: (provider, model) => {
-					this.closeModelPicker();
-					mode.switchModel(provider, model);
-				},
-				onClose: () => this.closeModelPicker(),
+		this.#mountSelector(modelPickerSpec(mode.modelsCatalog, mode.currentSelection), {
+			onSelect: row => {
+				this.closeSelector();
+				mode.switchModel(row.provider, row.model);
 			},
-			() => this.#touch(),
-		);
-		this.#cardSlot.clear();
-		this.#cardSlot.addChild(this.#modelPicker);
-		this.tui.setFocus(this.#modelPicker);
-		this.#touch();
+			onClose: () => this.closeSelector(),
+		});
 	}
-
-	closeModelPicker(): void {
-		if (this.#modelPicker === undefined) return;
-		this.#modelPicker = undefined;
-		this.#cardSlot.clear();
-		this.tui.setFocus(this.editor);
-		this.#touch();
-	}
-
-	// --- thinking picker ------------------------------------------------------
 
 	/** Open the `/thinking` picker over the focused model's dial. The mode
 	 *  has already vetted the dial exists (no dial → its note, not an
@@ -618,43 +620,21 @@ export class AltRoot implements ModeView {
 			this.addNote(undefined, "answer the open question first — the picker can wait", "warn");
 			return;
 		}
-		if (this.#thinkingPicker !== undefined) return;
+		if (this.#selector !== undefined || this.#authKey !== undefined) return;
 		const dial = mode.thinkingDial();
 		if (dial === undefined) return;
-		this.#treeCard = undefined;
-		this.#authCard = undefined;
-		this.#modelPicker = undefined;
-		this.#thinkingPicker = new ThinkingPickerView(
-			dial.levels,
-			dial.current,
-			{
-				onSelect: level => {
-					this.closeThinkingPicker();
-					mode.switchThinkingLevel(level);
-				},
-				onClose: () => this.closeThinkingPicker(),
+		this.#mountSelector(thinkingPickerSpec(dial.levels, dial.current), {
+			onSelect: row => {
+				this.closeSelector();
+				mode.switchThinkingLevel(row.level);
 			},
-			() => this.#touch(),
-		);
-		this.#cardSlot.clear();
-		this.#cardSlot.addChild(this.#thinkingPicker);
-		this.tui.setFocus(this.#thinkingPicker);
-		this.#touch();
+			onClose: () => this.closeSelector(),
+		});
 	}
 
-	closeThinkingPicker(): void {
-		if (this.#thinkingPicker === undefined) return;
-		this.#thinkingPicker = undefined;
-		this.#cardSlot.clear();
-		this.tui.setFocus(this.editor);
-		this.#touch();
-	}
-
-	// --- login / logout --------------------------------------------------------
-
-	/** Open the auth card over the provider status fold (v22): login lists
-	 *  the `auth: "none"` targets, logout the `auth: "stored"` rows. A
-	 *  pending interaction card keeps the slot. */
+	/** Open the auth provider pick (v22): login lists the `auth: "none"`
+	 *  targets, logout the `auth: "stored"` rows. Logout's pick is the
+	 *  command; login's pick continues into the key form. */
 	showAuthCard(kind: "login" | "logout"): void {
 		const mode = this.#mode;
 		if (mode === undefined) return;
@@ -662,7 +642,7 @@ export class AltRoot implements ModeView {
 			this.addNote(undefined, "answer the open question first — auth can wait", "warn");
 			return;
 		}
-		if (this.#authCard !== undefined) return;
+		if (this.#selector !== undefined || this.#authKey !== undefined) return;
 		const statuses = mode.providerStatuses;
 		if (statuses.length === 0) {
 			this.addNote(undefined, "no providers configured at this backend — write ~/.tabit/providers.toml and restart", "warn");
@@ -676,37 +656,68 @@ export class AltRoot implements ModeView {
 			this.addNote(undefined, "no stored keys — nothing to log out", "info");
 			return;
 		}
-		this.#treeCard = undefined;
-		this.#modelPicker = undefined;
-		this.#thinkingPicker = undefined;
-		this.#authCard = new AuthCardView(
-			kind,
-			statuses,
-			{
-				onLogin: (provider, apiKey) => {
-					this.closeAuthCard();
-					mode.login(provider, apiKey);
-					this.addNote(undefined, `key stored for ${provider} — the catalog ack confirms`, "info");
-				},
-				onLogout: provider => {
-					this.closeAuthCard();
-					mode.logout(provider);
-				},
-				onClose: () => this.closeAuthCard(),
+		this.#mountSelector(authPickSpec(kind, statuses), {
+			onSelect: target => {
+				if (kind === "logout") {
+					this.closeSelector();
+					mode.logout(target.id);
+				} else {
+					this.#openAuthKey(target.id);
+				}
 			},
-			() => this.#touch(),
-		);
+			onClose: () => this.closeSelector(),
+		});
+	}
+
+	/** Login's continuation: the provider pick opens the key form. */
+	#openAuthKey(provider: string): void {
+		const mode = this.#mode;
+		if (mode === undefined) return;
+		this.#selector = undefined;
+		this.#authKey = new AuthKeyCard(provider, {
+			onSubmit: apiKey => {
+				this.closeAuthKey();
+				mode.login(provider, apiKey);
+				this.addNote(undefined, `key stored for ${provider} — the catalog ack confirms`, "info");
+			},
+			onClose: () => this.closeAuthKey(),
+		}, () => this.#touch());
 		this.#cardSlot.clear();
-		this.#cardSlot.addChild(this.#authCard);
-		this.tui.setFocus(this.#authCard);
+		this.#cardSlot.addChild(this.#authKey);
+		this.tui.setFocus(this.#authKey);
 		this.#touch();
 	}
 
-	closeAuthCard(): void {
-		if (this.#authCard === undefined) return;
-		this.#authCard = undefined;
+	closeAuthKey(): void {
+		if (this.#authKey === undefined) return;
+		this.#authKey = undefined;
 		this.#cardSlot.clear();
 		this.tui.setFocus(this.editor);
 		this.#touch();
+	}
+
+	/** Open the `/mock` event picker (dev-only — the mode registers the
+	 *  command only in --mock sessions). The registry also serves `/mock
+	 *  <id>`, so the picker and the shortcut can never drift. */
+	showMockPicker(): void {
+		const mode = this.#mode;
+		if (mode === undefined) return;
+		if (mode.hasOpenCard) {
+			this.addNote(undefined, "answer the open question first — the picker can wait", "warn");
+			return;
+		}
+		if (this.#selector !== undefined || this.#authKey !== undefined) return;
+		this.#mountSelector({
+			entries: MOCK_EVENTS,
+			filter: { placeholder: "filter events…", searchText: entry => `${entry.id} ${entry.description}` },
+			measure: entries => Math.max(0, ...entries.map(entry => entry.id.length)),
+			row: (entry, _selected, width) => `${entry.id.padEnd(width)}  ${dim(entry.description)}`,
+		}, {
+			onSelect: entry => {
+				this.closeSelector();
+				mode.mockEvent(entry.id);
+			},
+			onClose: () => this.closeSelector(),
+		});
 	}
 }

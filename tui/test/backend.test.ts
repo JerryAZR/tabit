@@ -198,3 +198,23 @@ describe("backend: the gallery scenario's boot act", () => {
 		assert.strictEqual(exit.graceful, true);
 	});
 });
+
+describe("backend: the /mock gallery command", () => {
+	test("mock_emit round-trips a canned event on the named stream", { timeout: 15000 }, async () => {
+		const { frames, backend, exitPromise } = rigUp("basic");
+		await until(() => frames.some(f => typeOf(f) === "session_opened"), 8000, "boot announcement");
+		const opened = frames.find(f => typeOf(f) === "session_opened");
+		if (opened?.kind !== "event" || opened.event.type !== "session_opened") {
+			throw new Error("expected the boot's session_opened");
+		}
+		backend.mockEmit(opened.event.id, { type: "notice", id: "auth.failed", level: "error", text: "pinned" });
+		await until(
+			() => frames.some(f => f.kind === "event" && f.event.type === "notice" && f.event.id === "auth.failed"),
+			8000,
+			"the canned notice",
+		);
+		backend.shutdown();
+		const exit = await exitPromise;
+		assert.strictEqual(exit.code, 0);
+	});
+});

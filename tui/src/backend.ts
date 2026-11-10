@@ -166,6 +166,12 @@ export class Backend {
 		this.send({ type: "logout", provider });
 	}
 
+	/** Dev-only: the `/mock` gallery command's frame — the mock re-emits
+	 *  `event` on the session's stream. Never sent to a real backend. */
+	mockEmit(session: string, event: Record<string, unknown>): void {
+		this.send({ type: "mock_emit", session, event });
+	}
+
 	stderrTail(): string[] {
 		return [...this.#stderrRing];
 	}

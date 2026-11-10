@@ -6,7 +6,8 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 
-import { buildThinkingRows, ThinkingPickerView } from "../src/thinking-picker.ts";
+import { buildThinkingRows, thinkingPickerSpec } from "../src/thinking-picker.ts";
+import { SelectorView } from "../src/components/selector.ts";
 import { applyKeybindings } from "../src/keybindings.ts";
 
 // The view resolves select actions through the global registry — installed
@@ -17,6 +18,7 @@ const UP = "\x1b[A";
 const DOWN = "\x1b[B";
 const ENTER = "\r";
 const ESCAPE = "\x1b";
+const ANSI = /\x1b\[[0-9;]*m/g;
 
 describe("buildThinkingRows", () => {
 	test("default first, levels in wire order; current pinned first with the ✓", () => {
@@ -37,15 +39,14 @@ describe("ThinkingPickerView", () => {
 	test("navigation wraps, enter selects the level (or null for default), esc closes", () => {
 		const selected: Array<string | null> = [];
 		let closed = 0;
-		const view = new ThinkingPickerView(
-			["low", "high"],
-			null,
-			{ onSelect: level => selected.push(level), onClose: () => closed++ },
+		const view = new SelectorView(
+			thinkingPickerSpec(["low", "high"], null),
+			{ onSelect: row => selected.push(row.level), onClose: () => closed++ },
 			() => {},
 		);
-		const rendered = view.render(60).join("\n");
+		const rendered = view.render(60).map(line => line.replace(ANSI, "")).join("\n");
 		assert.ok(rendered.includes("thinking level"));
-		assert.ok(rendered.includes("› default ✓")); // cursor starts on the current row
+		assert.ok(rendered.includes("❯ default ✓")); // cursor starts on the current row
 		assert.ok(rendered.includes("esc closes"));
 
 		view.handleInput("\x1b[B"); // down → low

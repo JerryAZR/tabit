@@ -9,7 +9,9 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 
-import { buildModelRows, compactTokens, filterModelRows, ModelPickerView, type ModelPickerHooks } from "../src/model-picker.ts";
+import { buildModelRows, compactTokens, filterModelRows, modelPickerSpec } from "../src/model-picker.ts";
+import { SelectorView, type SelectorHooks } from "../src/components/selector.ts";
+import type { ModelPickerRow } from "../src/model-picker.ts";
 import { applyKeybindings } from "../src/keybindings.ts";
 import type { AvailableProvider } from "../src/protocol.ts";
 
@@ -104,11 +106,11 @@ describe("filterModelRows", () => {
 describe("ModelPickerView", () => {
 	function rigUp(current?: { provider: string; model: string }) {
 		const events: Array<{ kind: string; provider?: string; model?: string }> = [];
-		const hooks: ModelPickerHooks = {
-			onSelect: (provider, model) => events.push({ kind: "select", provider, model }),
+		const hooks: SelectorHooks<ModelPickerRow> = {
+			onSelect: row => events.push({ kind: "select", provider: row.provider, model: row.model }),
 			onClose: () => events.push({ kind: "close" }),
 		};
-		const view = new ModelPickerView(catalog, current, hooks, () => {});
+		const view = new SelectorView(modelPickerSpec(catalog, current), hooks, () => {});
 		return { view, events };
 	}
 

@@ -43,6 +43,7 @@
  */
 
 import { log } from "./log.ts";
+import { mockEventById } from "./mock-events.ts";
 import { SessionTree } from "./session-tree.ts";
 import { PROTOCOL_VERSION } from "./protocol.ts";
 import type { DockedNotice } from "./components/notice-bar.ts";
@@ -253,6 +254,10 @@ export interface BackendLink {
 	login(provider: string, apiKey: string): void;
 	/** Remove a provider's key (v21) — total, idempotent, still acked. */
 	logout(provider: string): void;
+	/** Dev-only (`--mock`): the mock backend re-emits this canned event on
+	 *  the session's stream (the `/mock` gallery command). The real
+	 *  backend never receives it. */
+	mockEmit(session: string, event: Record<string, unknown>): void;
 }
 
 /** Backend-level announcements arrive unstamped (they name no session) —
@@ -405,11 +410,18 @@ export class InteractiveMode {
 	onLogin: (() => void) | undefined;
 	/** Set by the root: opens the logout card (`/logout`). */
 	onLogout: (() => void) | undefined;
+	/** Set by the root: opens the `/mock` event picker (dev-only). */
+	onMock: (() => void) | undefined;
 	/** Set by the root: opens the session-tree card (`/tree`; the ctrl+t
 	 *  action routes through the root too). */
 	onTree: (() => void) | undefined;
 
-	constructor(backend: BackendLink, view: ModeView) {
+	/** Dev-only: whether the backend is the mock (`--mock`) — gates the
+	 *  `/mock` command's registration. */
+	readonly #mock: boolean;
+
+	constructor(backend: BackendLink, view: ModeView, options?: { mock?: boolean }) {
+		this.#mock = options?.mock === true;
 		this.#backend = backend;
 		this.#view = view;
 		this.#view.setStatus("connecting…");
@@ -610,6 +622,9 @@ export class InteractiveMode {
 			{ name: "login", description: "store a provider API key", kind: "command", run: () => this.onLogin?.() },
 			{ name: "logout", description: "remove a stored provider key", kind: "command", run: () => this.onLogout?.() },
 			{ name: "model", description: "switch the model", kind: "command", run: () => this.onModel?.() },
+			// Dev-only: the mock event gallery. Bare `/mock` opens the picker;
+			// `/mock <id>` emits directly from the same registry.
+			...(this.#mock ? [{ name: "mock", description: "emit a canned wire event (dev only)", kind: "command" as const, run: (args: string) => this.mockEvent(args) }] : []),
 			{ name: "thinking", description: "set the thinking level", kind: "command", run: () => this.#openThinkingPicker() },
 			{ name: "tree", description: "browse the session tree, rewind to an entry", kind: "command", run: () => this.onTree?.() },
 			{ name: "exit", description: "quit the TUI (shuts the backend down)", kind: "command", run: () => this.onQuit?.() },
@@ -679,6 +694,24 @@ export class InteractiveMode {
 			return;
 		}
 		this.onThinking?.();
+	}
+
+	/** The `/mock` command (dev-only): a bare invocation opens the picker;
+	 *  an id emits directly. The registry is shared with the picker, so
+	 *  the two entry modes never drift. */
+	mockEvent(id: string): void {
+		if (id === "") {
+			this.onMock?.();
+			return;
+		}
+		const entry = mockEventById(id);
+		if (entry === undefined) {
+			this.#view.addNote(undefined, `unknown mock event: ${id} — /mock opens the picker`, "warn");
+			return;
+		}
+		const s = this.#focusedState();
+		if (s === undefined) return;
+		this.#backend.mockEmit(s.id, entry.event());
 	}
 
 	/** The login card's confirm: store the key. Backend-level and

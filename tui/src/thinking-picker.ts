@@ -1,19 +1,17 @@
 /**
- * The `/thinking` picker: the focused model's thinking dial as a
- * navigable list in the dock's card slot — `default` (the null
+ * The `/thinking` picker's spec for the shared SelectorView: the focused
+ * model's thinking dial as a navigable list — `default` (the null
  * selection, always legal per the wire: the provider/model default)
  * then the announced level names in wire order, the current level
- * marked `✓` and pinned first (the model picker's law). No search line:
- * a dial is 2–5 entries, not a catalog. Enter sends the selection (the
- * `model` command with `thinking_level` — a state write at receive,
- * `model_selected` answers); esc closes.
+ * marked `✓` and pinned first (the model picker's law). No search line
+ * and no viewport: a dial is 2–5 entries, not a catalog — the one-column
+ * degenerate case of the selector's row renderer. Enter sends the
+ * selection (the `model` command with `thinking_level`); esc closes.
  *
  * The rows builder is pure and pi-tui-free for tests.
  */
 
-import { getKeybindings, type Component } from "@earendil-works/pi-tui";
-
-import { dim } from "./theme.ts";
+import type { SelectorSpec } from "./components/selector.ts";
 
 export interface ThinkingPickerRow {
 	/** The wire value — null is the default row. */
@@ -39,58 +37,12 @@ export function buildThinkingRows(levels: readonly string[], current: string | n
 	return rows;
 }
 
-export interface ThinkingPickerHooks {
-	onSelect(level: string | null): void;
-	onClose(): void;
-}
-
-export class ThinkingPickerView implements Component {
-	readonly focusable = true;
-	readonly #rows: ThinkingPickerRow[];
-	#cursor = 0;
-	readonly #hooks: ThinkingPickerHooks;
-	readonly #requestRender: () => void;
-
-	constructor(levels: readonly string[], current: string | null | undefined, hooks: ThinkingPickerHooks, requestRender: () => void) {
-		this.#rows = buildThinkingRows(levels, current);
-		this.#cursor = Math.max(0, this.#rows.findIndex(row => row.current));
-		this.#hooks = hooks;
-		this.#requestRender = requestRender;
-	}
-
-	handleInput(data: string): void {
-		const kb = getKeybindings();
-		if (kb.matches(data, "tui.select.up")) {
-			this.#cursor = this.#cursor === 0 ? this.#rows.length - 1 : this.#cursor - 1;
-			this.#requestRender();
-			return;
-		}
-		if (kb.matches(data, "tui.select.down")) {
-			this.#cursor = this.#cursor === this.#rows.length - 1 ? 0 : this.#cursor + 1;
-			this.#requestRender();
-			return;
-		}
-		if (kb.matches(data, "tui.select.cancel")) {
-			this.#hooks.onClose();
-			return;
-		}
-		if (kb.matches(data, "tui.select.confirm")) {
-			this.#hooks.onSelect(this.#rows[this.#cursor]!.level);
-			return;
-		}
-	}
-
-	render(width: number): string[] {
-		const rule = dim("─".repeat(Math.max(1, width)));
-		const lines: string[] = [rule, dim(" thinking level")];
-		for (const [index, row] of this.#rows.entries()) {
-			const cursor = index === this.#cursor ? "›" : " ";
-			const mark = row.current ? " ✓" : "";
-			lines.push(` ${cursor} ${row.label}${mark}`);
-		}
-		lines.push(dim(" enter selects · esc closes"), rule);
-		return lines;
-	}
-
-	invalidate(): void {}
+/** The thinking dial's SelectorView spec: a title, the bare-label rows,
+ *  no filter, no pageSize. */
+export function thinkingPickerSpec(levels: readonly string[], current: string | null | undefined): SelectorSpec<ThinkingPickerRow, void> {
+	return {
+		entries: buildThinkingRows(levels, current),
+		title: " thinking level",
+		row: row => `${row.label}${row.current ? " ✓" : ""}`,
+	};
 }

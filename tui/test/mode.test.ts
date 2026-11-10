@@ -58,6 +58,9 @@ class FakeBackend implements BackendLink {
 	logout(provider: string): void {
 		this.sent.push({ kind: "logout", provider });
 	}
+	mockEmit(session: string, event: Record<string, unknown>): void {
+		this.sent.push({ kind: "mock_emit", session, payload: event });
+	}
 }
 
 class RecordingView implements ModeView {
@@ -192,10 +195,10 @@ class RecordingView implements ModeView {
 	}
 }
 
-function harness() {
+function harness(options?: { mock?: boolean }) {
 	const backend = new FakeBackend();
 	const view = new RecordingView();
-	const mode = new InteractiveMode(backend, view);
+	const mode = new InteractiveMode(backend, view, options);
 	const feed = (event: Record<string, unknown>, stream: string | undefined = SESSION): void => {
 		mode.handleFrame({ kind: "event", stream, event } as ParsedServerFrame);
 	};
@@ -982,6 +985,31 @@ describe("InteractiveMode", () => {
 		// The next request's fresh total wins again from then on.
 		feed({ type: "completion_call", turn_id: "t2", usage: { input_tokens: 10, output_tokens: 5, total_tokens: 4300, cached_input_tokens: 0, cache_creation_input_tokens: 0 } });
 		assert.strictEqual(view.footer?.contextUsed, 4300);
+	});
+
+	test("the /mock command registers only in --mock sessions", () => {
+		assert.strictEqual(harness().mode.slashCommands().some(c => c.name === "mock"), false);
+		assert.strictEqual(harness({ mock: true }).mode.slashCommands().some(c => c.name === "mock"), true);
+	});
+
+	test("/mock <id> emits the canned event on the focused stream; an unknown id notes", () => {
+		const { backend, view, mode, feed, control } = harness({ mock: true });
+		boot(control, feed);
+		feed({ type: "session_opened", id: SESSION, path: "/w", resumed: false });
+		mode.mockEvent("run_failed");
+		const sent = backend.sent.find(f => f.kind === "mock_emit");
+		assert.strictEqual(sent?.session, SESSION);
+		assert.strictEqual((sent?.payload as Record<string, unknown>).type, "run_failed");
+		mode.mockEvent("nope");
+		assert.strictEqual(view.notes.some(n => n.text.includes("unknown mock event: nope")), true);
+	});
+
+	test("bare /mock opens the picker through the root callback", () => {
+		const { mode } = harness({ mock: true });
+		let opened = 0;
+		mode.onMock = () => opened++;
+		mode.mockEvent("");
+		assert.strictEqual(opened, 1);
 	});
 
 	test("compaction failure: error note, status restored, nothing metered", () => {
