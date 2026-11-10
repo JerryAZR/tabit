@@ -23,8 +23,10 @@ struct TransportOptions {
     /// Timeout for establishing the connection. Applied when the builder
     /// constructs the default `reqwest::Client` backend.
     connect_timeout: Duration,
-    /// Maximum time without inbound data before a request fails: per-chunk for
-    /// streaming bodies, overall for unary bodies.
+    /// How long a request may go without inbound data before a warning is
+    /// logged: per-chunk for streaming bodies, while awaiting unary bodies.
+    /// Owner ruling: a stall warns and keeps waiting — it never fails the
+    /// request.
     stall_warning: Duration,
 }
 
@@ -775,14 +777,16 @@ where
         self
     }
 
-    /// Set the maximum time a request may go without inbound data. Defaults to
-    /// 120 seconds — generous, because reasoning models can be quiet between
-    /// chunks, but finite.
+    /// Set how long a request may go without inbound data before a
+    /// warning is logged. Defaults to 120 seconds — generous, because
+    /// reasoning models and provider-side tool execution can be quiet
+    /// between chunks.
     ///
-    /// For streaming responses this is a per-chunk timeout: if no chunk
-    /// arrives within the window the stream fails with an error naming the
-    /// timeout. For regular (non-streaming) requests it bounds the overall
-    /// body read.
+    /// Owner ruling: a stall is warned about, never killed. For
+    /// streaming responses the warning fires per quiet window between
+    /// chunks; for regular (non-streaming) requests while awaiting the
+    /// body. The request keeps waiting either way — the only aborts
+    /// are the caller's cancellation and transport failures.
     pub fn stall_warning_every(mut self, interval: Duration) -> Self {
         self.transport.stall_warning = interval;
         self
@@ -860,6 +864,17 @@ where
             transport,
             ..
         } = self;
+
+        // reqwest sends no User-Agent unless one is configured, and
+        // nothing upstream sets one — some gateways require it, and the
+        // provider console's request attribution is blind without it.
+        // A default, not a mandate: a caller-set header wins.
+        if !headers.contains_key(http::header::USER_AGENT) {
+            headers.insert(
+                http::header::USER_AGENT,
+                HeaderValue::from_static(concat!("tabit/", env!("CARGO_PKG_VERSION"))),
+            );
+        }
 
         if let Some((k, v)) = api_key.into_header().transpose()?
             && !headers.contains_key(&k)
@@ -1536,6 +1551,34 @@ mod tests {
             assert_eq!(defaults.retry.max_server_delay, Duration::from_secs(60));
             assert_eq!(defaults.connect_timeout, Duration::from_secs(10));
             assert_eq!(defaults.stall_warning, Duration::from_secs(120));
+        }
+
+        #[test]
+        fn user_agent_defaults_to_tabit_version_and_a_caller_header_wins() {
+            let client = client_over(ScriptedTransport::new(vec![], vec![]));
+            assert_eq!(
+                client.headers().get(http::header::USER_AGENT),
+                Some(&HeaderValue::from_static(concat!(
+                    "tabit/",
+                    env!("CARGO_PKG_VERSION")
+                ))),
+                "reqwest sets no User-Agent of its own; the builder supplies the default"
+            );
+
+            let mut builder = Client::<TestExt, reqwest::Client>::builder().api_key("test-key");
+            builder.headers_mut().insert(
+                http::header::USER_AGENT,
+                HeaderValue::from_static("custom-agent/1.0"),
+            );
+            let custom = builder
+                .http_client(ScriptedTransport::new(vec![], vec![]))
+                .build()
+                .expect("client should build with a caller User-Agent");
+            assert_eq!(
+                custom.headers().get(http::header::USER_AGENT),
+                Some(&HeaderValue::from_static("custom-agent/1.0")),
+                "a caller-set User-Agent is never overwritten"
+            );
         }
 
         #[test]
